@@ -778,14 +778,15 @@ def _diameter_row_below(dwg, items, start: int = 0, trace=None, *, ctx) -> int:
         if ev is not None:
             ev["items"].extend(
                 {"label": f"ø{_fmt(d)}", "outcome": "dropped", "reason": "no_room_below"}
-                for _, d, _, _ in items
+                for _, d, _, _, _ in items
             )
         return 0
     specs = []  # (tip_page, dia, label, feature), tip on the step's bottom silhouette,
-    for anchor, dia, feat, dtol in items:  # centred along the feature's length (not a corner)
+    for anchor, dia, feat, dtol, thr in items:  # centred along the feature's length (not a corner)
         ax, ay, az = anchor
         tip = dwg.at("front", ax, ay, az - dia / 2)
-        specs.append((tip, dia, f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}", feat))
+        label = f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else "")  # #859
+        specs.append((tip, dia, label, feat))
     # Real measured width, not the per-char estimate: helpers >=0.14 label boxes are
     # honest about the rendered string, so an underestimated min_gap here surfaces as a
     # visible annotation_overlap between adjacent labels (hypothesis tier).
@@ -811,7 +812,7 @@ def _diameter_row_below(dwg, items, start: int = 0, trace=None, *, ctx) -> int:
     # when direction-aware label intervals actually collide, enforce elbow ≥ tip with
     # a left-to-right min_gap cascade; overflow drops the smallest ø (#298) and
     # re-solves. No-op for ordinary rows.
-    _SHELF = 2.0  # helpers Leader: the label hangs one shelf-length off the elbow
+    _SHELF = draft.pad_around_text  # helpers Leader shelf_len = gap = draft.pad_around_text
 
     def _label_ivals(svs, positions):
         out = []
@@ -882,24 +883,36 @@ def _diameter_column_left(dwg, items, start: int = 0, trace=None, *, ctx) -> int
     ev = trace.pass_event("diameter_column_left", view="front") if trace is not None else None
     draft = dwg.draft
     fx0, fy0, _, fy1 = dwg.view_bounds("front")
-    label_w = (
-        max(len(f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}") for _, dia, _, dtol in items)
-        * draft.font_size
-        * _EST_CHAR_WIDTH_EM
+    # Real measured width, not the per-char estimate (#859): a thread spec is arbitrary text,
+    # so `len * 0.62 em` can underestimate a wide label and let it cross the margin
+    # (annotation_out_of_bounds). Measure the completed label like the row-below path does.
+    label_w = max(
+        _text_size(
+            f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else ""),
+            draft.font_size,
+            getattr(draft, "font_path", DEFAULT_FONT_PATH),
+            getattr(draft, "font", "Arial"),
+        )[0]
+        for _, dia, _, dtol, thr in items
     )
     elbow_x = fx0 - (draft.font_size + 2 * draft.pad_around_text)
-    if elbow_x - label_w < _MARGIN:
+    # A left-directed leader hangs its label a shelf-length PAST the elbow, so the label's left
+    # edge sits at elbow_x - shelf - label_w; the guard must reserve the shelf or a near-boundary
+    # label overshoots the margin. The shelf is the helpers Leader's gap = draft.pad_around_text,
+    # not a fixed 2.0 (#859, Codex #862 r4/r5).
+    if elbow_x - draft.pad_around_text - label_w < _MARGIN:
         if ev is not None:
             ev["items"].extend(
                 {"label": f"ø{_fmt(d)}", "outcome": "dropped", "reason": "no_room_left"}
-                for _, d, _, _ in items
+                for _, d, _, _, _ in items
             )
         return 0
     specs = []  # (tip_page, dia, label, feature), tip on the step's left silhouette,
-    for anchor, dia, feat, dtol in items:  # centred along the feature's length (not a corner)
+    for anchor, dia, feat, dtol, thr in items:  # centred along the feature's length (not a corner)
         ax, ay, az = anchor
         tip = dwg.at("front", ax - dia / 2, ay, az)
-        specs.append((tip, dia, f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}", feat))
+        label = f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else "")  # #859
+        specs.append((tip, dia, label, feat))
     half_h = draft.font_size / 2 + draft.pad_around_text
     min_gap = 2 * half_h
     # Place what fits; drop the smallest ø first, never the whole column (#298).
@@ -1006,24 +1019,30 @@ def render_diameters(dwg, groups, tol: float = 0.15, *, ctx, only=None) -> int:
         if dpd is None:
             continue
         dia = dpd.param.value
-        if any(abs(dia - m) <= tol for m in mentioned):
+        # An EXTERNAL thread (#859) makes a distinct callout: a threaded ⌀6 ("ø6 M6x1") and a
+        # plain ⌀6 are NOT the same label, so the bucket keys on (⌀, thread) — this never drops a
+        # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
+        # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
+        # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
+        thr = getattr(g.feature, "thread", None)
+        # A coincident plain ⌀ already drawn (a bore, another step) dedups only an UNTHREADED ⌀;
+        # a threaded ⌀ is a distinct callout, so a bare ⌀8 mention must not suppress ø8 M8x1.25.
+        if thr is None and any(abs(dia - m) <= tol for m in mentioned):
             continue
         bucket = {"x": row_buckets, "z": col_buckets}.get(g.feature.frame.axis)
         if bucket is None:
             continue
-        dkey = round(dia, 2)
         dtol = dpd.param.tolerance
-        # entry = [anchor, dia, {features}, ± tolerance]. A callout is per (axis, ⌀); the
-        # first authored tolerance on a shared ⌀ wins (P2a — a single callout, one label).
-        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol])
+        dkey = (round(dia, 2), thr)
+        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr])
         entry[2].add(g.feature)
         if entry[3] is None:
             entry[3] = dtol
 
     def _items(buckets):
         return [
-            (_diameter_step_anchor(a, fs), d, next(iter(fs)) if len(fs) == 1 else None, t)
-            for a, d, fs, t in buckets.values()
+            (_diameter_step_anchor(a, fs), d, next(iter(fs)) if len(fs) == 1 else None, t, thr)
+            for a, d, fs, t, thr in buckets.values()
         ]
 
     # The placers name leaders m_dia_{x,z}{start+i} CONTIGUOUSLY from one start. The auto-pass
@@ -1737,8 +1756,11 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
             continue
         dia = dpd.param.value
         dtol = dpd.param.tolerance
-        if any(abs(dia - m) <= 0.15 for m in mentioned):
-            continue  # a coincident bore / step already carries this ø
+        thr = getattr(b, "thread", None)  # external thread appends to the OD callout (#859)
+        # A coincident plain ⌀ dedups only an UNTHREADED boss; a threaded ⌀ is a distinct callout,
+        # so a bare ⌀8 mention (a bore, a step) must not suppress ø8 M8x1.25 (#859).
+        if thr is None and any(abs(dia - m) <= 0.15 for m in mentioned):
+            continue
         view = view_of.get(b.frame.axis)
         if view is None:
             continue
@@ -1750,7 +1772,7 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
                 f"m_bossdia_{b.frame.axis}{bi}",
                 view,
                 vb,
-                f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}",
+                f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else ""),
                 # arrowhead on the boss circle's rim, not its centre
                 _radial_candidates(dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE),
             )
