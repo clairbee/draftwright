@@ -8867,6 +8867,54 @@ class TestTurnedDiameters:
                 part = part - Pos(x, y, 0) * Cylinder(2, 10)
         return part.rotate(Axis.X, 90)
 
+    @staticmethod
+    def _issue_890_cardinal_hole_flange():
+        """The same stepped stack with bolt holes on end-view cardinal rays."""
+        locations = ((18, 0), (-18, 0), (0, 18), (0, -18))
+        part = Cylinder(21, 4)
+        for x, y in locations:
+            part += Pos(x, y, 2) * Box(
+                10,
+                10,
+                4,
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+        part += Pos(0, 0, 2) * Cylinder(15.5, 12)
+        part += Pos(0, 0, 10) * Cylinder(12.5, 12)
+        part -= Cylinder(8, 30)
+        for x, y in locations:
+            part -= Pos(x, y, 0) * Cylinder(2, 10)
+        return part.rotate(Axis.X, 90)
+
+    @staticmethod
+    def _assert_y_diameter_leaders_clear_holes(dwg):
+        circles = []
+        for feature in dwg.model().features:
+            if feature.frame.axis != "y":
+                continue
+            if feature.kind == "hole":
+                diameter = feature.diameter
+                locations = feature.members or (feature.frame.origin,)
+            elif feature.kind == "pattern":
+                diameter = feature.member.diameter
+                locations = feature.members or (feature.frame.origin,)
+            else:
+                continue
+            for location in locations:
+                x, y, *_ = dwg.at("front", *location)
+                circles.append((x, y, diameter / 2 * dwg.scale))
+
+        for name in (n for n in dwg.annotations() if n.startswith("m_dia_y")):
+            ann = dwg.get_annotation(name)
+            ax, ay = ann.tip[:2]
+            bx, by = ann.elbow[:2]
+            vx, vy = bx - ax, by - ay
+            length2 = vx * vx + vy * vy
+            for cx, cy, radius in circles:
+                t = max(0.0, min(1.0, ((cx - ax) * vx + (cy - ay) * vy) / length2))
+                distance = math.hypot(cx - (ax + t * vx), cy - (ay + t * vy))
+                assert distance > radius
+
     def test_issue_881_y_axis_steps_render_without_half_envelope_locations(self):
         dwg = build_drawing(self._issue_881_y_step_flange())
 
@@ -8877,6 +8925,19 @@ class TestTurnedDiameters:
             dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_dia_y")
         }
         assert y_diameters == {"ø25", "ø31", "ø42"}
+        # #890: each queued radial leader retains its own StepFeature provenance;
+        # a lazy generator previously captured the final loop iteration's owner.
+        steps_by_diameter = {}
+        for step in steps:
+            steps_by_diameter.setdefault(step.diameter, []).append(step)
+        for name in (n for n in dwg.annotations() if n.startswith("m_dia_y")):
+            ann = dwg.get_annotation(name)
+            owner = dwg.registry.feature_of(name)
+            diameter = float(ann.label.removeprefix("ø"))
+            matches = steps_by_diameter[diameter]
+            assert owner is (matches[0] if len(matches) == 1 else None)
+
+        self._assert_y_diameter_leaders_clear_holes(dwg)
         assert {
             dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_steplen")
         } >= {"8", "4", "2"}
@@ -8899,6 +8960,11 @@ class TestTurnedDiameters:
             if name.startswith("m_steplen"):
                 dwg.remove(name)
         assert "axial_length_missing" in {issue.code for issue in dwg.lint()}
+
+    def test_issue_890_rotated_bolt_pattern_selects_clear_diameter_rays(self):
+        self._assert_y_diameter_leaders_clear_holes(
+            build_drawing(self._issue_890_cardinal_hole_flange())
+        )
 
     def test_issue_881_y_axis_steps_replay_through_deferred_intents(self):
         dwg = build_drawing(self._issue_881_y_step_flange(), auto_dims=False)

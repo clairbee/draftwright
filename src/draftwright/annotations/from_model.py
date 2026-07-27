@@ -1152,12 +1152,31 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
         vb = dwg.view_bounds("front")
         if vb is not None:
             reach = dwg.draft.font_size + 6 * dwg.draft.pad_around_text
+            hole_circles = []
+            for g in groups:
+                feature = g.feature
+                if feature.frame.axis != "y":
+                    continue
+                if feature.kind == "hole":
+                    diameter = feature.diameter
+                    locations = feature.members or (feature.frame.origin,)
+                elif feature.kind == "pattern":
+                    diameter = feature.member.diameter
+                    locations = feature.members or (feature.frame.origin,)
+                else:
+                    continue
+                for location in locations:
+                    px, py, *_ = dwg.at("front", *location)
+                    hole_circles.append((px, py, diameter / 2 * a.SCALE))
             jobs = []
             covered_by_name = {}
             for i, (_anchor, dia, features, dtol, thr) in enumerate(end_buckets.values()):
                 representative = next(iter(features))
                 owner = representative if len(features) == 1 else None
-                candidates = (
+                # Materialise now: a generator expression would close over ``owner``
+                # and all jobs would read the final loop iteration's feature when
+                # _leader_callout_pass consumes them (#890).
+                candidates = [
                     (tip, elbow, owner)
                     for tip, elbow, _feature in _radial_candidates(
                         dwg,
@@ -1167,6 +1186,10 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
                         reach,
                         rim=dia / 2 * a.SCALE,
                     )
+                ]
+                candidates.sort(
+                    key=lambda candidate: _leader_hole_clearance(candidate, hole_circles),
+                    reverse=True,
                 )
                 label = f"ø{_fmt(dia)}{_tol_suffix(dtol, dwg.draft)}"
                 if thr:
@@ -1707,23 +1730,53 @@ _POCKET_LEAD_DIRS = (
 )
 
 
-def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0):
+def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0, directions=_POCKET_LEAD_DIRS):
     """Lead candidates for a mid-face feature (pocket/groove/boss ø): from the feature's
-    projected origin, one candidate per :data:`_POCKET_LEAD_DIRS` direction — exit the
-    silhouette along it (:func:`_ray_exit_dist`) then *reach* on into the margin, so even
-    a centre-of-view feature clears the part. A non-zero *rim* (page units) advances the
-    arrow tip that far along the lead direction, so a boss ø leader's arrowhead lands on
-    the boss circle rather than its centre (#629/#700). Yields ``(tip, elbow, feature)``
-    (same feature each time; nearest-clear wins in the pass)."""
+    projected origin, one candidate per *directions* entry (pocket-style diagonals
+    first by default) — exit the silhouette along it (:func:`_ray_exit_dist`) then
+    *reach* on into the margin, so even a centre-of-view feature clears the part. A
+    non-zero *rim* (page units) advances the arrow tip that far along the lead
+    direction, so a boss ø leader's arrowhead lands on the boss circle rather than
+    its centre (#629/#700). Yields ``(tip, elbow, feature)`` (same feature each
+    time; nearest-clear wins in the pass)."""
     x0, y0, x1, y1 = vb
     origin = dwg.at(view, *feature.frame.origin)
-    for dx, dy in _POCKET_LEAD_DIRS:
+    for dx, dy in directions:
         d = math.hypot(dx, dy)
         ux, uy = dx / d, dy / d
         tip = (origin[0] + ux * rim, origin[1] + uy * rim)
         exit_d = _ray_exit_dist(tip[0], tip[1], ux, uy, (x0, y0, x1, y1))
         elbow = (tip[0] + ux * (exit_d + reach), tip[1] + uy * (exit_d + reach), 0)
         yield (tip, elbow, feature)
+
+
+def _leader_hole_clearance(
+    candidate: tuple[tuple[float, float], tuple[float, float, float], Any],
+    circles: list[tuple[float, float, float]],
+) -> float:
+    """Minimum page-space clearance from a leader shaft to projected hole circles.
+
+    Ranking by the complete tip→elbow segment (not just the arrow tip) prevents a
+    mathematically correct diameter-rim target from visually identifying a bolt
+    hole farther along the same ray. With no holes every direction ties and retains
+    the established candidate order.
+    """
+    if not circles:
+        return math.inf
+    tip, elbow, _feature = candidate
+    ax, ay = tip[0], tip[1]
+    bx, by = elbow[0], elbow[1]
+    vx, vy = bx - ax, by - ay
+    length2 = vx * vx + vy * vy
+    clearances = []
+    for cx, cy, radius in circles:
+        if length2:
+            t = max(0.0, min(1.0, ((cx - ax) * vx + (cy - ay) * vy) / length2))
+        else:
+            t = 0.0
+        nearest_x, nearest_y = ax + t * vx, ay + t * vy
+        clearances.append(math.hypot(cx - nearest_x, cy - nearest_y) - radius)
+    return min(clearances)
 
 
 def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
