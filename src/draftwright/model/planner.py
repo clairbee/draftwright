@@ -28,9 +28,12 @@ from draftwright.model.ir import (
     DimParameter,
     Feature,
     HoleFeature,
+    PadFeature,
     ParameterId,
     PartModel,
     PatternFeature,
+    PocketFeature,
+    PocketPatternFeature,
     Point,
 )
 
@@ -68,6 +71,8 @@ _CONVENTION = {
     # again the table default, entered explicitly per the #744 review rule above.
     ("slot_width", "length"): "linear",
     ("slot_length", "length"): "linear",
+    ("pad_width", "length"): "linear",
+    ("pad_length", "length"): "linear",
 }
 
 
@@ -283,7 +288,11 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     # record provenance on the placed location dim (ADR 0010).
     refs: list[tuple[Point, str, Feature]] = []
     for f in model.features:
-        if f.frame.axis != "z":
+        # The established hole/pattern/pad ladder is Z-normal.  A pocket is
+        # different: its two coordinates belong in the view normal to its opening,
+        # so preserve its datum→centre intent for every principal orientation and
+        # let the renderer choose the corresponding end-on axes.
+        if f.frame.axis != "z" and not isinstance(f, PocketFeature):
             continue
         if isinstance(f, HoleFeature):
             # un-patterned holes — a HoleFeature may group identical holes
@@ -295,6 +304,19 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
             elif f.members:
                 near = min(f.members, key=lambda m: (m[0] - dx) ** 2 + (m[1] - dy) ** 2)
                 refs.append((near, "location_pattern", f))
+        elif isinstance(f, PocketFeature):
+            # A recognised pocket frame may be anchored at an opening corner;
+            # location furniture defines the in-plane centre, which is expressed
+            # explicitly by lo/hi and w_center for every principal orientation.
+            centre = list(f.frame.origin)
+            centre["xyz".index(f.long_axis)] = (f.lo + f.hi) / 2
+            centre["xyz".index(f.width_axis)] = f.w_center
+            ref = (centre[0], centre[1], centre[2])
+            refs.append((ref, "location_pocket", f))
+        elif isinstance(f, PocketPatternFeature):
+            refs.append((f.frame.origin, "location_pocket_pattern", f))
+        elif isinstance(f, PadFeature):
+            refs.append((f.frame.origin, "location_pad", f))
     unique: list[tuple[Point, str, Feature]] = []
     for r, role, feat in refs:
         if not any(abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5 for u, _, _ in unique):

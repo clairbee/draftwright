@@ -196,13 +196,15 @@ def _record_slot_drop(ctx, dwg, kind, idx, view, feat):
     no natural grouping remedy like a recognised hole pattern, so no resolver
     consumes this yet — purely additive.
     """
+    feature_kind = getattr(feat, "kind", None)
+    noun = feature_kind if feature_kind in ("pad", "pocket") else "slot"
     ctx.record_issue(
         "info",
-        "slot_dim_dropped",
-        f"slot{idx} {kind} dim not placed (no room beside the {view})",
+        f"{noun}_dim_dropped",
+        f"{noun}{idx} {kind} dim not placed (no room beside the {view})",
     )
     ctx.escalations.append(
-        Escalation(kind="slot", view=view, feature=feat, reason=f"no room beside the {view}")
+        Escalation(kind=noun, view=view, feature=feat, reason=f"no room beside the {view}")
     )
 
 
@@ -233,9 +235,17 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
     (the ``m_slot{i}_*`` names must match the auto-pass — never re-enumerate a compacted
     list; `plan_dimensions` emits one group per slot in model order, so enumerating the
     slot groups preserves that index)."""
-    slot_groups = [g for g in groups if g.feature_kind == "slot"]
+    slot_groups = [g for g in groups if g.feature_kind in ("slot", "pad", "pocket")]
     if not slot_groups:
         return 0
+    # Pocket location geometry is rendered in this in-plane pass, but its intent
+    # remains planner-authoritative (ADR 0015): datum and target come from the same
+    # PlannedDimension consumed by render_locations, including non-Z openings.
+    pocket_locations = {
+        pd.feature: pd
+        for pd in plan_locations(dwg.model())
+        if pd.param.role == "location_pocket" and pd.param.span is not None
+    }
     draft = dwg.draft
     tier = draft.font_size + 2 * draft.pad_around_text
     views = {
@@ -248,8 +258,11 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
         return getattr(a.bb.max if hi else a.bb.min, axis.upper())
 
     count = 0
-    for i, g in enumerate(slot_groups):
+    kind_indices: dict[str, int] = {}
+    for g in slot_groups:
         s = g.feature
+        i = kind_indices.get(s.kind, 0)
+        kind_indices[s.kind] = i + 1
         if only is not None and s not in only:
             continue  # #426 Ph2b: skip in place — i must stay the model index
         view = views[frozenset((s.width_axis, s.long_axis))]
@@ -295,7 +308,8 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             else:
                 meas_proj, perp_proj = vp, hp
                 sides = (("right", zn.right, True), ("left", zn.left, False))
-            cname = f"m_slot{idx}_{kind}"
+            prefix = s.kind if s.kind in ("pad", "pocket") else "slot"
+            cname = f"m_{prefix}{idx}_{kind}"
 
             def _cand_for(side, hi):
                 # (name, build) for one side; witness is off the slot's own edge (the near
@@ -320,7 +334,7 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             # on_drop falls through to the below strip (place-what-fits) before recording a
             # genuine drop; a *deduped* position fires no drop (it was never starved).
             if meas_axis == ha and vw[0] in ("plan", "side"):
-                is_pos = kind == "pos"
+                is_pos = kind.startswith("pos")
                 drop_word = "position" if is_pos else kind
                 _, below_strip, below_hi = sides[1]
 
@@ -394,8 +408,9 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
 
         # Bind each planned dim explicitly by (role, kind) — never positionally (#730).
         by_key = {(pd.param.role, pd.param.kind): pd for pd in g.dims}
-        wpd = by_key.get(("slot_width", "length"))
-        lpd = by_key.get(("slot_length", "length"))
+        role_prefix = s.kind if s.kind in ("pad", "slot") else ""
+        wpd = by_key.get((f"{role_prefix}_width", "length"))
+        lpd = by_key.get((f"{role_prefix}_length", "length"))
         half = s.width / 2
         if wpd is not None and not wpd.suppressed:
             if _place(
@@ -426,7 +441,9 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             else:
                 _record_slot_drop(ctx, dwg, "length", i, name, s)
         datum = _bb(s.long_axis, False)
-        if (s.lo - datum) * a.SCALE >= 1.0:
+        # Pads are located by plan_locations on both axes; slots retain their
+        # historical single-axis position dimension here.
+        if s.kind == "slot" and (s.lo - datum) * a.SCALE >= 1.0:
             if _place(
                 s.long_axis,
                 datum,
@@ -440,6 +457,49 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
                 count += 1
             else:
                 _record_slot_drop(ctx, dwg, "position", i, name, s)
+        elif s.kind == "pocket" and s.frame.axis != "z" and s in pocket_locations:
+            # Side-/front-opening pockets need two in-plane coordinates in their
+            # end-on view.  The planner supplies the datum→centre span; Z-opening
+            # pockets use render_locations' X(plan)/Y(side) ladder.
+            location = pocket_locations[s]
+            span = location.param.span
+            assert span is not None  # pocket_locations only contains planned spans
+            datum_point, target_point = span
+            axis_index = {axis: i for i, axis in enumerate("xyz")}
+            width_lo, width_hi = s.w_center - half, s.w_center + half
+            for axis, start, end, perp_lo, perp_hi, kind in (
+                (
+                    s.long_axis,
+                    datum_point[axis_index[s.long_axis]],
+                    target_point[axis_index[s.long_axis]],
+                    width_lo,
+                    width_hi,
+                    "pos_long",
+                ),
+                (
+                    s.width_axis,
+                    datum_point[axis_index[s.width_axis]],
+                    target_point[axis_index[s.width_axis]],
+                    s.lo,
+                    s.hi,
+                    "pos_width",
+                ),
+            ):
+                if abs(end - start) * a.SCALE < 1.0:
+                    continue
+                if _place(
+                    axis,
+                    start,
+                    end,
+                    perp_lo,
+                    perp_hi,
+                    end - start,
+                    kind,
+                    anchor="lo",
+                ):
+                    count += 1
+                else:
+                    _record_slot_drop(ctx, dwg, "position", i, name, s)
     return count
 
 
@@ -477,7 +537,8 @@ def _location_candidate(
     it; only a physically full strip drops (``location_ref_dropped`` → hole-table escalate)."""
 
     def _placed(nm):
-        ctx.coverage.cover_scattered_hole_doc(nm)
+        if getattr(feature, "kind", None) in ("hole", "pattern"):
+            ctx.coverage.cover_scattered_hole_doc(nm)
         if pinned:
             dwg.pin(nm)
 
@@ -530,6 +591,11 @@ def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
     refs = []
     for pd in planned:
         if only is not None and pd.feature not in only:  # #426: recorded subset only
+            continue
+        # This ladder is specifically plan-X / side-Y for Z-normal features.
+        # Non-Z pockets are still planner-backed, but their two in-plane spans
+        # are rendered in their end-on view by render_slots.
+        if pd.feature is None or pd.feature.frame.axis != "z":
             continue
         if pd.param.span is None:
             continue
