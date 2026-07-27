@@ -150,6 +150,31 @@ class AddressableDimension:
     members: tuple[PlannedDimension, ...]
 
 
+@dataclass(frozen=True)
+class DimensionId:
+    """The identity of one addressable dimension: **which feature**, and **which of its
+    measurements** (ADR 0016).
+
+    `(feature, role)` is how a caller *addresses* a dimension; this is the key underneath
+    it — `parameter` is an `AddressableDimension`'s `ParameterId`, which already carries
+    the `kind` and any discriminator the role alone cannot supply.
+
+    `feature` is the IR feature itself, compared **structurally** — the frozen-dataclass
+    equality every `Feature` already has. Not `is`: re-running a script builds new feature
+    objects, so an identity that resolved only against the original instance would break on
+    every re-plan, destroying the stability the whole identity model exists for. Structural
+    equality also keeps the law dedup depends on — *equal ids are interchangeable in
+    lookup* — which `is`-based lookup silently violated, since two structurally identical
+    features yield `==` (and hash-colliding) ids.
+
+    A *durable* `FeatureId` is only needed where an intent must survive re-**detection**
+    (where the feature values themselves may shift), and ADR 0016 deliberately leaves that
+    open — so this type reads "whatever identifies a feature" rather than minting one."""
+
+    feature: Feature
+    parameter: ParameterId
+
+
 def _addressable(feature: Feature, planned: list[PlannedDimension]):
     """Group planned dimensions into addressable units — by **declaration**
     (`CORRELATED_SETS`), never by two ids happening to collide."""
@@ -192,6 +217,22 @@ class DimensionGroup:
     def dims(self) -> tuple[PlannedDimension, ...]:
         """Every planned dimension in the group, ignoring identity grouping."""
         return tuple(m for u in self.units for m in u.members)
+
+    @property
+    def dimension_ids(self) -> tuple[DimensionId, ...]:
+        """This group's addressable dimensions, by identity — one per unit, so an
+        N-member correlated set yields **one** id (ADR 0016)."""
+        return tuple(DimensionId(self.feature, u.id) for u in self.units)
+
+    def unit_for(self, dim_id: DimensionId) -> AddressableDimension | None:
+        """The addressable dimension *dim_id* names, or `None` if it names another
+        feature or a measurement this group does not carry.
+
+        Structural comparison, deliberately — see `DimensionId`. Using `is` here made
+        equal ids non-interchangeable in lookup, and broke resolution across re-planning."""
+        if dim_id.feature != self.feature:
+            return None
+        return next((u for u in self.units if u.id == dim_id.parameter), None)
 
     @property
     def feature_kind(self) -> str:

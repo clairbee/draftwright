@@ -130,7 +130,10 @@ the design keys on:
 - it carries the `DimensionId` defined in the next section — the identity used for
   suppression, for the planner input, and for matching an emitted line back to its intent;
 - it is the ADR 0010 provenance anchor: intent → the annotation names the render seam
-  produced, so `drop` / `annotations_of` resolve through it;
+  produced, so `drop` / `annotations_of` resolve through it. **Not yet wired (#886):**
+  the seam records `name → one feature`, while a compound callout is one annotation
+  rendering N addressable dimensions — so the channel has to become
+  `name → tuple[DimensionId, ...]` before per-dimension resolution is possible at all;
 - it is *not* a placement handle. It exposes no coordinate, no strip, and no view
   assignment beyond the derived-with-override `view=` / `side=` arguments.
 
@@ -196,7 +199,9 @@ class DimensionGroup:                      # existing type, one field added
 
 @dataclass(frozen=True)
 class DimensionId:
-    feature: FeatureId
+    feature: Feature       # the IR feature, compared STRUCTURALLY (#871) — not a
+                           # minted FeatureId, and not `is`: a re-plan builds new
+                           # objects, so identity must survive reconstruction
     parameter: ParameterId                 # the AddressableDimension's id
 ```
 
@@ -303,11 +308,13 @@ This makes the "not every dimension is nameable" edge below a *bounded* gap rath
 open one: inter-feature spans are nameable, just not as `(feature, role)`.
 
 **Feature identity is a separate sub-problem this ADR does not solve.** There is no
-`FeatureId` in the IR today — the plan carries features by object (`DimensionGroup.feature`)
-— and within one script run that is sufficient: the script holds the variable, so
-`sheet.dimension(bore, "diameter")` resolves by object identity with no key at all. A
-*durable* `FeatureId` is only needed where an intent must survive re-detection, which is the
-`of(...)` question left open below. So `FeatureId` above reads as "whatever identifies a
+`FeatureId` in the IR today — the plan carries the feature itself (`DimensionGroup.feature`),
+and the **structural** equality every frozen-dataclass `Feature` already has is sufficient:
+`sheet.dimension(bore, "diameter")` resolves with no minted key at all, and — because it is
+structural rather than `is` — an id still resolves after a re-plan rebuilds the feature
+objects (#871). A *durable* `FeatureId` is only needed where an intent must survive
+re-**detection**, where the feature's own values may shift; that is the `of(...)` question
+left open below. So `FeatureId` elsewhere in this ADR reads as "whatever identifies a
 feature", not as a new type this decision mints.
 
 **The governing principle**, which is what keeps this stable as the planner evolves:
@@ -573,10 +580,11 @@ absence both mean something exact** — which is all suppression-by-omission nee
 ### Constraints this forces (the honest edges)
 
 - **Auto dimensions must be semantically nameable.** Suppression and override require a
-  stable identity for "the location dimension of hole H" that survives a re-solve at a
+  stable identity for "the bore diameter of hole H" that survives a re-solve at a
   different scale. That identity is the `DimensionId` above, not a page-keyed annotation
-  name — this leans on ADR 0010 provenance and on the ADR 0015 planner keeping parameter
-  roles stable. Both intents need the key — `add_dimension` for its handle and for
+  name — it leans on the ADR 0015 planner keeping parameter roles stable, and on ADR 0010
+  provenance growing an N-ids channel (#886) before an id can resolve to the annotations
+  it produced. (*Location* dims are not nameable at all yet — #883.) Both intents need the key — `add_dimension` for its handle and for
   idempotence against the plan — but **suppressive intent additionally needs that identity
   to be stable across re-detection and recomposition**, which is why identity lands *with*
   the augmenting verb while suppression waits for the set boundary.
@@ -823,9 +831,10 @@ second with the single-source-of-truth of the first — over the identified set,
 
 1. **Semantic identity, then augmenting intent — one phase.** Land the addressable-dimension
    model first: `AddressableDimension` / `DimensionId` / `ParameterId` (derived keys, the
-   `axis=` discriminator, correlated sets as one identity with N members), exposed as a
-   handle on planned dimensions (ADR 0010 provenance + ADR 0015 roles) so intent can
-   *reference* an auto dimension. Then `add_dimension(...)` on top of it: a
+   `axis=` discriminator, correlated sets as one identity with N members), derivable from
+   the plan (ADR 0015 roles) so intent can *reference* an auto dimension. Per-dimension
+   ADR 0010 provenance is **split out to #886** — it needs an N-ids channel, since one
+   compound callout renders several addressable dimensions. Then `add_dimension(...)` on top of it: a
    scale-independent augmenting measurement recorded on the model and entered as a
    `CorridorCandidate` alongside the planner's set; reachable on today's solve. Reuses /
    narrows `authored_dimension` so intent and materialized-PMI stay distinct.

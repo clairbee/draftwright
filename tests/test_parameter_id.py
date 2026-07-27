@@ -28,7 +28,7 @@ import pytest
 from build123d import Box, Cylinder, Pos
 
 import draftwright.model.ir as ir
-from draftwright.model import DimParameter, PartModel, build_part_model
+from draftwright.model import DimensionId, DimParameter, PartModel, build_part_model
 from draftwright.model.planner import (
     CORRELATED_SETS,
     PlannedDimension,
@@ -328,6 +328,81 @@ class TestUniquenessAudit:
         heights = [p for p in ladder if p.role == "step_height"]
         assert len(heights) == 3
         assert len({p.parameter_id for p in heights}) == 1
+
+
+class TestDimensionId:
+    """`DimensionId(feature, parameter)` — the key suppression, dedup and the emitter
+    mirror address (#871). A `ParameterId` alone is not enough: two holes on one part
+    both carry `bore.diameter`, so identity is *which feature* plus *which measurement*."""
+
+    def test_one_id_per_addressable_unit(self):
+        (group,) = _plan(_SAMPLES["HoleFeature"])
+        assert [d.parameter for d in group.dimension_ids] == [u.id for u in group.units]
+
+    def test_a_correlated_set_yields_one_id_not_n(self):
+        """The ladder is one addressable dimension, so it has one identity — the whole
+        reason `units` exists rather than keying raw parameters."""
+        (group,) = _plan(_SAMPLES["StepLevelFeature"])
+        ladder = [d for d in group.dimension_ids if d.parameter == "step_height.length"]
+        assert len(ladder) == 1
+        assert len(group.unit_for(ladder[0]).members) == 3
+
+    def test_unit_for_round_trips_every_id(self):
+        for name in ("HoleFeature", "PatternFeature", "RotationalFeature"):
+            for group in _plan(_SAMPLES[name]):
+                for dim_id in group.dimension_ids:
+                    assert group.unit_for(dim_id).id == dim_id.parameter
+
+    def test_the_same_parameter_id_on_two_features_is_two_identities(self):
+        """Why the feature is in the key at all. Both holes measure `bore.diameter`;
+        an intent aimed at one must not resolve against the other."""
+        a = ir.HoleFeature(ir.Frame((-20.0, 0.0, 0.0), "z"), 5.0, depth=None, through=True)
+        b = ir.HoleFeature(ir.Frame((20.0, 0.0, 0.0), "z"), 9.0, depth=None, through=True)
+        ga, gb = plan_dimensions(PartModel(bbox=_BBOX, orientation="prismatic", features=[a, b]))
+        (ida,), (idb,) = ga.dimension_ids, gb.dimension_ids
+        assert ida.parameter == idb.parameter == "bore.diameter"
+        assert ida != idb
+        assert ga.unit_for(idb) is None and gb.unit_for(ida) is None
+
+    def test_an_unknown_measurement_resolves_to_none(self):
+        (group,) = _plan(_SAMPLES["HoleFeature"])
+        assert group.unit_for(DimensionId(group.feature, "nope.length")) is None
+
+    def test_ids_are_stable_across_replanning(self):
+        """An id written into a script must still name the same thing next run."""
+        feat = _SAMPLES["HoleFeature"]
+        first = [(d.feature, d.parameter) for g in _plan(feat) for d in g.dimension_ids]
+        second = [(d.feature, d.parameter) for g in _plan(feat) for d in g.dimension_ids]
+        assert first == second
+
+    def test_equal_ids_are_interchangeable_in_lookup(self):
+        """The identity law dedup rests on. `DimensionId` is a frozen dataclass, so two
+        *structurally identical* features give `==`, hash-colliding ids — while an
+        `is`-based lookup rejected each other's id. Equal ids that do not resolve alike
+        are a broken key: a dict would treat them as one entry and the lookup as two.
+
+        The earlier two-hole test could not catch this — its holes differ in position
+        and diameter, so their ids were never equal in the first place.
+        """
+        a = ir.HoleFeature(_F, 8.0, depth=None, through=True)
+        b = ir.HoleFeature(_F, 8.0, depth=None, through=True)
+        assert a is not b and a == b
+
+        (ga,) = _plan(a)
+        id_a, id_b = DimensionId(a, "bore.diameter"), DimensionId(b, "bore.diameter")
+        assert id_a == id_b and len({id_a, id_b}) == 1
+        assert ga.unit_for(id_a) is not None
+        assert ga.unit_for(id_b) is not None  # the law: equal id, same result
+
+    def test_an_id_resolves_against_a_rebuilt_feature(self):
+        """Why lookup is structural rather than `is`: re-running a script constructs new
+        feature objects. An identity that only resolved against the original instance
+        would break on every re-plan — the opposite of the stability ids exist for."""
+        original = ir.HoleFeature(_F, 8.0, depth=None, through=True)
+        dim_id = DimensionId(original, "bore.diameter")
+        rebuilt = ir.HoleFeature(_F, 8.0, depth=None, through=True)  # a fresh run
+        (group,) = _plan(rebuilt)
+        assert group.unit_for(dim_id) is not None
 
 
 class TestStability:
