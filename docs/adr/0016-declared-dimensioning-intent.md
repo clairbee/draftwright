@@ -1,14 +1,25 @@
 # ADR 0016 — Declared dimensioning intent: capture what to measure, let the engine place it
 
-- **Status:** Proposed
-- **Date:** 2026-07-26
+- **Status:** Accepted
+- **Date:** 2026-07-26 (accepted 2026-07-27; implementation epic **#867**)
 - **Deciders:** Paul Fremantle (pzfreo)
 
-> **Scheduling reality.** Only phase 1 (identity + `add_dimension`) is reachable on
-> today's machinery. Phases 2–4 — suppression, honest reconciliation, and the emitter's
-> dimension mirror — sit behind the global recompose (#426/#707), the longest-open
-> item on the roadmap. Accepting this ADR is therefore also a decision to schedule
-> that recompose; it is the prerequisite, not an adjacent nicety.
+> **Scheduling reality (corrected 2026-07-27).** Phase 1 (identity + `add_dimension`)
+> is reachable on today's machinery. Phases 2–4 were written as sitting behind "the
+> global recompose (#426/#707), the longest-open item on the roadmap" — **that premise
+> was stale when this ADR merged.** #426 and #661 closed 2026-07-19, #707 on 07-21, all
+> as completed; there is no open recompose issue.
+>
+> Closed-as-umbrella is not the same as capability-landed, so the blocker is now an
+> open question rather than a stated fact (#867): #426's closing comment says the parity
+> work "remains observably incomplete", the #743 parity suite is skipped with strict
+> xfails underneath, and `drain_and_reconcile` solves registered corridors and reconciles
+> witness labels without reconstructing the automatic candidate population. There is also
+> a cheaper question inside it — **suppression by omission in a `Sheet` script happens
+> before `build()`**, when the set is known at plan time, so it may need no recompose at
+> all; only `Drawing.finalize()` dropping an *automatic* dimension does. Phase 2 may
+> therefore be substantially less blocked than this ADR assumed. The constraint below is
+> flagged in step.
 
 ## Context
 
@@ -149,10 +160,11 @@ same-role collision, and they are not the same problem:
    a whole … a single `role=` intent rebuilds the whole ladder."* Here the addressable unit
    **is** the set, so the role already is the whole identity — and minting per-member keys
    would be actively wrong, because the grouped-drop edge below says commenting one member
-   still redraws the group. *Provisional for one case:* `Rotational`'s OD/bore group is the
-   residual planner-coverage debt ADR 0015 tracks as **#754**, so whether its bores stay one
-   identity or split into addressable members is settled by that migration, not here. The
-   ladders are definite.
+   still redraws the group. *Provisional for one case:* `Rotational`'s OD/bore group was
+   the residual planner-coverage debt ADR 0015 tracked as **#754** — now closed
+   (2026-07-22), so rotational diameters route through planner output and whether its
+   bores stay one identity or split into addressable members is settled when the
+   addressable units are built (#870), not here. The ladders are definite.
 
 So identity is per **addressable dimension**, which is a planner-level notion, not a raw
 `DimParameter` count. That unit has to be **first-class in the model, not inferred from key
@@ -531,15 +543,24 @@ absence both mean something exact** — which is all suppression-by-omission nee
   idempotence against the plan — but **suppressive intent additionally needs that identity
   to be stable across re-detection and recomposition**, which is why identity lands *with*
   the augmenting verb while suppression waits for the set boundary.
-- **Honest reconciliation needs the full recompose (#426/#707).** Suppressing or
-  re-emphasizing an *automatic* dimension means the finalize path must reconstruct the
-  automatic candidate population and co-solve it with the declared intents — the global
-  recompose ADR 0012 Amendment 1 records as still open. Until it lands, `Drawing.finalize()`
+- **Honest reconciliation needs the full recompose** *(status open — see the corrected
+  scheduling note above; #426/#707 are closed but the capability is unverified)*.
+  Suppressing or re-emphasizing an *automatic* dimension means the finalize path must
+  reconstruct the automatic candidate population and co-solve it with the declared
+  intents — the global recompose ADR 0012 Amendment 1 records as still open. Note this
+  applies to the **post-build** `Drawing.finalize()` path; a `Sheet` script's authored
+  set is known before the solve. Until it lands, `Drawing.finalize()`
   drains *recorded* intents against already-committed annotations as obstacles; it does not
   reconcile against the auto-plan. So **augmenting intent (`add_dimension`) is reachable on
-  today's machinery — it is simply a new candidate; suppressive / full-mirror intent
-  depends on #426/#707.** This ADR therefore *motivates* completing that recompose rather
-  than routing around it.
+  today's machinery — it is simply a new candidate. Suppression splits into two paths that
+  this ADR previously conflated:**
+  - **pre-build**, a `Sheet` script's authored set — known before the solve, so it plausibly
+    needs no reconstruction at all, and phase 2 can carry it;
+  - **post-build**, `Drawing.finalize()` dropping an *automatic* dimension — this is what
+    needs the candidate-population reconstruction.
+
+  The second is the open question on **#867**, not a dependency on the closed #426/#707.
+  This ADR therefore *motivates* settling that question rather than routing around it.
 - **Intent stays declarative and order-independent.** Two intents competing for one span
   dedup like coincident auto candidates; ties break by deterministic key (ADR 0001). An
   infeasible intent (off page) drops with lint like any candidate — declaring a dimension
@@ -718,11 +739,12 @@ second with the single-source-of-truth of the first — over the identified set,
   target shape.
 - `plan_dimensions` (ADR 0015) grows an intent input: declared augmenting measurements join
   the planned `DimensionGroup`s; declared suppressions mark members suppressed rather than
-  removing them; an authored set replaces them. The corridor solve (ADR 0014) is unchanged — it still receives one candidate
-  population per strip.
+  removing them; an authored set replaces them. The corridor solve (ADR 0014) is unchanged —
+  it still receives one candidate population per strip.
 - `intents.py` (ADR 0012) is the recording home; `Drawing.finalize()` /
-  `_PASS_SEQUENCE` the drain. Augmenting intent lands there first; suppression follows the
-  #426/#707 recompose.
+  `_PASS_SEQUENCE` the drain. Augmenting intent lands there first; **pre-build** authored-set
+  suppression lands with the set boundary, while **post-build** suppression of an automatic
+  dimension waits on the reconstruction question (#867) — not on the closed #426/#707.
 - `sheet_emit` gains a dimension-mirroring pass: after the feature basis, one referential
   `dimension(...)` line per **planned** dimension, led by the explicit dimension-source call
   — each commentable and editable, none restating a number, with low-level furniture still
@@ -778,9 +800,10 @@ second with the single-source-of-truth of the first — over the identified set,
    `suppressed`, and head-without-dependents raises. No separate verb. This step carries the
    breaking change and should ship with the `measured_dimension` rename so callers migrate
    once.
-3. **Full recompose (#426/#707).** Reconstruct the automatic population at finalize and
-   co-solve with declared dimensions, making suppression / emphasis honest and
-   script/direct output convergent.
+3. **Full recompose** *(scope open — #867; the old #426/#707 references are closed)*.
+   Reconstruct the automatic population at finalize and co-solve with declared dimensions,
+   making **post-build** suppression / emphasis honest and script/direct output convergent.
+   How much of this remains to do is the question #867 settles.
 4. **Emitter dimension-mirror.** Emit one round-trippable referential `dimension(...)` line
    per **planned dimension intent** — never per *placed* dimension, which would let solver
    pressure rewrite version-controlled source (see "The script records intent"). The
