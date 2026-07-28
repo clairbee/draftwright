@@ -80,6 +80,7 @@ from draftwright.model.declare import (
 )
 from draftwright.model.declare import read_bore_step as _read_bore_step
 from draftwright.model.declare import read_countersink as _read_countersink
+from draftwright.model.ir import RequestedDimension
 
 
 def _parse_datums(to) -> tuple[str, ...]:
@@ -125,6 +126,11 @@ class _Hole:
     def __init__(self, sheet: Sheet, index: int) -> None:
         self._sheet = sheet
         self._i = index
+        # The feature this handle was issued for. A handle addresses by index, so if the
+        # public `features` list is reordered the index goes stale and points at someone
+        # else's feature — recording the object lets that be caught rather than silently
+        # dimensioning the wrong thing (#872 review).
+        self._declared = sheet._features[index]
 
     def through(self) -> _Hole:
         """A through hole (the default) — ⌀ only."""
@@ -214,8 +220,14 @@ class _Hole:
         self._sheet._gdt_note(text, self._i, view=view, side=side)
         return self
 
+    def _check_fresh(self) -> None:
+        self._sheet._assert_handle_fresh(self)
+
     def _set(self, **kw) -> _Hole:
-        self._sheet._features[self._i] = replace(self._sheet._features[self._i], **kw)
+        self._check_fresh()
+        updated = replace(self._sheet._features[self._i], **kw)
+        self._sheet._replace_feature(self._i, updated)
+        self._declared = updated
         return self
 
 
@@ -228,6 +240,7 @@ class _Dim:
         self._sheet = sheet
         self._i = index
         self._kind = default_kind
+        self._declared = sheet._features[index]  # see _Hole._declared
 
     def tolerance(self, lo: float, hi: float | None = None, *, on: str | None = None) -> _Dim:
         """A ± tolerance on this dimension: symmetric ``.tolerance(0.05)`` (→ ``±0.05``) or a
@@ -279,9 +292,40 @@ class _Dim:
             raise ValueError('thread() needs a non-empty spec string, e.g. "M3x0.5"')
         return self._set(thread=spec.strip())
 
+    def _check_fresh(self) -> None:
+        self._sheet._assert_handle_fresh(self)
+
     def _set(self, **kw) -> _Dim:
-        self._sheet._features[self._i] = replace(self._sheet._features[self._i], **kw)
+        self._check_fresh()
+        updated = replace(self._sheet._features[self._i], **kw)
+        self._sheet._replace_feature(self._i, updated)
+        self._declared = updated
         return self
+
+
+class DimensionIntent:
+    """The handle :meth:`Sheet.add_dimension` returns (ADR 0016).
+
+    It is **not** a placement handle: it exposes no coordinate, no strip and no tier.
+    What it carries is the dimension's semantic identity — *a dimension line references;
+    the engine places*.
+
+    ADR 0012's ``.pin()`` / ``.priority()`` are deliberately absent for now. The engine
+    already has two spellings of "keep this put" at different layers, and adding a third
+    that no renderer consumes would ship a chainable verb doing nothing. This handle is
+    the extension point for them once that concept is converged.
+
+    Every other attribute forwards to the owning :class:`Sheet`, so the declare-then-chain
+    contract holds (``sheet.add_dimension(bore, "depth").hole(...)``) despite this
+    returning a handle rather than the sheet — the same rule :class:`_Params` follows.
+    """
+
+    def __init__(self, sheet: Sheet, entry: dict) -> None:
+        self._sheet = sheet
+        self._entry = entry
+
+    def __getattr__(self, name):  # declare-then-chain: forward to the sheet
+        return getattr(self._sheet, name)
 
 
 class _Params:
@@ -300,6 +344,11 @@ class _Params:
     def __init__(self, sheet: Sheet, index: int) -> None:
         self._sheet = sheet
         self._i = index
+        # The feature this handle was issued for. A handle addresses by index, so if the
+        # public `features` list is reordered the index goes stale and points at someone
+        # else's feature — recording the object lets that be caught rather than silently
+        # dimensioning the wrong thing (#872 review).
+        self._declared = sheet._features[index]
 
     def __getattr__(self, name: str):
         # Only reached for attributes _Params doesn't define (every Sheet verb): forward
@@ -485,6 +534,22 @@ class Sheet:
         # engine's generic auto-placed Drawing.add_table, AFTER the drawing is built so they sit
         # clear of the views + title block (like the hole table). Each: {rows, prefer, name}.
         self._tables: list = []
+        # ADR 0016 augmenting dimension intents (#872), keyed by feature INDEX for the
+        # same reason as `_tolerances`: a handle may be recorded before a later size verb
+        # replaces the feature. Materialized to `RequestedDimension` against the FINAL
+        # features at build. Each entry: {"index", "role", "discriminator", "pin", "priority"}.
+        self._added_dimensions: list[dict] = []
+        # Identity shadow of `_features`, refreshed by the declaration verbs. Handles are
+        # index-based and `features` is public and mutable, so no per-path check can be
+        # complete — four separate escapes were found by review before this went in.
+        # Comparing the shadow catches the whole family at once: any structural edit made
+        # outside the verbs is visible, whatever it was.
+        self._feature_ids: list[int] = []
+        # Did the script explicitly ask for the planner's set? Optional here (#872) — a
+        # build without it still auto-dimensions, as it always has. Making it MANDATORY
+        # is the #874 breaking change; shipping that early would change this verb's
+        # meaning between phases, which the epic's own rule forbids.
+        self._auto_dimensions = False
         # A requested section A–A (#841): ``None`` = no request, else a resolver tuple
         # (``kind``, ``payload``) materialized to a cut-plane Y in ``_decorations`` — ``at``
         # a literal Y, ``feature`` a declared-feature index, ``auto`` the part-centre Y.
@@ -860,7 +925,11 @@ class Sheet:
         size verb may have replaced it since declaration). Idempotent; mirrors P2a's
         :meth:`_decorations`. Called before handing features to the engine."""
         for gi, si in self._gdt_src:
-            self._features[gi] = replace(self._features[gi], origin=self._features[si])
+            # Through `_replace_feature`, not a raw write: this is a legitimate internal
+            # rebind, and a raw write would desync the identity shadow and make an
+            # ordinary `hole.note(...)` + `add_dimension(...)` script look like an
+            # unsupported list edit (#872 review, round 6).
+            self._replace_feature(gi, replace(self._features[gi], origin=self._features[si]))
 
     def _validate_datums(self) -> None:
         """Warn (non-fatal) if a control frame references a datum letter no ``sheet.datum`` on
@@ -940,8 +1009,206 @@ class Sheet:
 
     @property
     def features(self) -> list:
-        """The declared IR features (mutable — override or drop before :meth:`build`)."""
+        """The declared IR features (mutable — override or drop before :meth:`build`).
+
+        **Not after declaring an `add_dimension` intent.** An intent targets one specific
+        feature, and this list is addressed by index, so an insert, delete or reorder
+        silently repoints it at a neighbour. Both are refused rather than guessed:
+        editing the list after an intent exists raises at :meth:`build`, and a handle
+        whose index no longer names the feature it was issued for raises when used.
+        Declare the features you want, then the dimensions.
+        """
         return self._features
+
+    def auto_dimensions(self) -> Sheet:
+        """Ask for the planner's automatic dimension set explicitly (ADR 0016).
+
+        Today this is **optional** — a build without it still auto-dimensions, exactly as
+        before — and it exists so a script can *say* which dimension source it uses, and
+        so :meth:`add_dimension` has something to augment. Making it mandatory is the
+        #874 breaking change; landing that here would change this verb's meaning between
+        releases, which ADR 0016's phasing rule forbids.
+        """
+        self._auto_dimensions = True
+        return self
+
+    def add_dimension(self, feature, role: str, *, axis: str | None = None):
+        """Augment the planner's set with one more measurement (ADR 0016 / #872).
+
+        *feature* is a declared-feature handle (what :meth:`hole`, :meth:`boss`, … return),
+        an index into :attr:`features`, or the IR feature itself. *role* names the
+        measurement — ``"bore"``, ``"grid_pitch"``, … — and carries **no number**: the
+        value is read from the geometry, so the size still lives in exactly one place.
+
+        Returns a :class:`DimensionIntent`.
+
+        Requesting a measurement the planner already emits is a deliberate no-op, not an
+        error: a script should be able to ask without first knowing the rule set's mind.
+
+        ``axis`` disambiguates a role a feature carries more than once — today a grid
+        pattern's two pitches. Omitting it there raises rather than picking one, because
+        a silent coin toss between the row and column pitch is the kind of wrong a reader
+        cannot see.
+        """
+        self._assert_features_unshuffled("add_dimension()")
+        index = self._feature_index(feature)
+        target = self._features[index]
+        params = target.parameters()
+        roles = {p.role for p in params} | {p.parameter_id for p in params}
+        if role not in roles:
+            raise ValueError(
+                f"add_dimension: {type(target).__name__} has no {role!r} measurement "
+                f"(it carries {sorted(roles)})"
+            )
+        matching = [p for p in params if role in (p.role, p.parameter_id)]
+        discs = {p.discriminator for p in matching}
+        if len(discs) > 1 and axis is None:
+            raise ValueError(
+                f"add_dimension({role!r}) is ambiguous on this feature — it carries "
+                f"{len(discs)} of them ({sorted(d for d in discs if d)}). Name one with "
+                f"axis=."
+            )
+        if axis is not None and axis not in discs:
+            raise ValueError(
+                f"add_dimension({role!r}, axis={axis!r}): this feature has no such "
+                f"variant ({sorted(d for d in discs if d)})"
+            )
+        entry = {"index": index, "role": role, "discriminator": axis, "target": target}
+        self._added_dimensions.append(entry)
+        self._feature_ids = [id(f) for f in self._features]
+        return DimensionIntent(self, entry)
+
+    def _assert_features_unshuffled(self, what: str) -> None:
+        """Refuse to resolve an intent when `features` was edited outside the verbs.
+
+        `add_dimension` targets one declared feature. A structural edit to the public
+        list — insert, delete, reorder — silently repoints an index-based handle at a
+        different feature, and the request then dimensions the wrong one. Four separate
+        escapes of exactly that shape were found by review before this check went in;
+        patching each path individually could not work, because handles are index-based
+        and the list is public.
+
+        Only the PREFIX covered by the shadow is checked, so declaring more features
+        after an intent stays legal — an append cannot disturb an existing index. And it
+        is only enforced while intents exist, so a script that never calls
+        `add_dimension` keeps the full freedom the attribute documents.
+        """
+        if not self._added_dimensions:
+            return
+        prefix = len(self._feature_ids)
+        if [id(f) for f in self._features[:prefix]] != self._feature_ids:
+            raise ValueError(
+                f"{what}: `features` was inserted into, deleted from or reordered after "
+                "an add_dimension() intent was declared. Intents target a specific "
+                "feature, and a raw list edit silently repoints them — declare the "
+                "features you want first, then the dimensions."
+            )
+
+    def _replace_feature(self, index: int, feature) -> None:
+        """Swap the frozen feature at *index* for an updated copy, keeping any recorded
+        `add_dimension` intent pointed at it.
+
+        The size verbs (`.depth()`, `.cbore()`, …) rebuild the frozen dataclass rather
+        than mutating it, so an intent recorded against the old object would otherwise
+        be looking at a stale instance. Routing every replacement through here is what
+        lets :meth:`_requested_dimensions` insist on IDENTITY — which is the only check
+        that catches a reorder, since a same-kind neighbour passes any role test.
+        """
+        previous = self._features[index]
+        self._features[index] = feature
+        for entry in self._added_dimensions:
+            # Advance ONLY when the replacement derives from what the intent currently
+            # targets. Advancing on index alone launders a reorder: swap two holes, then
+            # call a size verb through the now-stale handle, and this would quietly move
+            # the intent onto its neighbour — the exact failure identity targeting exists
+            # to prevent. Leaving the mismatch in place lets materialization raise.
+            if entry["index"] == index and entry["target"] is previous:
+                entry["target"] = feature
+        if index < len(self._feature_ids):
+            self._feature_ids[index] = id(feature)
+
+    # NOTE (#908): the two checks below are SCAFFOLDING, not the fix. `Sheet` addresses
+    # features by index into a public mutable list, so every long-lived reference —
+    # tolerances, GD&T provenance, sections, and these intents — is positional where it
+    # needs to be identity-based. Seven review rounds on #872 found seven variants of the
+    # same failure, each fix opening the next. #908 replaces the addressing model; these
+    # should be REMOVED by it rather than extended to the other thirteen call sites.
+
+    def _assert_handle_fresh(self, handle) -> None:
+        """A handle addresses by index, so a reorder of the public list leaves it naming
+        someone else's feature. Checked before a size verb writes, not only when an
+        intent resolves — otherwise the write itself refreshes the handle and launders
+        the mismatch (#872 review, round 6)."""
+        declared = getattr(handle, "_declared", None)
+        index = getattr(handle, "_i", None)
+        if declared is None or index is None:
+            return
+        if not (0 <= index < len(self._features)) or self._features[index] is not declared:
+            raise ValueError(
+                f"{type(handle).__name__} is stale — `features` was reordered after this "
+                "handle was issued, so its index now names a different feature. Declare "
+                "the features you want, then the dimensions."
+            )
+
+    def _feature_index(self, feature) -> int:
+        """Resolve a handle / index / IR feature to its index in :attr:`features`."""
+        if isinstance(feature, int):
+            if not 0 <= feature < len(self._features):
+                raise IndexError(f"feature index {feature} out of range")
+            return feature
+        index = getattr(feature, "_i", None)
+        if index is not None:
+            # A handle carries an index into ITS OWN sheet — accepting a foreign one
+            # would silently dimension whatever this sheet happens to hold there.
+            if getattr(feature, "_sheet", None) is not self:
+                raise ValueError(
+                    f"{type(feature).__name__} belongs to a different Sheet — a handle's "
+                    "index is only meaningful on the sheet that issued it"
+                )
+            # …and its index must still name the feature it was issued for. A reorder of
+            # the public list before any intent exists breaks no intent contract, but it
+            # leaves the handle pointing at a neighbour — resolving that silently would
+            # dimension the wrong feature (#872 review, round 5).
+            declared = getattr(feature, "_declared", None)
+            if declared is not None and self._features[int(index)] is not declared:
+                raise ValueError(
+                    f"{type(feature).__name__} is stale — `features` was reordered after "
+                    "this handle was issued, so its index now names a different feature. "
+                    "Declare the features you want, then the dimensions."
+                )
+            return int(index)
+        for i, f in enumerate(self._features):  # an IR feature passed directly
+            if f is feature:  # identity — an equal feature from elsewhere is not this one
+                return i
+        raise ValueError(f"{feature!r} is not a feature declared on this sheet")
+
+    def _requested_dimensions(self) -> tuple:
+        """Materialize the index-keyed intents against the FINAL features, mirroring
+        :meth:`_decorations` — a handle may predate a later size verb."""
+        self._assert_features_unshuffled("build()")
+        out = []
+        for e in self._added_dimensions:
+            index = e["index"]
+            if index >= len(self._features) or self._features[index] is not e["target"]:
+                # The feature list is public and mutable. An insert, delete or reorder
+                # leaves the recorded index pointing at a DIFFERENT feature, and a role
+                # check cannot catch that — a same-kind neighbour passes it, so the
+                # request silently dimensions the wrong hole. Identity does catch it.
+                # Legitimate replacement by a size verb goes through `_replace_feature`,
+                # which keeps this pointer current.
+                raise ValueError(
+                    f"add_dimension({e['role']!r}) no longer targets the feature it was "
+                    "declared against — `features` was reordered, shortened or replaced "
+                    "outside the declaration verbs"
+                )
+            out.append(
+                RequestedDimension(
+                    feature=self._features[index],
+                    role=e["role"],
+                    discriminator=e["discriminator"],
+                )
+            )
+        return tuple(out)
 
     def _decorations(self) -> dict:
         """Materialize the index-keyed ± tolerances against the FINAL features (a handle may
@@ -985,15 +1252,34 @@ class Sheet:
         does), so the bbox/datum match what ``build()`` draws even when the part carries
         bbox-extending non-solid geometry."""
         self._prepare()
-        return _coerce_model(self._features, _solids_body(self._part), self._decorations())
+        return _coerce_model(
+            self._features,
+            _solids_body(self._part),
+            self._decorations(),
+            self._requested_dimensions(),
+        )
 
     def build(self):
         """Build the :class:`~draftwright.drawing.Drawing` — detection skipped; only the
         declared features are drawn. Declared corner-block tables (:meth:`table`/:meth:`notes`)
         are placed last, clear of everything already on the sheet."""
         self._prepare()
+        # `add_dimension` augments the planner's set, so the sheet must have asked for
+        # one (ADR 0016 / #872). Checked HERE rather than in the verb so intent stays
+        # order-independent: declaring the augment before the source must read the same
+        # as declaring it after.
+        if self._added_dimensions and not self._auto_dimensions:
+            raise ValueError(
+                "add_dimension() augments the planner's automatic dimension set, so the "
+                "sheet must request one — call auto_dimensions(). (Declaring the complete "
+                "authored set with dimension(...) instead is #874.)"
+            )
         dwg = build_drawing(
-            self._part, model=self._features, decorations=self._decorations(), **self._opts
+            self._part,
+            model=self._features,
+            decorations=self._decorations(),
+            requested=self._requested_dimensions(),
+            **self._opts,
         )
         # Add each declared table, uniquifying its name against everything already on the sheet
         # (feature annotations + earlier tables) so a table NEVER silently overwrites another
