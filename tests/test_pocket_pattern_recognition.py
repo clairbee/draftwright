@@ -127,6 +127,31 @@ def test_opposite_facing_pockets_do_not_merge():
     assert len(recognise_pocket_patterns(same)) == 1
 
 
+def test_edge_anchored_and_interior_pockets_do_not_form_one_pattern():
+    from dataclasses import replace
+
+    from draftwright.recognition.slots import Pocket
+
+    base = Pocket(
+        width_axis="x",
+        long_axis="y",
+        width=10.0,
+        length=12.0,
+        depth=6.0,
+        w_center=0.0,
+        lo=-36.0,
+        hi=-24.0,
+        d_lo=5.0,
+        d_hi=11.0,
+    )
+    mixed = (
+        base,
+        replace(base, lo=-6.0, hi=6.0, edge_anchored=True),
+        replace(base, lo=24.0, hi=36.0),
+    )
+    assert recognise_pocket_patterns(mixed) == []
+
+
 def test_injected_value_equal_pattern_still_excludes_members():
     # member exclusion is by VALUE, so an INJECTED pattern inventory built from value-equal
     # (deserialized/copied) pockets whose ids differ still suppresses the individual pockets —
@@ -148,13 +173,16 @@ def test_injected_value_equal_pattern_still_excludes_members():
 
 
 def test_build_part_model_groups_and_excludes_members():
-    pm = build_part_model(_pocket_row(n=4, pitch=30.0))
+    part = _pocket_row(n=4, pitch=30.0)
+    pm = build_part_model(part)
     kinds = [f.kind for f in pm.features]
     assert kinds.count("pocket_pattern") == 1
     assert kinds.count("pocket") == 0  # members folded into the pattern, not emitted individually
     pat = next(f for f in pm.features if f.kind == "pocket_pattern")
     assert pat.count == 4
     assert pat.member.width == 10.0 and pat.member.length == 12.0 and pat.member.depth == 6.0
+    dwg = build_drawing(part)
+    assert not [i for i in dwg.lint() if i.code == "unrecognised_defining_geometry"]
 
 
 def test_sheet_emit_round_trips_the_pattern(tmp_path):

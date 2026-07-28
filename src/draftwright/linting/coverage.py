@@ -34,7 +34,9 @@ from draftwright.recognition import (
     recognise_holes,
     recognise_pockets,
     recognise_rectangular_pads,
+    recognise_step_shoulders,
     recognise_turned_steps,
+    step_level_zs,
 )
 
 _UNSET = object()  # sentinel: distinguishes "not supplied" from a valid prof=None
@@ -415,6 +417,8 @@ def lint_prismatic_coverage(
     bbox=None,
     assembly=None,
     tol: float = 0.6,
+    features=(),
+    step_zs=None,
 ) -> list:
     """Report undefined raised-pad footprints and blind-pocket locations.
 
@@ -498,10 +502,53 @@ def lint_prismatic_coverage(
             )
 
     pocket_inventory = recognise_pockets(part) if pockets is None else pockets
+    model_pockets = []
+    for feature in features:
+        if getattr(feature, "kind", None) == "pocket":
+            model_pockets.append((feature, (feature.frame.origin,), False))
+        elif getattr(feature, "kind", None) == "pocket_pattern":
+            model_pockets.append((feature.member, tuple(feature.members), True))
+    missing_ir = 0
+
+    def pocket_owner(pocket):
+        source_location = pocket.location
+        return next(
+            (
+                f
+                for f, locations, is_pattern in model_pockets
+                if f.width_axis == pocket.width_axis
+                and f.long_axis == pocket.long_axis
+                and abs(f.width - pocket.width) <= tol
+                and abs(f.length - pocket.length) <= tol
+                and abs(f.depth - pocket.depth) <= tol
+                and (
+                    is_pattern
+                    or (
+                        abs(f.w_center - pocket.w_center) <= tol
+                        and abs(f.lo - pocket.lo) <= tol
+                        and abs(f.hi - pocket.hi) <= tol
+                    )
+                )
+                and any(
+                    all(
+                        abs(actual - expected) <= tol
+                        for actual, expected in zip(at, source_location)
+                    )
+                    for at in locations
+                )
+            ),
+            None,
+        )
+
     unlocated = 0
     bb = bbox if bbox is not None else part.bounding_box()
     centre = bb.center()
     for pocket in pocket_inventory:
+        if pocket_owner(pocket) is None:
+            missing_ir += 1
+            continue
+        if getattr(pocket, "edge_anchored", False):
+            continue
         view = _END_ON.get(pocket.depth_axis, "plan")
         x, y, z = pocket.location
         if pocket.depth_axis == "z":
@@ -550,6 +597,43 @@ def lint_prismatic_coverage(
                 severity=severity,
                 code="pocket_not_located",
                 message=f"{unlocated} blind pocket(s) have no complete X/Y location scheme",
+            )
+        )
+    source_shoulders = recognise_step_shoulders(
+        part, levels=step_level_zs(part) if step_zs is None else step_zs
+    )
+    model_shoulders = {
+        (axis, round(pos, 3))
+        for f in features
+        if getattr(f, "kind", None) == "step_level"
+        for axis, pos in getattr(f, "shoulders", ())
+    }
+    # A lone vertical transition can legitimately be owned by a declared plate
+    # thickness scheme. Two or more stations describe a stepped/slanted profile
+    # chain and must survive into correlated step IR (#898).
+    missing_transitions = (
+        sum(
+            1
+            for shoulder in source_shoulders
+            if (shoulder.axis, round(shoulder.position, 3)) not in model_shoulders
+        )
+        if len(source_shoulders) >= 2
+        else 0
+    )
+    if missing_ir or missing_transitions:
+        parts = []
+        if missing_ir:
+            parts.append(f"{missing_ir} bounded blind recess(es)")
+        if missing_transitions:
+            parts.append(f"{missing_transitions} slanted/stepped profile transition(s)")
+        issues.append(
+            LintIssue(
+                severity=severity,
+                code="unrecognised_defining_geometry",
+                message=(
+                    "dimension-relevant source geometry is absent from recognised IR: "
+                    + ", ".join(parts)
+                ),
             )
         )
     return issues
