@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import MutableSequence
 from dataclasses import replace
 
 from draftwright.analysis import _solids_body
@@ -119,18 +120,124 @@ def _tol_value(lo, hi):
     return lo if hi is None else (lo, hi)
 
 
+class _FeatureView(MutableSequence):
+    """The public ``Sheet.features`` list — a view over ``(token, feature)`` entries.
+
+    Handles address their feature by **token**, not position (#908), and this view is
+    what keeps the two in step. Every mutation moves entries, so the token travels with
+    the feature it names:
+
+    - ``append`` mints a new token — a declaration;
+    - ``features[i] = f`` mints a **new** token: assignment cannot express "move this
+      feature here", so inheriting the slot's identity would silently hand every
+      reference to whatever was assigned. Stale references fail loudly instead. The
+      identity-preserving rebuild a size verb needs is :meth:`_rebind`;
+    - ``reverse`` / ``sort`` / ``insert`` reorder entries, so a handle simply finds its
+      feature at the new position rather than silently naming a neighbour;
+    - ``del`` drops the token, so a handle for a removed feature raises when used.
+
+    Before this, everything addressed by index into a plain list, and seven review rounds
+    on #872 found seven ways for a long-lived reference — a tolerance, a GD&T origin, a
+    section, a dimension intent — to end up pointing at the wrong feature. Each fix
+    detected one route and opened another. Carrying identity makes the class impossible
+    instead of detectable.
+    """
+
+    __slots__ = ("_entries", "_next_token")
+
+    def __init__(self, entries: list) -> None:
+        self._entries = entries
+        # A plain int, not `itertools.count`: counters lose pickle/copy support in
+        # Python 3.14 and this package supports >=3.11, so a Sheet carrying one would
+        # stop being copyable. Per-sheet rather than global because tokens appear in
+        # internal keys and this project holds output to be deterministic — a
+        # process-wide counter would make those keys depend on how many other sheets
+        # happened to be built first.
+        self._next_token = 0
+
+    def _mint(self) -> int:
+        token = self._next_token
+        self._next_token += 1
+        return token
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [e[1] for e in self._entries[i]]
+        return self._entries[i][1]
+
+    def __setitem__(self, i, value) -> None:
+        # Public assignment always mints a NEW token, scalar or slice.
+        #
+        # This is the distinction an earlier draft got wrong. Keeping the destination
+        # slot's token is right for the INTERNAL rebuild a size verb does — `.depth()`
+        # replaces the frozen dataclass with an updated copy of the same feature — but on
+        # the public view, assignment cannot tell "move this feature here" from "put a
+        # different feature here". Preserving identity across it silently transferred
+        # every reference (handles, tolerances, GD&T origins, sections, intents) onto
+        # whatever was assigned, which is the exact bug this class exists to remove:
+        #
+        #     features[0], features[1] = features[1], features[0]   # a tuple swap
+        #     features[:] = features[::-1]                          # a slice reversal
+        #
+        # both of which move VALUES between slots. Minting fresh tokens makes those
+        # references fail loudly instead. To reorder while keeping identity, use
+        # `reverse()` / `sort()`, which move whole entries. Internal rebuilding goes
+        # through `_rebind`, which is the only path that preserves a token.
+        if isinstance(i, slice):
+            self._entries[i] = [(self._mint(), f) for f in value]
+            return
+        self._entries[i] = (self._mint(), value)
+
+    def _rebind(self, index: int, feature) -> None:
+        """Replace the feature at *index* KEEPING its token — the same feature, rebuilt.
+
+        The only identity-preserving write. Used by the size verbs, whose frozen
+        dataclasses are replaced wholesale on every `.depth()` / `.cbore()` / `.thread()`.
+        """
+        self._entries[index] = (self._entries[index][0], feature)
+
+    def __delitem__(self, i) -> None:
+        del self._entries[i]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def insert(self, i, value) -> None:
+        self._entries.insert(i, (self._mint(), value))
+
+    # Reordering must move ENTRIES, not values. `MutableSequence` implements `reverse`
+    # in terms of `__setitem__`, which here keeps each slot's token — right for a size
+    # verb replacing a feature in place, wrong for a reorder, where it would swap the
+    # features and leave every token pointing at its old position. Overriding both is
+    # what makes a reorder transparent to handles rather than silently retargeting them.
+    def reverse(self) -> None:
+        self._entries.reverse()
+
+    def sort(self, *, key=None, reverse: bool = False) -> None:
+        self._entries.sort(
+            key=(lambda e: e[1]) if key is None else (lambda e: key(e[1])), reverse=reverse
+        )
+
+    def __repr__(self) -> str:
+        return repr([e[1] for e in self._entries])
+
+    def __eq__(self, other) -> bool:
+        return [e[1] for e in self._entries] == list(other)
+
+
 class _Hole:
     """A fluent handle for one declared hole — through vs blind (which changes the callout),
     and the P2a ± tolerance on its bore ⌀."""
 
     def __init__(self, sheet: Sheet, index: int) -> None:
         self._sheet = sheet
-        self._i = index
-        # The feature this handle was issued for. A handle addresses by index, so if the
-        # public `features` list is reordered the index goes stale and points at someone
-        # else's feature — recording the object lets that be caught rather than silently
-        # dimensioning the wrong thing (#872 review).
-        self._declared = sheet._features[index]
+        self._token = sheet._token_at(index)
+
+    @property
+    def _i(self) -> int:
+        """This handle's CURRENT index — resolved from its token, so the handle follows
+        its feature through a reorder rather than naming whatever took its slot (#908)."""
+        return self._sheet._index_of_token(self._token)
 
     def through(self) -> _Hole:
         """A through hole (the default) — ⌀ only."""
@@ -143,14 +250,14 @@ class _Hole:
     def tolerance(self, lo: float, hi: float | None = None) -> _Hole:
         """A ± tolerance on the bore ⌀: symmetric ``.tolerance(0.05)`` (→ ``±0.05``) or a
         limit pair ``.tolerance(0.0, 0.1)`` (→ ``+0.1 -0.0``)."""
-        self._sheet._tolerances[(self._i, "diameter")] = _tol_value(lo, hi)
+        self._sheet._tolerances[(self._token, "diameter")] = _tol_value(lo, hi)
         return self
 
     def fit(self, code: str, *, show: str = "class") -> _Hole:
         """An ISO 286 fit class on the bore ⌀ — ``.fit("H7")`` renders ``ø8 H7`` (the class,
         default) or, with ``show="deviation"``, the signed deviations ``ø8 +0.015/0`` resolved
         for the bore's nominal ⌀. Raises for a class/size outside the built-in table (#29)."""
-        self._sheet._tolerances[(self._i, "diameter")] = fit_class(
+        self._sheet._tolerances[(self._token, "diameter")] = fit_class(
             code, self._sheet._features[self._i].diameter, show
         )
         return self
@@ -220,14 +327,9 @@ class _Hole:
         self._sheet._gdt_note(text, self._i, view=view, side=side)
         return self
 
-    def _check_fresh(self) -> None:
-        self._sheet._assert_handle_fresh(self)
-
     def _set(self, **kw) -> _Hole:
-        self._check_fresh()
         updated = replace(self._sheet._features[self._i], **kw)
         self._sheet._replace_feature(self._i, updated)
-        self._declared = updated
         return self
 
 
@@ -238,15 +340,19 @@ class _Dim:
 
     def __init__(self, sheet: Sheet, index: int, default_kind: str) -> None:
         self._sheet = sheet
-        self._i = index
+        self._token = sheet._token_at(index)
         self._kind = default_kind
-        self._declared = sheet._features[index]  # see _Hole._declared
+
+    @property
+    def _i(self) -> int:
+        """See :attr:`_Hole._i` — token-resolved, not stored (#908)."""
+        return self._sheet._index_of_token(self._token)
 
     def tolerance(self, lo: float, hi: float | None = None, *, on: str | None = None) -> _Dim:
         """A ± tolerance on this dimension: symmetric ``.tolerance(0.05)`` (→ ``±0.05``) or a
         limit pair ``.tolerance(0.0, 0.1)`` (→ ``+0.1 -0.0``). ``on`` picks the parameter for
         a multi-dim feature — a step's ``"length"`` (default) vs its ``"diameter"`` (OD)."""
-        self._sheet._tolerances[(self._i, on or self._kind)] = _tol_value(lo, hi)
+        self._sheet._tolerances[(self._token, on or self._kind)] = _tol_value(lo, hi)
         return self
 
     def fit(self, code: str, *, show: str = "class") -> _Dim:
@@ -254,7 +360,7 @@ class _Dim:
         so a step's fit is on its OD, not its length). ``.fit("h6")`` renders ``ø12 h6`` (the
         class, default) or ``show="deviation"`` the signed deviations ``ø12 0/-0.011`` resolved
         for the nominal ⌀. Raises for a class/size outside the built-in table (#29)."""
-        self._sheet._tolerances[(self._i, "diameter")] = fit_class(
+        self._sheet._tolerances[(self._token, "diameter")] = fit_class(
             code, self._sheet._features[self._i].diameter, show
         )
         return self
@@ -292,14 +398,9 @@ class _Dim:
             raise ValueError('thread() needs a non-empty spec string, e.g. "M3x0.5"')
         return self._set(thread=spec.strip())
 
-    def _check_fresh(self) -> None:
-        self._sheet._assert_handle_fresh(self)
-
     def _set(self, **kw) -> _Dim:
-        self._check_fresh()
         updated = replace(self._sheet._features[self._i], **kw)
         self._sheet._replace_feature(self._i, updated)
-        self._declared = updated
         return self
 
 
@@ -343,19 +444,20 @@ class _Params:
 
     def __init__(self, sheet: Sheet, index: int) -> None:
         self._sheet = sheet
-        self._i = index
-        # The feature this handle was issued for. A handle addresses by index, so if the
-        # public `features` list is reordered the index goes stale and points at someone
-        # else's feature — recording the object lets that be caught rather than silently
-        # dimensioning the wrong thing (#872 review).
-        self._declared = sheet._features[index]
+        self._token = sheet._token_at(index)
+
+    @property
+    def _i(self) -> int:
+        """This handle's CURRENT index — resolved from its token, so the handle follows
+        its feature through a reorder rather than naming whatever took its slot (#908)."""
+        return self._sheet._index_of_token(self._token)
 
     def __getattr__(self, name: str):
         # Only reached for attributes _Params doesn't define (every Sheet verb): forward
         # to the owning sheet so the fluent chain is unbroken. Guard the two real fields:
         # if they aren't set yet (an instance built WITHOUT __init__ — copy/pickle), raise
         # rather than recurse forever resolving self._sheet (#807 review).
-        if name in ("_sheet", "_i"):
+        if name in ("_sheet", "_token"):
             raise AttributeError(name)
         return getattr(self._sheet, name)
 
@@ -378,10 +480,10 @@ class _Params:
             # A whole-feature tolerance supersedes any earlier per-role override on this
             # feature — bare means "all alike", so it is order-independent (#807 review):
             # drop this feature's role-keyed (3-tuple) entries, then set the kind keys.
-            for key in [k for k in self._sheet._tolerances if len(k) == 3 and k[0] == self._i]:
+            for key in [k for k in self._sheet._tolerances if len(k) == 3 and k[0] == self._token]:
                 del self._sheet._tolerances[key]
             for kind in set(roles.values()):
-                self._sheet._tolerances[(self._i, kind)] = val
+                self._sheet._tolerances[(self._token, kind)] = val
             return self
         cands = [r for r in roles if r == on or r.rsplit("_", 1)[-1] == on]
         if len(cands) != 1:
@@ -390,7 +492,7 @@ class _Params:
                 f"choose from {sorted(roles)}"
             )
         role = cands[0]
-        self._sheet._tolerances[(self._i, roles[role], role)] = val
+        self._sheet._tolerances[(self._token, roles[role], role)] = val
         return self
 
     def note(self, text, ref=None, *, view: str | None = None, side: str | None = None) -> _Params:
@@ -419,10 +521,12 @@ class _Control:
     are derived once (from the feature/face) when :meth:`Sheet.control` runs; ``view=``/``side=``
     there override them."""
 
-    def __init__(self, sheet: Sheet, target, src, view: str, side: str) -> None:
+    def __init__(self, sheet: Sheet, target, src_token, view: str, side: str) -> None:
         self._sheet = sheet
         self._target = target
-        self._src = src
+        # A token, not an index: this builder outlives the `control()` call that made it, so a
+        # reorder between `control(bore)` and `.position(0.1)` must not retarget it (#908).
+        self._src = src_token
         self._view = view
         self._side = side
 
@@ -522,7 +626,11 @@ class Sheet:
         zones=None,
     ):
         self._part = part
-        self._features: list = []
+        # (token, feature) entries — identity, not position (#908). `_features` is the
+        # view; handles hold tokens and resolve through it, so a reorder of the public
+        # list moves each token with its feature instead of stranding references.
+        self._entries: list[tuple[int, object]] = []
+        self._features = _FeatureView(self._entries)
         # P2a ± tolerances, keyed by (feature index, ParamKind) so a handle survives a later
         # feature replacement (e.g. hole().depth()); materialized to (feature, kind) at build.
         self._tolerances: dict = {}
@@ -539,12 +647,6 @@ class Sheet:
         # replaces the feature. Materialized to `RequestedDimension` against the FINAL
         # features at build. Each entry: {"index", "role", "discriminator", "pin", "priority"}.
         self._added_dimensions: list[dict] = []
-        # Identity shadow of `_features`, refreshed by the declaration verbs. Handles are
-        # index-based and `features` is public and mutable, so no per-path check can be
-        # complete — four separate escapes were found by review before this went in.
-        # Comparing the shadow catches the whole family at once: any structural edit made
-        # outside the verbs is visible, whatever it was.
-        self._feature_ids: list[int] = []
         # Did the script explicitly ask for the planner's set? Optional here (#872) — a
         # build without it still auto-dimensions, as it always has. Making it MANDATORY
         # is the #874 breaking change; shipping that early would change this verb's
@@ -583,7 +685,7 @@ class Sheet:
         from the model the detector recovers, then override specific features (edit the
         list via :attr:`features`, or re-declare) before :meth:`build`."""
         sheet = cls(part, **opts)
-        sheet._features = list(detect_part_model(part).features)  # detect only, no render (#453)
+        sheet._features.extend(detect_part_model(part).features)  # detect only, no render (#453)
         return sheet
 
     # -- feature declaration --------------------------------------------------
@@ -884,39 +986,46 @@ class Sheet:
         """A finish declared through a fluent handle — sources its provenance from the handle's
         feature INDEX (not the object), so a later size verb on the same handle can't strand it."""
         item = _declare_finish(ra, self._features[src_index], self._part, view=view, side=side)
-        self._append_gdt(item, src_index)
+        self._append_gdt(item, self._token_at(src_index))
 
     def _gdt_note(self, text, src_index: int, *, view=None, side=None) -> None:
         """A note declared through a fluent handle — like :meth:`_gdt_finish`, sources provenance
         from the feature INDEX so a later size verb on the same handle can't strand it."""
         item = _declare_note(text, self._features[src_index], self._part, view=view, side=side)
-        self._append_gdt(item, src_index)
+        self._append_gdt(item, self._token_at(src_index))
 
-    def _append_gdt(self, item, src_index) -> None:
-        """Append a GD&T IR item, recording its source-feature index for build-time provenance
-        re-materialization (``None`` for a bare face — no source feature to track)."""
+    def _append_gdt(self, item, src_token) -> None:
+        """Append a GD&T IR item, recording its source feature's **token** for build-time
+        provenance re-materialization (``None`` for a bare face — no source feature to track).
+
+        Takes an already-resolved token rather than an index so that a caller which stores the
+        value between resolve and append — :class:`_Control` — cannot hand over a stale slot."""
         self._features.append(item)
-        if src_index is not None:
-            self._gdt_src.append((len(self._features) - 1, src_index))
+        if src_token is not None:
+            self._gdt_src.append((self._token_at(len(self._features) - 1), src_token))
 
     def _gdt_ref(self, ref):
-        """Resolve a GD&T target to ``(target, source_index)``: a fluent handle / index / a
-        :class:`Feature` already in :attr:`features` → its feature + index (the index re-binds
-        provenance at build); a build123d face or an external Feature → ``(ref, None)``."""
+        """Resolve a GD&T target to ``(target, source_token)``: a fluent handle / index / a
+        :class:`Feature` already in :attr:`features` → its feature + token (the token re-binds
+        provenance at build); a build123d face or an external Feature → ``(ref, None)``.
+
+        A **token**, not an index (#908). :class:`_Control` holds this value across later
+        ``.position(...)`` calls, so an index here would name whatever occupied the slot at
+        *append* time rather than the feature the caller passed to :meth:`control`."""
         if isinstance(ref, (_Hole, _Dim, _Params)):
             if ref._sheet is not self:  # a handle from ANOTHER sheet indexes the wrong features
                 raise ValueError(
                     "the handle belongs to a different Sheet — use a handle/index/Feature "
                     "declared on this sheet"
                 )
-            return self._features[ref._i], ref._i
+            return self._features[ref._i], ref._token
         if isinstance(ref, int) and not isinstance(ref, bool):
             i = self._index_of(ref)
-            return self._features[i], i
+            return self._features[i], self._token_at(i)
         if isinstance(ref, Feature):
             for i, f in enumerate(self._features):
                 if f is ref:
-                    return ref, i
+                    return ref, self._token_at(i)
             return ref, None  # an external feature this sheet does not manage
         return ref, None  # a build123d face — no source feature
 
@@ -924,7 +1033,8 @@ class Sheet:
         """Re-bind each handle-sourced GD&T item's ``origin`` to the FINAL source feature (a
         size verb may have replaced it since declaration). Idempotent; mirrors P2a's
         :meth:`_decorations`. Called before handing features to the engine."""
-        for gi, si in self._gdt_src:
+        for gt, st in self._gdt_src:
+            gi, si = self._index_of_token(gt), self._index_of_token(st)
             # Through `_replace_feature`, not a raw write: this is a legitimate internal
             # rebind, and a raw write would desync the identity shadow and make an
             # ordinary `hole.note(...)` + `add_dimension(...)` script look like an
@@ -1008,15 +1118,20 @@ class Sheet:
     # -- inspection / output --------------------------------------------------
 
     @property
-    def features(self) -> list:
-        """The declared IR features (mutable — override or drop before :meth:`build`).
+    def features(self) -> MutableSequence:
+        """The declared IR features — mutable: override, drop or reorder before
+        :meth:`build`.
 
-        **Not after declaring an `add_dimension` intent.** An intent targets one specific
-        feature, and this list is addressed by index, so an insert, delete or reorder
-        silently repoints it at a neighbour. Both are refused rather than guessed:
-        editing the list after an intent exists raises at :meth:`build`, and a handle
-        whose index no longer names the feature it was issued for raises when used.
-        Declare the features you want, then the dimensions.
+        Each feature carries an identity token (#908), so a **reorder** via
+        :meth:`~_FeatureView.reverse` or :meth:`~_FeatureView.sort` moves every reference
+        with it — a handle, a tolerance, a GD&T origin, a section, an `add_dimension`
+        intent all follow their feature to its new position.
+
+        **Assignment is not a move.** ``features[i] = f`` and slice assignment mint a new
+        identity, because assignment cannot distinguish "move this feature here" from
+        "put a different feature here" — so references to the displaced feature fail
+        loudly rather than silently transferring to whatever replaced it. The same holds
+        for deletion. Use ``reverse``/``sort`` to reorder while keeping references.
         """
         return self._features
 
@@ -1050,7 +1165,6 @@ class Sheet:
         a silent coin toss between the row and column pitch is the kind of wrong a reader
         cannot see.
         """
-        self._assert_features_unshuffled("add_dimension()")
         index = self._feature_index(feature)
         target = self._features[index]
         params = target.parameters()
@@ -1073,82 +1187,37 @@ class Sheet:
                 f"add_dimension({role!r}, axis={axis!r}): this feature has no such "
                 f"variant ({sorted(d for d in discs if d)})"
             )
-        entry = {"index": index, "role": role, "discriminator": axis, "target": target}
+        entry = {"token": self._token_at(index), "role": role, "discriminator": axis}
         self._added_dimensions.append(entry)
-        self._feature_ids = [id(f) for f in self._features]
         return DimensionIntent(self, entry)
 
-    def _assert_features_unshuffled(self, what: str) -> None:
-        """Refuse to resolve an intent when `features` was edited outside the verbs.
-
-        `add_dimension` targets one declared feature. A structural edit to the public
-        list — insert, delete, reorder — silently repoints an index-based handle at a
-        different feature, and the request then dimensions the wrong one. Four separate
-        escapes of exactly that shape were found by review before this check went in;
-        patching each path individually could not work, because handles are index-based
-        and the list is public.
-
-        Only the PREFIX covered by the shadow is checked, so declaring more features
-        after an intent stays legal — an append cannot disturb an existing index. And it
-        is only enforced while intents exist, so a script that never calls
-        `add_dimension` keeps the full freedom the attribute documents.
-        """
-        if not self._added_dimensions:
-            return
-        prefix = len(self._feature_ids)
-        if [id(f) for f in self._features[:prefix]] != self._feature_ids:
-            raise ValueError(
-                f"{what}: `features` was inserted into, deleted from or reordered after "
-                "an add_dimension() intent was declared. Intents target a specific "
-                "feature, and a raw list edit silently repoints them — declare the "
-                "features you want first, then the dimensions."
-            )
-
     def _replace_feature(self, index: int, feature) -> None:
-        """Swap the frozen feature at *index* for an updated copy, keeping any recorded
-        `add_dimension` intent pointed at it.
+        """Swap the frozen feature at *index* for an updated copy.
 
-        The size verbs (`.depth()`, `.cbore()`, …) rebuild the frozen dataclass rather
-        than mutating it, so an intent recorded against the old object would otherwise
-        be looking at a stale instance. Routing every replacement through here is what
-        lets :meth:`_requested_dimensions` insist on IDENTITY — which is the only check
-        that catches a reorder, since a same-kind neighbour passes any role test.
+        A plain slot write: :class:`_FeatureView` keeps that slot's token, so every
+        reference naming it — a tolerance, a GD&T origin, a dimension intent — follows
+        the replacement without bookkeeping. Before #908 this method had to advance each
+        intent by hand, and getting that wrong was two of the seven #872 review findings.
         """
-        previous = self._features[index]
-        self._features[index] = feature
-        for entry in self._added_dimensions:
-            # Advance ONLY when the replacement derives from what the intent currently
-            # targets. Advancing on index alone launders a reorder: swap two holes, then
-            # call a size verb through the now-stale handle, and this would quietly move
-            # the intent onto its neighbour — the exact failure identity targeting exists
-            # to prevent. Leaving the mismatch in place lets materialization raise.
-            if entry["index"] == index and entry["target"] is previous:
-                entry["target"] = feature
-        if index < len(self._feature_ids):
-            self._feature_ids[index] = id(feature)
+        self._features._rebind(index, feature)
 
-    # NOTE (#908): the two checks below are SCAFFOLDING, not the fix. `Sheet` addresses
-    # features by index into a public mutable list, so every long-lived reference —
-    # tolerances, GD&T provenance, sections, and these intents — is positional where it
-    # needs to be identity-based. Seven review rounds on #872 found seven variants of the
-    # same failure, each fix opening the next. #908 replaces the addressing model; these
-    # should be REMOVED by it rather than extended to the other thirteen call sites.
+    def _token_at(self, index: int) -> int:
+        """The token of the feature currently at *index*."""
+        return self._entries[index][0]
 
-    def _assert_handle_fresh(self, handle) -> None:
-        """A handle addresses by index, so a reorder of the public list leaves it naming
-        someone else's feature. Checked before a size verb writes, not only when an
-        intent resolves — otherwise the write itself refreshes the handle and launders
-        the mismatch (#872 review, round 6)."""
-        declared = getattr(handle, "_declared", None)
-        index = getattr(handle, "_i", None)
-        if declared is None or index is None:
-            return
-        if not (0 <= index < len(self._features)) or self._features[index] is not declared:
-            raise ValueError(
-                f"{type(handle).__name__} is stale — `features` was reordered after this "
-                "handle was issued, so its index now names a different feature. Declare "
-                "the features you want, then the dimensions."
-            )
+    def _index_of_token(self, token: int) -> int:
+        """Where the feature named by *token* currently sits.
+
+        Raises when it has been removed — a handle for a dropped feature must not
+        silently resolve to whatever moved into its old position (#908).
+        """
+        for i, (tok, _f) in enumerate(self._entries):
+            if tok == token:
+                return i
+        raise ValueError(
+            "this handle's feature is no longer on the sheet — it was removed from "
+            "`features` after the handle was issued"
+        )
 
     def _feature_index(self, feature) -> int:
         """Resolve a handle / index / IR feature to its index in :attr:`features`."""
@@ -1165,17 +1234,6 @@ class Sheet:
                     f"{type(feature).__name__} belongs to a different Sheet — a handle's "
                     "index is only meaningful on the sheet that issued it"
                 )
-            # …and its index must still name the feature it was issued for. A reorder of
-            # the public list before any intent exists breaks no intent contract, but it
-            # leaves the handle pointing at a neighbour — resolving that silently would
-            # dimension the wrong feature (#872 review, round 5).
-            declared = getattr(feature, "_declared", None)
-            if declared is not None and self._features[int(index)] is not declared:
-                raise ValueError(
-                    f"{type(feature).__name__} is stale — `features` was reordered after "
-                    "this handle was issued, so its index now names a different feature. "
-                    "Declare the features you want, then the dimensions."
-                )
             return int(index)
         for i, f in enumerate(self._features):  # an IR feature passed directly
             if f is feature:  # identity — an equal feature from elsewhere is not this one
@@ -1183,32 +1241,20 @@ class Sheet:
         raise ValueError(f"{feature!r} is not a feature declared on this sheet")
 
     def _requested_dimensions(self) -> tuple:
-        """Materialize the index-keyed intents against the FINAL features, mirroring
-        :meth:`_decorations` — a handle may predate a later size verb."""
-        self._assert_features_unshuffled("build()")
-        out = []
-        for e in self._added_dimensions:
-            index = e["index"]
-            if index >= len(self._features) or self._features[index] is not e["target"]:
-                # The feature list is public and mutable. An insert, delete or reorder
-                # leaves the recorded index pointing at a DIFFERENT feature, and a role
-                # check cannot catch that — a same-kind neighbour passes it, so the
-                # request silently dimensions the wrong hole. Identity does catch it.
-                # Legitimate replacement by a size verb goes through `_replace_feature`,
-                # which keeps this pointer current.
-                raise ValueError(
-                    f"add_dimension({e['role']!r}) no longer targets the feature it was "
-                    "declared against — `features` was reordered, shortened or replaced "
-                    "outside the declaration verbs"
-                )
-            out.append(
-                RequestedDimension(
-                    feature=self._features[index],
-                    role=e["role"],
-                    discriminator=e["discriminator"],
-                )
+        """Materialize the token-keyed intents against the CURRENT features.
+
+        Tokens make this straightforward: an intent names a feature, not a slot, so a
+        reorder of the public list is transparent and a removal raises through
+        :meth:`_index_of_token` rather than silently retargeting (#908).
+        """
+        return tuple(
+            RequestedDimension(
+                feature=self._features[self._index_of_token(e["token"])],
+                role=e["role"],
+                discriminator=e["discriminator"],
             )
-        return tuple(out)
+            for e in self._added_dimensions
+        )
 
     def _decorations(self) -> dict:
         """Materialize the index-keyed ± tolerances against the FINAL features (a handle may
@@ -1217,7 +1263,8 @@ class Sheet:
         the planner reads (P2a). The tail of the key (``kind`` or ``kind, role``) passes
         through unchanged; only the leading index becomes the feature."""
         deco: dict = {
-            (self._features[i], *rest): tol for (i, *rest), tol in self._tolerances.items()
+            (self._features[self._index_of_token(tok)], *rest): tol
+            for (tok, *rest), tol in self._tolerances.items()
         }
         if self._section is not None:
             deco["section"] = self._section_cut_y()  # the #841 cut-plane Y (scalar key)
@@ -1228,7 +1275,7 @@ class Sheet:
         handle recorded before a later size verb resolves against the FINAL feature)."""
         kind, payload = self._section  # type: ignore[misc]  # guarded by the caller
         if kind == "feature":
-            return float(self._features[payload].frame.origin[1])  # in range by construction
+            return float(self._features[self._index_of_token(payload)].frame.origin[1])
         if kind == "auto":
             return float(self._part.bounding_box().center().Y)  # bare section() → part centre
         # An explicit at= is untrusted: a plane outside the part's Y extent leaves the body

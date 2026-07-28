@@ -94,7 +94,7 @@ class TestSheetSurface:
         bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z").depth(12)
         intent = sheet.add_dimension(bore, "bore")
         assert intent._entry["role"] == "bore"
-        assert intent._entry["index"] == 0
+        assert intent._entry["token"] == sheet._token_at(0)
 
     def test_the_handle_forwards_unknown_attributes_to_the_sheet(self):
         """Declare-then-chain: returning a handle must not break the fluent surface,
@@ -208,15 +208,15 @@ class TestFeatureResolution:
 
     def test_a_handle_resolves(self):
         sheet, handle = self._sheet_with_hole()
-        assert sheet.add_dimension(handle, "bore")._entry["index"] == 0
+        assert sheet.add_dimension(handle, "bore")._entry["token"] == sheet._token_at(0)
 
     def test_an_index_resolves(self):
         sheet, _ = self._sheet_with_hole()
-        assert sheet.add_dimension(0, "bore")._entry["index"] == 0
+        assert sheet.add_dimension(0, "bore")._entry["token"] == sheet._token_at(0)
 
     def test_the_ir_feature_itself_resolves(self):
         sheet, _ = self._sheet_with_hole()
-        assert sheet.add_dimension(sheet.features[0], "bore")._entry["index"] == 0
+        assert sheet.add_dimension(sheet.features[0], "bore")._entry["token"] == sheet._token_at(0)
 
     def test_an_out_of_range_index_raises(self):
         sheet, _ = self._sheet_with_hole()
@@ -334,142 +334,60 @@ class TestInvalidCombinations:
         with pytest.raises(ValueError, match="needs model="):
             build_drawing(_part(), requested=(RequestedDimension(hole, "bore"),))
 
-    def test_reordering_features_after_declaring_an_intent_raises(self):
-        """`features` is public and mutable, so an intent's stored index can come to
-        point at a different feature. Dimensioning the wrong one silently is the failure
-        this catches — so the real scenario is reproduced, not simulated."""
-        from draftwright.model import ChamferFeature
+    def test_an_intent_follows_its_feature_through_a_reorder(self):
+        """Since #908 a reorder is transparent, not an error. Features carry identity
+        tokens and handles resolve through them, so the intent stays on the feature it
+        named instead of the slot it happened to occupy.
 
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z").depth(12)
-        sheet.add_dimension(bore, "bore")  # records index 0
-
-        # A later edit pushes the hole to index 1; index 0 is now a chamfer, which has
-        # no "bore" measurement at all.
-        sheet.features.insert(0, ChamferFeature(Frame((0, 0, 0), "z"), "z", 2.0, 2.0, 45.0))
-
-        with pytest.raises(ValueError, match="reordered"):
-            sheet._requested_dimensions()
-
-    def test_truncating_the_feature_list_raises(self):
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z").depth(12)
-        sheet.add_dimension(bore, "bore")
-        sheet.features.clear()
-        with pytest.raises(ValueError, match="reordered"):
-            sheet._requested_dimensions()
-
-    def test_swapping_two_same_kind_features_raises(self):
-        """The case a role check cannot catch, and the reason targeting is identity-based:
-        two holes both carry `bore`, so swapping them passes any role test while silently
-        moving the request from the 12 mm hole to the 7 mm one."""
+        This replaces four tests that asserted a reorder RAISES — the behaviour #872's
+        scaffolding could manage before the addressing model was fixed."""
         sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
         deep = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
         sheet.hole(diameter=10, at=(20, 0, 14), axis="z").depth(7)
         sheet.add_dimension(deep, "bore.depth")
 
-        sheet.features[0], sheet.features[1] = sheet.features[1], sheet.features[0]
+        sheet.features.reverse()
 
-        with pytest.raises(ValueError, match="reordered"):
-            sheet._requested_dimensions()
-
-    def test_a_handle_from_another_sheet_is_rejected(self):
-        """A handle's index is only meaningful on the sheet that issued it — accepting a
-        foreign one silently dimensions whatever this sheet holds at that index."""
-        other = Sheet(_part(), title="T", number="N").auto_dimensions()
-        foreign = other.hole(diameter=3, at=(0, 0, 14), axis="z").depth(4)
-
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        sheet.hole(diameter=10, at=(0, 0, 14), axis="z").depth(12)
-
-        with pytest.raises(ValueError, match="different Sheet"):
-            sheet.add_dimension(foreign, "bore")
-
-    def test_a_size_verb_after_the_intent_is_still_legal(self):
-        """The flow identity-targeting must NOT break: `.depth()` rebuilds the frozen
-        feature, and the intent has to follow it rather than reject it."""
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z")
-        sheet.add_dimension(bore, "bore")
-        bore.depth(12)
         (request,) = sheet._requested_dimensions()
-        assert request.feature is sheet.features[0]
-        assert request.feature.depth == 12
+        assert request.feature.depth == 12, "the intent must follow the 12mm hole"
 
-    def test_a_reorder_followed_by_a_size_verb_still_raises(self):
-        """The laundering path. It now fails at the size verb rather than later at
-        materialisation — the earlier the better, since the verb is where the mistake
-        actually is, and letting the write through is what allowed the mismatch to be
-        refreshed away in the first place."""
+    def test_a_size_verb_after_a_reorder_hits_the_right_feature(self):
         sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
         first = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
-        sheet.hole(diameter=10, at=(20, 0, 14), axis="z").depth(7)
-        sheet.add_dimension(first, "bore.depth")
+        sheet.hole(diameter=4, at=(20, 0, 14), axis="z").depth(7)
 
-        sheet.features[0], sheet.features[1] = sheet.features[1], sheet.features[0]
+        sheet.features.reverse()
+        first.thread("M10")
 
-        with pytest.raises(ValueError, match="stale"):
-            first.thread("M10")  # stale handle, would write to the OTHER hole's slot
+        threaded = [f for f in sheet.features if getattr(f, "thread", None) == "M10"]
+        assert [f.diameter for f in threaded] == [10.0]
 
-    def test_an_intent_declared_after_a_reorder_raises(self):
-        """Round 4's escape: the intent is declared *after* the swap, so the target is
-        captured post-shuffle and no identity comparison at materialisation can see the
-        problem. Only noticing that the list itself moved catches this one."""
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        first = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
-        sheet.hole(diameter=10, at=(20, 0, 14), axis="z").depth(7)
-        sheet.add_dimension(first, "bore.depth")  # takes the shadow
-
-        sheet.features[0], sheet.features[1] = sheet.features[1], sheet.features[0]
-
-        with pytest.raises(ValueError, match="reordered"):
-            sheet.add_dimension(first, "bore")
-
-    def test_declaring_more_features_after_an_intent_stays_legal(self):
-        """An append cannot disturb an existing index, so the check must not fire on the
-        ordinary flow of declaring more geometry after asking for a dimension."""
+    def test_removing_the_targeted_feature_raises(self):
+        """Following a feature only works while it is there. A removed one must raise
+        rather than resolve to whatever moved into its position."""
         sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
         bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z").depth(12)
-        sheet.add_dimension(bore, "bore")
         sheet.hole(diameter=4, at=(30, 0, 14), axis="z")
-        sheet.hole(diameter=6, at=(-30, 0, 14), axis="z")
-        assert sheet.build() is not None
+        sheet.add_dimension(bore, "bore")
 
-    def test_a_handle_stale_from_a_reorder_is_rejected(self):
-        """Round 5's escape. The reorder happens BEFORE any intent, so it breaks no
-        intent contract — but it leaves the handle's index naming a different feature.
-        Resolving it silently would dimension the neighbour."""
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        first = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
-        sheet.hole(diameter=10, at=(20, 0, 14), axis="z").depth(7)
+        del sheet.features[0]
 
-        sheet.features.reverse()
+        with pytest.raises(ValueError, match="no longer on the sheet"):
+            sheet._requested_dimensions()
 
-        with pytest.raises(ValueError, match="stale"):
-            sheet.add_dimension(first, "bore.depth")
-
-    def test_a_size_verb_keeps_its_handle_fresh(self):
-        """The contrast: rebuilding the frozen feature through the handle is legitimate
-        and must not make it look stale."""
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        bore = sheet.hole(diameter=10, at=(0, 0, 14), axis="z")
-        bore.depth(12)
-        bore.thread("M10")
-        intent = sheet.add_dimension(bore, "bore")
-        assert intent._entry["target"] is sheet.features[0]
-
-    def test_a_size_verb_cannot_launder_a_stale_handle(self):
-        """Round 6's variant. The staleness check has to run BEFORE the write, or the
-        write refreshes `_declared` and the mismatch disappears — the handle then
-        resolves cleanly onto the wrong feature."""
-        sheet = Sheet(_part(), title="T", number="N").auto_dimensions()
-        first = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
-        sheet.hole(diameter=10, at=(20, 0, 14), axis="z").depth(7)
+    def test_a_tolerance_also_follows_its_feature(self):
+        """The bug that motivated #908, and it predates add_dimension entirely:
+        `_tolerances` was index-keyed since P2a, so a reorder moved a tolerance onto a
+        neighbouring feature."""
+        sheet = Sheet(_part(), title="T", number="N")
+        big = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
+        sheet.hole(diameter=4, at=(20, 0, 14), axis="z").depth(7)
+        big.tolerance(0.05)
 
         sheet.features.reverse()
 
-        with pytest.raises(ValueError, match="stale"):
-            first.thread("M10")
+        toleranced = [f for f, *_ in sheet._decorations() if hasattr(f, "diameter")]
+        assert [f.diameter for f in toleranced] == [10.0]
 
 
 def test_a_gdt_aspect_alongside_a_dimension_intent_is_legitimate():
@@ -484,3 +402,199 @@ def test_a_gdt_aspect_alongside_a_dimension_intent_is_legitimate():
     assert sheet.model() is not None
     assert sheet.build() is not None
     assert sheet.build() is not None, "and again — repeated builds must stay legal"
+
+
+class TestFeatureViewIdentity:
+    """`features` carries identity (#908), and assignment is not a move.
+
+    The distinction an earlier draft got wrong: keeping a slot's token is right for the
+    INTERNAL rebuild a size verb does — `.depth()` replaces the frozen dataclass with an
+    updated copy of the same feature — but on the public view, assignment cannot tell
+    "move this feature here" from "put a different feature here". Preserving identity
+    across it silently transferred every reference onto whatever was assigned.
+
+    So assignment mints fresh tokens and stale references fail loudly; `reverse()` and
+    `sort()` move whole entries and are the identity-preserving way to reorder.
+    """
+
+    @staticmethod
+    def _two_holes():
+        sheet = Sheet(_part(), title="T", number="N")
+        big = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
+        sheet.hole(diameter=4, at=(20, 0, 14), axis="z").depth(7)
+        big.tolerance(0.05)
+        return sheet, big
+
+    def test_a_tuple_swap_invalidates_rather_than_retargets(self):
+        sheet, _big = self._two_holes()
+        sheet.features[0], sheet.features[1] = sheet.features[1], sheet.features[0]
+        with pytest.raises(ValueError, match="no longer on the sheet"):
+            sheet._decorations()
+
+    def test_a_slice_permutation_invalidates_rather_than_retargets(self):
+        """`features[:] = features[::-1]` is the idiomatic in-place reversal, and it
+        moves values between slots exactly like a swap."""
+        sheet, _big = self._two_holes()
+        sheet.features[:] = sheet.features[::-1]
+        with pytest.raises(ValueError, match="no longer on the sheet"):
+            sheet._decorations()
+
+    def test_replacing_a_feature_wholesale_invalidates_its_references(self):
+        """A different feature in the slot is a different thing — the old feature's
+        tolerance must not transfer to it."""
+        sheet, _big = self._two_holes()
+        sheet.features[0] = HoleFeature(Frame((9, 9, 9), "z"), 1.0, depth=None, through=True)
+        with pytest.raises(ValueError, match="no longer on the sheet"):
+            sheet._decorations()
+
+    def test_reverse_preserves_identity(self):
+        """The identity-safe way to reorder: entries move, so references follow."""
+        sheet, _big = self._two_holes()
+        sheet.features.reverse()
+        toleranced = [f.diameter for f, *_ in sheet._decorations() if hasattr(f, "diameter")]
+        assert toleranced == [10.0]
+
+    def test_a_size_verb_preserves_identity(self):
+        """The internal rebuild path, which must NOT mint a new token."""
+        sheet, big = self._two_holes()
+        big.thread("M10")
+        toleranced = [f.diameter for f, *_ in sheet._decorations() if hasattr(f, "diameter")]
+        assert toleranced == [10.0]
+
+    def test_a_control_builder_survives_a_reorder(self):
+        """`control()` returns a builder that OUTLIVES the call which resolved its target, so
+        it is the one place a stored index could still retarget: `.position(0.1)` appends the
+        frame later, and an index would name whatever occupied the slot by then (PR #910
+        review). Everything else — `datum`/`finish`/`note` — resolves and appends in a single
+        expression, so only this seam can span a mutation."""
+        sheet = Sheet(_part(), title="T", number="N")
+        big = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
+        sheet.hole(diameter=4, at=(20, 0, 14), axis="z").depth(7)
+
+        control = sheet.control(big)
+        sheet.features.reverse()
+        control.position(0.1)
+        sheet._prepare()
+
+        frame = next(f for f in sheet.features if f.kind == "control_frame")
+        assert frame.origin.diameter == 10.0
+
+    def test_a_control_builder_spans_a_mint_too(self):
+        """The same seam against an *appending* mutation, which shifts no slot the builder
+        already holds but does grow the view — a token stays correct either way."""
+        sheet = Sheet(_part(), title="T", number="N")
+        big = sheet.hole(diameter=10, at=(-20, 0, 14), axis="z").depth(12)
+
+        control = sheet.control(big)
+        sheet.hole(diameter=4, at=(20, 0, 14), axis="z").depth(7)
+        sheet.features.reverse()
+        control.flatness(0.02)
+        sheet._prepare()
+
+        frame = next(f for f in sheet.features if f.kind == "control_frame")
+        assert frame.origin.diameter == 10.0
+
+
+class TestFeatureViewContract:
+    """The complete mutable-sequence surface, as executable specification.
+
+    Three times during #908 a fix for the identity problem reintroduced it through an
+    operation nobody had enumerated — `MutableSequence` derives more methods than one
+    tends to hold in mind. A systematic audit found the current behaviour correct; this
+    pins it so the next change cannot quietly regress a route.
+
+    The rule each case checks: an operation either PRESERVES identity (references follow
+    the feature) or DROPS it (references fail loudly). Never transfers it silently.
+    """
+
+    @staticmethod
+    def _sheet_with(n=3):
+        sheet = Sheet(_part(), title="T", number="N")
+        for i in range(n):
+            sheet.hole(diameter=4 + i, at=(-20 + 20 * i, 0, 14), axis="z").depth(5 + i)
+        return sheet
+
+    def _tokens(self, sheet):
+        return [t for t, _f in sheet._entries]
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda s, f: s.features.append(f), id="append"),
+            pytest.param(lambda s, f: s.features.extend([f]), id="extend"),
+            pytest.param(lambda s, f: s.features.insert(1, f), id="insert"),
+            pytest.param(lambda s, f: s.features.__iadd__([f]), id="iadd"),
+        ],
+    )
+    def test_additions_mint_fresh_tokens(self, mutate):
+        sheet = self._sheet_with()
+        before = self._tokens(sheet)
+        mutate(sheet, HoleFeature(Frame((50, 0, 14), "z"), 2.0, depth=None, through=True))
+        after = self._tokens(sheet)
+        assert len(after) == len(before) + 1
+        assert len(set(after)) == len(after), "tokens must stay unique"
+        assert set(before) <= set(after), "an addition must not disturb existing identity"
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda s: s.features.pop(), id="pop"),
+            pytest.param(lambda s: s.features.remove(s.features[1]), id="remove"),
+            pytest.param(lambda s: s.features.__delitem__(0), id="del"),
+            pytest.param(lambda s: s.features.clear(), id="clear"),
+        ],
+    )
+    def test_removals_drop_tokens(self, mutate):
+        sheet = self._sheet_with()
+        before = set(self._tokens(sheet))
+        mutate(sheet)
+        after = set(self._tokens(sheet))
+        assert after < before, "a removal must drop identity, not renumber"
+
+    def test_sort_preserves_identity(self):
+        """Like `reverse`, `sort` moves whole entries — references follow."""
+        sheet = self._sheet_with()
+        pairs = {t: f.diameter for t, f in sheet._entries}
+        sheet.features.sort(key=lambda f: -f.diameter)
+        assert {t: f.diameter for t, f in sheet._entries} == pairs
+        assert [f.diameter for f in sheet.features] == sorted(pairs.values(), reverse=True)
+
+    def test_extended_slice_assignment_mints_for_the_touched_slots_only(self):
+        """`features[::2] = …` assigns positions 0 and 2, so those drop identity while
+        the untouched position 1 keeps its own — assignment is per-slot, not wholesale."""
+        sheet = self._sheet_with()
+        before = self._tokens(sheet)
+        sheet.features[::2] = [sheet.features[0], sheet.features[2]]
+        after = self._tokens(sheet)
+        assert after[1] == before[1], "an untouched slot keeps its identity"
+        assert after[0] not in before and after[2] not in before, "assigned slots mint"
+        assert len(set(after)) == len(after)
+
+    def test_negative_indices_resolve(self):
+        sheet = self._sheet_with()
+        assert sheet.features[-1] is sheet.features[len(sheet.features) - 1]
+
+    def test_a_sheet_survives_deepcopy(self):
+        """The allocator must be copyable — `itertools.count` loses pickle/copy support
+        in Python 3.14, and this package supports >=3.11."""
+        import copy
+
+        sheet = self._sheet_with()
+        clone = copy.deepcopy(sheet)
+        assert [f.diameter for f in clone.features] == [f.diameter for f in sheet.features]
+        clone.hole(diameter=9, at=(60, 0, 14), axis="z")
+        assert len(set(t for t, _ in clone._entries)) == len(clone._entries)
+
+    def test_detection_seeded_features_carry_identity(self):
+        """`from_part` seeds through `extend`, so detected features are tokenised too and
+        a tolerance on one survives a reorder."""
+        from build123d import Box, Cylinder, Pos
+
+        part = Box(80, 50, 8) - Pos(20, 10, 4) * Cylinder(3, 8)
+        sheet = Sheet.from_part(part)
+        holes = [i for i, f in enumerate(sheet.features) if f.kind == "hole"]
+        assert holes, "expected detection to seed a hole"
+        sheet.of(holes[0]).tolerance(0.05)
+        sheet.features.reverse()
+        toleranced = [f for f, *_ in sheet._decorations() if getattr(f, "kind", None) == "hole"]
+        assert len(toleranced) == 1
