@@ -1551,11 +1551,11 @@ def control_frame(
 def _point3(name: str, p) -> Point:
     vals = tuple(float(c) for c in p)
     if len(vals) != 3:
-        raise ValueError(f"dimension() {name} must be a 3-tuple")
+        raise ValueError(f"measured_dimension() {name} must be a 3-tuple")
     return (vals[0], vals[1], vals[2])
 
 
-def authored_dimension(
+def measured_dimension(
     *,
     kind: str,
     value: float,
@@ -1571,25 +1571,25 @@ def authored_dimension(
     source_kind: str | None = None,
 ) -> AuthoredDimension:
     """A pre-authored drafting dimension from explicit measured values — the IR constructor
-    behind :meth:`Sheet.dimension` (#704: extracted so ``build_drawing(model=…)`` callers can
-    author one without the façade). Validates the kind against
+    behind :meth:`Sheet.measured_dimension` (#704: extracted so ``build_drawing(model=…)``
+    callers can author one without the façade). Validates the kind against
     :data:`~draftwright.model.ir.AUTHORED_DIMENSION_KINDS`, needs ≥2 ``ref_pts``, and derives
     ``at`` (the ``ref_bbox`` centre, else the ``ref_pts`` centroid) when not given."""
     _require_positive(value=value)
     dim_kind = str(kind).lower()
     if dim_kind not in AUTHORED_DIMENSION_KINDS:
         allowed = ", ".join(sorted(AUTHORED_DIMENSION_KINDS))
-        raise ValueError(f"dimension() kind must be one of: {allowed}")
+        raise ValueError(f"measured_dimension() kind must be one of: {allowed}")
     pts = tuple(_point3("ref_pts item", p) for p in ref_pts)
     if len(pts) < 2:
-        raise ValueError("dimension() needs at least two ref_pts")
+        raise ValueError("measured_dimension() needs at least two ref_pts")
     bbox = None if ref_bbox is None else tuple(float(c) for c in ref_bbox)
     if bbox is not None and len(bbox) != 6:
-        raise ValueError("dimension() ref_bbox must be a 6-tuple")
+        raise ValueError("measured_dimension() ref_bbox must be a 6-tuple")
     dom = str(dominant_axis).upper()
     if dom not in ("X", "Y", "Z"):
         if not (dom == "?" and dim_kind in ("diameter", "radius") and bbox is not None):
-            raise ValueError("dimension() dominant_axis must be X, Y, or Z")
+            raise ValueError("measured_dimension() dominant_axis must be X, Y, or Z")
     if at is None:
         if bbox is not None:
             x0, y0, z0, x1, y1, z1 = bbox
