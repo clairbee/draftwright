@@ -2088,7 +2088,7 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
         lo, hi = lo_pt["xyz".index(axis)], hi_pt["xyz".index(axis)]
         u, v = lo_pt[oi[0]], lo_pt[oi[1]]
         val = pd.value
-        lbl = pd.label + _tol_suffix(pd.tolerance, draft)
+        lbl = pd.value_text + _tol_suffix(pd.tolerance, draft)
         i = counts[axis]
         counts[axis] += 1
         if axis == "z":
@@ -2885,7 +2885,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
             (
                 "dim_step_typ",
                 *_zspan(rep),
-                rep.label,
+                rep.final_label,
                 _SLOT_DIM_STEP,
                 "representative step-height dimension dropped (front-view right strip full)",
             )
@@ -2928,7 +2928,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 (
                     f"dim_step_{col}",
                     *_zspan(rung),
-                    rung.label,
+                    rung.final_label,
                     _SLOT_DIM_STEP,
                     "step-height dimension dropped (front-view right strip full)",
                 )
@@ -2941,7 +2941,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
             (
                 "dim_height",
                 *_zspan(height),
-                height.label,
+                height.final_label,
                 _SLOT_DIM_HEIGHT,
                 "overall height dimension dropped (front-view right strip full)",
             )
@@ -3017,7 +3017,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     for i, rung in enumerate(short_rungs):
         name = f"dim_step_{i}"
         zbase, ztop = _zspan(rung)
-        label = rung.label
+        label = rung.final_label
 
         def _build_left(pos, zbase=zbase, ztop=ztop, label=label):
             return _dim(
@@ -3135,7 +3135,7 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
         edge = p1[1]
         name = f"dim_shoulder_{axis}{i}"
 
-        def _build(pos, p1=p1, p2=p2, edge=edge, label=rung.label, direction=direction):
+        def _build(pos, p1=p1, p2=p2, edge=edge, label=rung.final_label, direction=direction):
             return _dim(
                 (p1[0], edge, 0),
                 (p2[0], edge, 0),
@@ -3145,7 +3145,7 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
                 label=label,
             )
 
-        def _drop(nm, label=rung.label, view=view, direction=direction):
+        def _drop(nm, label=rung.final_label, view=view, direction=direction):
             ctx.record_issue(
                 "warning",
                 "step_position_dropped",

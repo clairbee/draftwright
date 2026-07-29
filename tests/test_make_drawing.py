@@ -5749,9 +5749,10 @@ class TestDetailView:
                     tuple(
                         ApprovedDimension(
                             id=None,
-                            label=str(z),
+                            value_text=str(z),
                             value=z,
                             span=((0.0, 0.0, 0.0), (0.0, 0.0, z)),
+                            rendered_label=str(z),
                         )
                         for z in (1.0, 1.1, 1.2, 1.3)
                     ),
@@ -5785,9 +5786,10 @@ class TestDetailView:
         rungs = tuple(
             ApprovedDimension(
                 id=None,
-                label=str(z - declared_base),
+                value_text=str(z - declared_base),
                 value=z - declared_base,
                 span=((0.0, 0.0, declared_base), (0.0, 0.0, z)),
+                rendered_label=str(z - declared_base),
             )
             for z in (8.0, 9.0, 10.0)
         )

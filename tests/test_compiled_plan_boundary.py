@@ -22,8 +22,10 @@ and suppression. If the boundary holds here it will hold for the flatter rendere
 from __future__ import annotations
 
 import ast
+import copy
 import inspect
 import pathlib
+import pickle
 from dataclasses import replace
 
 import pytest
@@ -97,7 +99,7 @@ class TestTheCompilerOwnsContent:
         plan = compile_dimensions(detect_part_model(_staircase()))
         rungs = plan.ladder("step_height")
         assert rungs is not None
-        assert [r.label for r in rungs.rungs] == ["15", "30"]
+        assert [r.final_label for r in rungs.rungs] == ["15", "30"]
         assert all(r.span is not None for r in rungs.rungs), "spans travel in PART space"
 
     def test_a_uniform_staircase_collapses_in_the_compiler(self):
@@ -106,7 +108,7 @@ class TestTheCompilerOwnsContent:
         similarly but is genuinely about the page."""
         rungs = compile_dimensions(detect_part_model(_uniform_staircase())).ladder("step_height")
         assert rungs is not None and rungs.representative
-        assert len(rungs.rungs) == 1 and "×" in rungs.rungs[0].label
+        assert len(rungs.rungs) == 1 and "×" in rungs.rungs[0].final_label
 
     @pytest.mark.parametrize(
         "make_part", [_staircase, _uniform_staircase], ids=["stepped", "uniform"]
@@ -135,12 +137,12 @@ class TestTheCompilerOwnsContent:
                 lo, hi = rung.span
                 measured = max(abs(b - a) for a, b in zip(lo, hi))
                 assert measured == pytest.approx(rung.value, rel=0.1), (
-                    f"{ladder.kind} {rung.label!r} spans {measured} but claims {rung.value}"
+                    f"{ladder.kind} {rung.final_label!r} spans {measured} but claims {rung.value}"
                 )
                 if ladder.representative:
                     # The one deliberate difference, asserted rather than skipped: the span
                     # is a single rise and the label multiplies it.
-                    assert "×" in rung.label, "a representative mark must say how many"
+                    assert "×" in rung.final_label, "a representative mark must say how many"
 
     def test_a_declared_base_is_measured_from_that_base(self):
         """`StepLevelFeature.base` is the IR's own statement of what the rungs measure from.
@@ -302,6 +304,52 @@ class TestTheRendererCannotSeeContent:
         with pytest.raises(ValueError, match="exact PartModel"):
             compile_dimensions(first, groups=plan_dimensions(second))
 
+    def test_feature_facts_and_compiled_plan_support_standard_composition(self):
+        """Strict slot access must survive copy, snapshot and process boundaries."""
+        from draftwright.model.compiled import FeatureFacts
+
+        plan = compile_dimensions(detect_part_model(_staircase()))
+        facts = plan.groups[0].facts
+        assert isinstance(facts, FeatureFacts)
+
+        for clone in (
+            copy.copy(facts),
+            copy.deepcopy(facts),
+            pickle.loads(pickle.dumps(facts)),
+        ):
+            assert repr(clone) == repr(facts)
+
+        for clone in (
+            copy.copy(plan),
+            copy.deepcopy(plan),
+            pickle.loads(pickle.dumps(plan)),
+        ):
+            assert clone.ladder("step_height") is not None
+
+    def test_every_existing_ir_kind_is_explicitly_classified(self):
+        import draftwright.model.ir as ir
+        from draftwright.model.compiled import _FACTS
+
+        ir_kinds = {
+            value.kind
+            for value in vars(ir).values()
+            if isinstance(value, type) and isinstance(getattr(value, "kind", None), str)
+        }
+        assert set(_FACTS) == ir_kinds
+
+    def test_numeric_fragments_and_complete_correlated_labels_are_distinct(self):
+        model = detect_part_model(Cylinder(10, 10))
+        plan = compile_dimensions(model)
+        ordinary = next(d for g in plan.groups for d in g.dims)
+        assert ordinary.value_text
+        assert ordinary.rendered_label is None
+        with pytest.raises(AttributeError, match="numeric value_text only"):
+            _ = ordinary.final_label
+
+        ladder = compile_dimensions(detect_part_model(_staircase())).ladder("step_height")
+        assert ladder is not None
+        assert all(r.final_label for r in ladder.rungs)
+
 
 class TestOmissionIsNotADrop:
     """Two different "not drawn" meet in this renderer and must stay distinguishable: the
@@ -400,7 +448,7 @@ class TestTheBoundaryIsLoadBearing:
             f"the detail view drew {len(detail)} step dims from a plan approving "
             f"{len(keep)} — it is rebuilding the ladder from the model: {sorted(detail)}"
         )
-        approved_labels = {r.label for r in keep}
+        approved_labels = {r.final_label for r in keep}
         assert set(detail.values()) <= approved_labels, (
             f"the detail view drew {sorted(set(detail.values()) - approved_labels)}, which "
             "the compiler did not approve"
@@ -435,7 +483,7 @@ class TestTheBoundaryIsLoadBearing:
         dwg = build_drawing(part)
         assert "dim_od" not in dwg.annotations()
         assert [o.label for n, o in dwg.iter_annotations() if n.startswith("ldr_z")] == [
-            f"ø{bores[1].label}"
+            f"ø{bores[1].value_text}"
         ]
         assert {"centerline_front", "centerline_side"} <= set(dwg.annotations())
 

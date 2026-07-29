@@ -139,7 +139,9 @@ class ApprovedDimension:
     """
 
     id: DimensionId | None
-    label: str
+    #: The formatted numeric value only (for example ``"12"``). Group renderers add
+    #: semantic syntax such as ``ø``, ``THRU`` and tolerance text.
+    value_text: str
     value: float
     span: tuple[Point, Point] | None
     ref: FeatureRef | None = None
@@ -153,11 +155,30 @@ class ApprovedDimension:
     #: shoulder coincident with its datum has a zero-length span in every coordinate;
     #: deriving X/Y from "the varying coordinate" is then impossible.
     axis: str | None = None
+    #: A complete compiler-owned label for correlated marks whose wording is itself a
+    #: content decision (for example ``"4× 10"``). Ordinary group dimensions leave this
+    #: ``None`` and consume :attr:`value_text`; the two contracts are deliberately named
+    #: apart so a renderer cannot mistake a numeric fragment for finished callout text.
+    rendered_label: str | None = None
 
     @property
     def parameter_id(self) -> str:
         base = f"{self.role}.{self.kind}"
         return f"{base}.{self.discriminator}" if self.discriminator else base
+
+    @property
+    def final_label(self) -> str:
+        """The complete compiler-owned label for a correlated mark.
+
+        Raises when called for an ordinary group dimension, whose renderer must compose
+        semantic syntax around :attr:`value_text` instead.
+        """
+        if self.rendered_label is None:
+            raise AttributeError(
+                f"{self.parameter_id or 'dimension'} has numeric value_text only, "
+                "not a complete rendered label"
+            )
+        return self.rendered_label
 
 
 #: The NON-dimensional facts each feature kind may hand a renderer, by kind.
@@ -226,6 +247,13 @@ _FACTS: dict[str, tuple[str, ...]] = {
     # sole printed value in this structural allowlist (ADR 0016, "Scope").
     "pmi": ("frame", "pmi_kind", "dominant_axis", "ref_bbox", "ref_pts", "label"),
     "authored_dimension": ("frame", "dimension_kind", "dominant_axis", "ref_pts", "ref_bbox"),
+    # Existing ADR 0011 aspect kinds are deliberately classified as exposing no
+    # renderer facts yet. Listing them distinguishes "known, reviewed, empty" from a new
+    # kind that has never crossed this boundary.
+    "control_frame": (),
+    "datum_ref": (),
+    "finish": (),
+    "note": (),
 }
 
 
@@ -262,8 +290,14 @@ class FeatureFacts:
         object.__setattr__(self, "_values", values)
 
     def __getattr__(self, name: str):
+        # deepcopy/pickle probe special methods on an uninitialised `__new__` object.
+        # Touching `_values` through __getattr__ in that state recursively re-entered this
+        # method. Backing slots and special names are never public facts.
+        if name.startswith("_"):
+            raise AttributeError(name)
         try:
-            return self._values[name]
+            values = object.__getattribute__(self, "_values")
+            return values[name]
         except KeyError:
             raise AttributeError(
                 f"{self._kind!r} exposes no fact {name!r} to renderers. If it is structure "
@@ -448,10 +482,11 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
     heights = [
         ApprovedDimension(
             id=_dim_id(step, "step_height.length"),
-            label=_fmt(z - step.base),
+            value_text=_fmt(z - step.base),
             value=z - step.base,
             span=((x, y, step.base), (x, y, z)),
             ref=step_ref,
+            rendered_label=_fmt(z - step.base),
         )
         for z in sorted(step.levels)
     ]
@@ -468,10 +503,11 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
             heights = [
                 ApprovedDimension(
                     id=_dim_id(step, "step_height.length"),
-                    label=f"{n}× {_fmt(rise)}",
+                    value_text=_fmt(rise),
                     value=rise,
                     span=((x, y, step.base), (x, y, first)),
                     ref=step_ref,
+                    rendered_label=f"{n}× {_fmt(rise)}",
                 )
             ]
         approved.append(
@@ -500,11 +536,12 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
     shoulders = [
         ApprovedDimension(
             id=_dim_id(step, "step_position.length"),
-            label=_fmt(abs(pos - step.datum[_di[axis]])),
+            value_text=_fmt(abs(pos - step.datum[_di[axis]])),
             value=abs(pos - step.datum[_di[axis]]),
             span=_shoulder_span(axis, pos),
             ref=step_ref,
             axis=axis,
+            rendered_label=_fmt(abs(pos - step.datum[_di[axis]])),
         )
         for axis, pos in sorted(step.shoulders)
     ]
@@ -572,10 +609,11 @@ def _compile_overall_height(
             (
                 ApprovedDimension(
                     id=_dim_id(env, "height.length"),
-                    label=_fmt(value),
+                    value_text=_fmt(value),
                     value=value,
                     span=((x, y, float(bb.min.Z)), (x, y, float(bb.max.Z))),
                     ref=env_ref,
+                    rendered_label=_fmt(value),
                 ),
             ),
             ref=env_ref,
@@ -599,7 +637,7 @@ def _compile_groups(planned) -> list[ApprovedGroup]:
                 id=DimensionId(g.feature, pd.param.parameter_id),
                 # DimParameter.value is a required float. Keep that invariant explicit at
                 # the boundary instead of implying a nullable state renderers cannot handle.
-                label=_fmt(pd.param.value),
+                value_text=_fmt(pd.param.value),
                 value=float(pd.param.value),
                 span=pd.param.span,
                 ref=FeatureRef(g.feature),

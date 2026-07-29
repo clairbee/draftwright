@@ -749,7 +749,7 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx, plan) -> None:
     # source view would have.
     levels = [r.span[1][2] for r in rungs]
     datum_z = rungs[0].span[0][2]
-    label_of = {r.span[1][2]: r.label for r in rungs}
+    label_of = {r.span[1][2]: r.final_label for r in rungs}
     shoulder_set = plan.ladder("step_position")
     has_shoulders = shoulder_set is not None
     z0, z1 = min(levels), max(levels)
