@@ -1910,7 +1910,19 @@ class Drawing:
             # staggered tiers) — after diameters, as in the auto-pass.
             if r.only_len:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_step_lengths(self, plan_dimensions(model), ctx=ctx, only=r.only_len)
+                from typing import cast as _cast_len
+
+                from draftwright.model.compiled import FeatureRef as _LenRef
+                from draftwright.model.compiled import compile_dimensions as _compile_len
+                from draftwright.model.ir import Feature as _LenFeature
+
+                assert all(isinstance(f, _LenFeature) for f in r.only_len)
+                render_step_lengths(
+                    self,
+                    _compile_len(model),
+                    ctx=ctx,
+                    only={_LenRef(_cast_len(_LenFeature, f)) for f in r.only_len},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.len_ids]
 
         def _s_slots():

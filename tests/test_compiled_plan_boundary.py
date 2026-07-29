@@ -57,18 +57,7 @@ _PENDING_VALUE_CARRYING = (
     "m_locy",
     "hc_",  # hole callouts — likewise
     "dim_pitch",  # pattern pitch — derived in _add_furniture from the feature
-    "dim_od",  # rotational OD — render_rotational, still on the advisory surface
-    "ldr_",  # concentric bore leaders — likewise
-    "m_dia",  # step/boss diameters — likewise
-    "m_steplen",
-    "m_slot",
-    "m_pocket",
-    "m_boss",
-    "m_plate",
-    "m_chamf",
-    "m_fillet",
-    "m_flat",
-    "m_groove",
+    "m_slot",  # slot dimensions — the last legacy DimensionGroup renderer
     "pmi_",  # raw AP242 PMI — the one documented permanent exception
 )
 
@@ -373,11 +362,7 @@ class TestTheBoundaryIsLoadBearing:
         The legacy renderer asserted that every raw rotational diameter remained in
         `DimensionGroup`, then used `rot.od` / `rot.bores` to build its geometry. That
         made suppression an error rather than a supported compiler decision."""
-        part = (
-            Cylinder(15, 10)
-            - Pos(0, 0, 5) * Cylinder(4, 5)
-            - Pos(0, 0, -5) * Cylinder(2.5, 20)
-        )
+        part = Cylinder(15, 10) - Pos(0, 0, 5) * Cylinder(4, 5) - Pos(0, 0, -5) * Cylinder(2.5, 20)
         model = detect_part_model(part)
         full = compile_dimensions(model)
         rotational = full.of_kind("rotational")
@@ -452,12 +437,12 @@ class TestTheBoundaryIsLoadBearing:
             "render_pockets",
             "render_rotational",
             "render_slot_patterns",
+            "render_step_lengths",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
             "render_slots",
-            "render_step_lengths",
         ], f"the advisory-surface set changed: {sorted(by_contract['groups'])}"
 
         assert sorted(by_contract["model"]) == [

@@ -491,7 +491,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # cramming; the envelope dim along the turning axis was suppressed so the chain
         # does not double-dimension the length.
         if a.prof is not None:
-            render_step_lengths(dwg, _groups, ctx=ctx)
+            render_step_lengths(dwg, _compiled, ctx=ctx)
 
     def _s_off_axis_along():
         # Side-drilled (X/Y-axis) hole HEIGHT locations — queued after the mandatory

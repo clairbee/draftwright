@@ -2466,7 +2466,7 @@ def _next_steplen_start(ctx, prefix: str = "m_steplen") -> int:
     return max(idxs) + 1 if idxs else 0
 
 
-def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
+def render_step_lengths(dwg, plan, *, ctx, only=None) -> int:
     """Unified turned step-length chain (ADR 0008 #223): each `StepFeature`'s length
     span projects into the profile view and joins the chain that tiles the turning
     axis so every shoulder is located. X-turned → horizontal chain above the front
@@ -2481,31 +2481,24 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
     interior shoulders — never worse than the prior skip. Returns the count placed."""
     rows = []  # (axis, a_world, b_world, value, tolerance) in axis order
     step_origins = []
-    step_radii = []
-    for g in groups:
-        if g.feature_kind != "step":
+    for g in plan.of_kind("step"):
+        if g.facts.frame.axis not in ("x", "y", "z"):
             continue
-        if g.feature.frame.axis not in ("x", "y", "z"):
+        if only is not None and g.ref not in only:  # #426 finalize: recorded subset
             continue
-        if only is not None and g.feature not in only:  # #426 finalize: recorded subset
-            continue
-        length = next(
-            (pd.param for pd in g.dims if pd.param.kind == "length" and pd.param.span is not None),
-            None,
-        )
+        length = g.dim(kind="length")
         if length is None or length.span is None:
             continue
         rows.append(
             (
-                g.feature.frame.axis,
+                g.facts.frame.axis,
                 length.span[0],
                 length.span[1],
                 length.value,
                 length.tolerance,
             )
         )
-        step_origins.append(g.feature.frame.origin)
-        step_radii.append(g.feature.diameter / 2)
+        step_origins.append(g.facts.frame.origin)
     if not rows:
         return 0
     draft = dwg.draft
@@ -2628,17 +2621,19 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
             axis_z = sum(axis_zs) / len(axis_zs)
 
             # Choose the same standard scale family as the detail renderer, then
-            # crop a geometry-relative strip: at most half the smallest radius and
-            # at most 12 page-mm tall. This stays useful from tiny pins to large
-            # flanges without a magic world-space ±2 mm band.
+            # crop a geometry-relative strip: at most one quarter of the side-view
+            # silhouette and at most 12 page-mm tall. The view rectangle is layout
+            # geometry; unlike the old `StepFeature.diameter` read it cannot recover a
+            # withheld printable diameter from the source feature.
             detail_target = dwg.scale * 10
             for factor in (2, 5, 10):
                 candidate = dwg.scale * factor
                 if candidate >= scale_needed:
                     detail_target = candidate
                     break
-            min_radius = min(step_radii)
-            cross_half = max(0.1, min(min_radius / 2, 6.0 / detail_target))
+            _sx0, sy0, _sx1, sy1 = dwg.view_bounds("side")
+            silhouette_quarter = abs(sy1 - sy0) / (4 * dwg.scale)
+            cross_half = max(0.1, min(silhouette_quarter, 6.0 / detail_target))
 
             def _redraw_y(dwg, detail_view, coords, detail_scale, _rows=bare_rows):
                 def _at(x, y, z):
