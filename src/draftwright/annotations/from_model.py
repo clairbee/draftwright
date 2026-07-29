@@ -3088,12 +3088,14 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
     draft = dwg.draft
 
     def _axis_of(rung):
-        """Which axis a shoulder runs along — read off the span's varying coordinate.
+        """The compiler-owned shoulder direction.
 
-        The span already says it, so an `axis` field would be a second statement of one
-        fact and a second thing to keep in step."""
-        lo, hi = rung.span
-        return "x" if lo[0] != hi[0] else "y"
+        A span normally reveals its varying coordinate, but a shoulder on its own datum
+        has a degenerate span and reveals no direction at all. Axis is therefore explicit
+        structural content on the approved rung, not inferred placement policy."""
+        if rung.axis not in ("x", "y"):
+            raise AssertionError(f"step-position rung has no X/Y axis: {rung.axis!r}")
+        return rung.axis
 
     axes = {_axis_of(r) for r in rungs}
     mixed_axes = len(axes) > 1

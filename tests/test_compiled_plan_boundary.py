@@ -243,6 +243,29 @@ class TestTheRendererCannotSeeContent:
             for rung in ladder.rungs:
                 assert rung.id is not None, f"{ladder.kind} rung lost its DimensionId"
 
+    def test_zero_length_shoulder_keeps_its_explicit_axis(self):
+        """A degenerate datum→shoulder span cannot reveal whether it is X or Y."""
+        from draftwright.model.ir import Frame, PartModel, StepLevelFeature
+
+        part = Box(90, 60, 30)
+        step = StepLevelFeature(
+            Frame((0, 0, 0), "z"),
+            base=0.0,
+            levels=(10.0,),
+            shoulders=(("x", -45.0),),
+            datum=(-45.0, -30.0, 0.0),
+        )
+        model = PartModel(
+            bbox=part.bounding_box(),
+            orientation=None,
+            features=[step],
+        )
+        ladder = compile_dimensions(model).ladder("step_position")
+        assert ladder is not None
+        assert len(ladder.rungs) == 1
+        assert ladder.rungs[0].span[0] == ladder.rungs[0].span[1]
+        assert ladder.rungs[0].axis == "x"
+
     def test_the_layout_frame_carries_no_part_geometry(self):
         from draftwright._core import LayoutFrame
 

@@ -5768,6 +5768,47 @@ class TestDetailView:
         _request_prismatic_detail(None, a, ctx=with_escalation, plan=plan)
         assert len(with_escalation.detail_requests) == 1
 
+    def test_declared_step_base_does_not_replace_physical_detail_crop_base(self):
+        """Measurement datum and visible crop geometry are intentionally different."""
+        from types import SimpleNamespace
+
+        from draftwright.annotations._common import Escalation, PlacementContext
+        from draftwright.annotations.sections import _request_prismatic_detail
+        from draftwright.model.compiled import (
+            ApprovedDimension,
+            ApprovedLadder,
+            RenderableDimensionPlan,
+        )
+
+        bbox_base = -15.0
+        declared_base = 5.0
+        rungs = tuple(
+            ApprovedDimension(
+                id=None,
+                label=str(z - declared_base),
+                value=z - declared_base,
+                span=((0.0, 0.0, declared_base), (0.0, 0.0, z)),
+            )
+            for z in (8.0, 9.0, 10.0)
+        )
+        plan = RenderableDimensionPlan(ladders=(ApprovedLadder("step_height", rungs),))
+        analysis = SimpleNamespace(
+            bb=SimpleNamespace(
+                min=SimpleNamespace(Z=bbox_base),
+                max=SimpleNamespace(Z=20.0),
+            ),
+            SCALE=1.0,
+        )
+        ctx = PlacementContext(
+            escalations=[Escalation(kind="step", view="front", feature=None, reason="illegible")]
+        )
+
+        _request_prismatic_detail(None, analysis, ctx=ctx, plan=plan)
+
+        assert len(ctx.detail_requests) == 1
+        assert ctx.detail_requests[0].crop_lo == bbox_base
+        assert ctx.detail_requests[0].crop_lo != declared_base
+
     def test_unplaceable_detail_is_reported_not_silently_dropped(self):
         # #630: on a shelled cover the crowded step band is full-width (stacked face
         # levels), so a detail can't be enlarged legibly AND still fit — detail_view=True

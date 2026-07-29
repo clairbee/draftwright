@@ -149,6 +149,10 @@ class ApprovedDimension:
     role: str = ""
     discriminator: str | None = None
     tolerance: object | None = None
+    #: Structural direction needed when a span cannot encode it. In particular, a
+    #: shoulder coincident with its datum has a zero-length span in every coordinate;
+    #: deriving X/Y from "the varying coordinate" is then impossible.
+    axis: str | None = None
 
     @property
     def parameter_id(self) -> str:
@@ -486,8 +490,8 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
         Carried rather than left ``None`` so consumers never go back to the feature for the
         station: the detail crop needs the X positions to frame the crowded band, and
         `render_step_positions` will need both ends when it migrates. The varying
-        coordinate also tells a consumer which axis it runs along, without a second field
-        to keep in step."""
+        coordinate usually shows which axis it runs along. It cannot do so for a shoulder
+        coincident with its datum, so the approved entry also carries the explicit axis."""
         lo = list(step.datum)
         hi = list(step.datum)
         hi[_di[axis]] = pos
@@ -500,6 +504,7 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
             value=abs(pos - step.datum[_di[axis]]),
             span=_shoulder_span(axis, pos),
             ref=step_ref,
+            axis=axis,
         )
         for axis, pos in sorted(step.shoulders)
     ]

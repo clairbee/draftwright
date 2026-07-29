@@ -768,12 +768,12 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx, plan) -> None:
         dwg.draft.font_size + dwg.draft.pad_around_text if dwg is not None else _MIN_STEP_SEP_MM
     )
     # X stations frame the crowded band — view geometry, but read off the approved
-    # shoulder spans rather than the feature, so nothing here needs the model either. A
-    # shoulder's span varies along its own axis, which is how an X station is recognised.
+    # shoulder spans rather than the feature, so nothing here needs the model either.
+    # Axis is explicit because a shoulder coincident with its datum has a degenerate span.
     x_stations = sorted(
         r.span[1][0]
         for r in (shoulder_set.rungs if shoulder_set is not None else ())
-        if r.span is not None and r.span[0][0] != r.span[1][0]
+        if r.span is not None and r.axis == "x"
     )
     xpad = 0.08 * (x_stations[-1] - x_stations[0]) + 1.0 if len(x_stations) >= 2 else 0.0
 
@@ -855,11 +855,10 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx, plan) -> None:
             scale_needed=scale_needed,
             redraw=redraw,
             pads=pads,
-            # These are absolute heights from the part's base datum, not local
-            # rise dimensions. Keep that datum in the projected crop so every
-            # witness point belongs to visible detail geometry, while ``lo``
-            # remains the crowded band marked on the source view.
-            crop_lo=datum_z,
+            # Witnesses measure from the declared datum, but the crop is VIEW geometry:
+            # retain the physical part base so those witnesses attach to visible detail
+            # linework even when a declared base differs from the bounding-box minimum.
+            crop_lo=a.bb.min.Z,
             cross_axis="x" if len(x_stations) >= 2 else None,
             cross_lo=max(a.bb.min.X, x_stations[0] - xpad) if len(x_stations) >= 2 else None,
             cross_hi=min(a.bb.max.X, x_stations[-1] + xpad) if len(x_stations) >= 2 else None,
