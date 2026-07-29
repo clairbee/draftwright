@@ -94,25 +94,31 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 
 ### Scope, stated so the exceptions cannot be mistaken for completeness
 
-**The rule is the destination; the migration is partial and its remainder is named.**
-Removing the qualification entirely once the detail path landed was wrong — two paths still
-emit dimensional content of their own, and a rule stated more broadly than it holds is worse
-than one honestly scoped (#923 review round 3). What is not yet inside is listed here, and
-`tests/test_compiled_plan_boundary.py` fails the moment an unlisted mark appears.
+**The rule is the destination. The migration is at its FIRST SLICE, and the inventory
+below is the honest state of it.**
 
-- **Location dimensions are inside this rule.** They are dimensions, and letting
-  `render_locations` rebuild them from the model preserves the same bypass class.
-  `plan_locations` returns a flat, cross-feature, ref-deduped list that never enters a
-  `DimensionGroup`, so they are sequenced later in the migration rather than carved out
-  (#883). The boundary is not complete until they are inside it.
-- **Pattern pitch dimensions are inside this rule and not yet migrated.** `_add_furniture`
-  derives `n× pitch` from `PatternFeature.members`/`count`/`pitch` and places it directly
-  (`annotations/holes.py`), so it survives an empty compiled plan. It is grouped with
-  furniture in the code but it prints a VALUE, which is exactly what makes something
-  dimensional content under this rule — the grouping is the bug. Sequenced with locations.
-- **Raw AP242 PMI is a documented exception.** `PmiFeature.parameters()` is empty by design
-  and the record renders verbatim, so there is no compiled content for it to come from. It
-  is an explicit provenance-preserving escape hatch, not an oversight.
+Three renderers have crossed: `render_height_ladder`, `render_step_positions`, and the
+prismatic detail redraw. Everything else still takes either the legacy `DimensionGroup`
+surface — where `suppressed` remains an advisory boolean a renderer may ignore, which is
+exactly what eight #921 rounds found happening — or the raw model.
+
+Two earlier versions of this section understated that, each time because the guard behind
+it measured the wrong thing (#923 reviews). Counting renderers that take `model` reported
+the migration nearly complete while sixteen sat on the advisory surface; not naming a
+parameter `model` is not the same as having crossed the boundary.
+`tests/test_compiled_plan_boundary.py` now classifies by **contract** and pins all three
+lists, so this inventory cannot drift from the code:
+
+| Contract | Meaning | Renderers |
+|---|---|---|
+| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions` (+ the detail redraw) |
+| `groups` | advisory `suppressed` — **pending** | `render_slots`, `render_centermarks`, `render_diameters`, `render_chamfers`, `render_fillets`, `render_flats`, `render_pockets`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_plates`, `render_envelope`, `render_step_lengths`, `render_rotational`, `render_pocket_patterns`, `render_slot_patterns` |
+| `model` | raw inventory — **pending**, except PMI | `render_locations` (#883), `render_gdt`, `render_pmi` (permitted) |
+
+Pattern pitch dimensions (`_add_furniture` → `_place_pitch_dim`) are pending too: they are
+grouped with furniture in the code but print a VALUE, which is what makes something
+dimensional under this rule. The grouping is the bug.
+
 - **Furniture is not dimensional content.** Centrelines, centre marks and section arrows
   print no value; they are sized off the geometry they mark and stay outside this rule.
 

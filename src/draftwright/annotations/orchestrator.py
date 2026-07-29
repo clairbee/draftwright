@@ -306,6 +306,11 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     # Plan the dimensions ONCE and thread the groups to every renderer that reads them
     # (was recomputed per renderer, #275). One rule set over DimParameters, literally.
     _groups = plan_dimensions(_model)
+    # ONE compiled plan, shared by every migrated consumer (#923 review round 4).
+    # Compiling per stage ran the compiler three times and, worse, let the direct
+    # ladder, the shoulders and the detail escalation each hold a separately
+    # derived decision — three chances to disagree about one drawing.
+    _compiled = compile_dimensions(_model, groups=_groups)
 
     # Hole callouts, location dims, and the section view fire on *feature
     # presence*, independent of the turned/prismatic class (#10): the
@@ -390,7 +395,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
             # `groups=` so the planner runs ONCE per build: the orchestrator already
             # planned, and a compiler re-planning behind it would create a second
             # product that can drift while the migration is partial (#923 review).
-            compile_dimensions(_model, groups=_groups),
+            _compiled,
             layout_frame(a),
             ctx=ctx,
             detail_view=detail_view,
@@ -406,9 +411,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_step_positions():
         # Prismatic step POSITIONS (#555): where each shoulder sits along its axis, so a
         # stepped block is fully constrained (the heights alone leave the shoulder implicit).
-        render_step_positions(
-            dwg, compile_dimensions(_model, groups=_groups), layout_frame(a), ctx=ctx
-        )
+        render_step_positions(dwg, _compiled, layout_frame(a), ctx=ctx)
 
     def _s_chamfers():
         # Chamfer callouts (#560): C{leg} / {leg}×{angle}° via a leader off each chamfer face.
@@ -462,9 +465,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # Prismatic step-height detail: queue it (only when build_drawing(detail_view=True))
         # — resolved with every other detail request in the "details" stage (#307).
         if detail_view:
-            _request_prismatic_detail(
-                dwg, a, ctx=ctx, plan=compile_dimensions(_model, groups=_groups)
-            )
+            _request_prismatic_detail(dwg, a, ctx=ctx, plan=_compiled)
 
     def _s_boss_diameters():
         # Prismatic bosses get a plan-view ø leader BEFORE the turned row/column solve,

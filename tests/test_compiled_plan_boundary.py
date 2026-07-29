@@ -34,25 +34,43 @@ from draftwright.annotations.from_model import render_height_ladder
 from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.compiled import RenderableDimensionPlan, compile_dimensions
 
-#: Marks that legitimately survive an empty compiled plan because they carry no VALUE.
-#: Anything added here needs that reason: "the test failed otherwise" is how the boundary
-#: erodes. A pattern's pitch dim prints "4× 20" and is therefore NOT furniture — it is a
-#: pending migration, tracked below.
-_FURNITURE = (
-    "centerline",
-    "m_cm",
-    "m_locx",
-    "m_locy",
-    "note_",
+#: Marks that carry NO value, and so legitimately survive an empty compiled plan.
+#: Each needs that reason; "the test failed otherwise" is not one.
+_VALUE_FREE = (
+    "centerline",  # shows where an axis is
+    "m_cm",  # centre marks — sized off the hole they mark (#875)
+    "note_",  # the ISO NTS note
     "title_block",
-    "section_",
+    "section_",  # cutting-plane arrows and label
     "hatch",
     "detail_marker",
     "detail_caption",
-    "hc_",
-    "m_env",
-    "balloon",
-    "table",
+)
+
+#: Marks that DO carry a value and still survive an empty plan — i.e. renderers that have
+#: not crossed the boundary yet. Listed individually rather than lumped in with furniture,
+#: because calling them furniture is how the pitch dim hid: annotation names are not a
+#: semantic type system, and a prefix list quietly became the definition of "dimensional"
+#: (#923 review round 4). Each entry is a pending migration, and the ADR names it too.
+_PENDING_VALUE_CARRYING = (
+    "m_locx",  # hole location ladders — #883
+    "m_locy",
+    "m_env",  # envelope width/depth — render_envelope, still on the advisory surface
+    "hc_",  # hole callouts — likewise
+    "dim_pitch",  # pattern pitch — derived in _add_furniture from the feature
+    "dim_od",  # rotational OD — render_rotational, still on the advisory surface
+    "ldr_",  # concentric bore leaders — likewise
+    "m_dia",  # step/boss diameters — likewise
+    "m_steplen",
+    "m_slot",
+    "m_pocket",
+    "m_boss",
+    "m_plate",
+    "m_chamf",
+    "m_fillet",
+    "m_flat",
+    "m_groove",
+    "pmi_",  # raw AP242 PMI — the one documented permanent exception
 )
 
 
@@ -288,14 +306,18 @@ class TestTheBoundaryIsLoadBearing:
             lambda *a, **kw: RenderableDimensionPlan(),
         )
         empty = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
-        # EVERY dimensional mark, not a hand-listed prefix. Filtering to
-        # `dim_step`/`dim_height` let `dim_shoulder_*` through for a whole review round —
-        # a guard that only looks where you already know to look is not a guard (#923
-        # review round 3). Furniture is excluded by name because it prints no value.
-        leaked = sorted(n for n in empty if not n.startswith(_FURNITURE))
+        # Anything that is neither value-free furniture nor a NAMED pending migration.
+        # Filtering to `dim_step`/`dim_height` let `dim_shoulder_*` through for a whole
+        # round, and folding value-carrying marks into a "furniture" list hid the pitch dim
+        # for another — a guard that only looks where you already know to look is not a
+        # guard, and a prefix list must not become the definition of "dimensional".
+        leaked = sorted(
+            n for n in empty if not n.startswith(_VALUE_FREE + _PENDING_VALUE_CARRYING)
+        )
         assert not leaked, (
             f"{leaked} reached the page from an EMPTY compiled plan — something is "
-            "rebuilding dimensions from somewhere other than the plan"
+            "rebuilding dimensions from somewhere other than the plan, and it is not on "
+            "the pending list"
         )
 
     def test_the_detail_view_emits_exactly_the_approved_rungs(self):
@@ -346,30 +368,68 @@ class TestTheBoundaryIsLoadBearing:
             "the compiler did not approve"
         )
 
-    def test_the_migration_has_not_silently_stalled(self):
-        """A count, so finishing the migration is visible rather than assumed. Lower it as
-        each dimensional renderer moves; the sequence ends when locations are inside too
-        (#883) and only the documented AP242 PMI exception still takes the model."""
-        src = (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "src"
-            / "draftwright"
-            / "annotations"
-            / "from_model.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        unmigrated = sorted(
-            node.name
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name.startswith("render_")
-            and "model" in {a.arg for a in node.args.args}
-        )
-        assert unmigrated == [
+    def test_the_migration_guard_measures_the_CONTRACT_not_the_signature(self):
+        """How far the boundary actually reaches, by what each renderer is HANDED.
+
+        The first version of this counted `render_*` functions taking `model` and reported
+        the migration nearly complete. That measured the wrong property: a renderer taking
+        legacy `groups` receives `PlannedDimension`s whose `suppressed` is still an advisory
+        boolean it can ignore — which is the exact surface eight #921 rounds found being
+        ignored. Not naming a parameter `model` is not the same as having crossed the
+        boundary (#923 review round 4).
+
+        So classification is by contract: `plan` means approved entries only; `groups`
+        means the advisory surface; `model` means raw inventory. The pending lists are
+        pinned so the count cannot drift, and so finishing is a visible event rather than
+        an assumption.
+        """
+        by_contract: dict[str, list[str]] = {"plan": [], "groups": [], "model": []}
+        for mod in ("from_model", "holes"):
+            src = (
+                pathlib.Path(__file__).resolve().parents[1]
+                / "src"
+                / "draftwright"
+                / "annotations"
+                / f"{mod}.py"
+            ).read_text(encoding="utf-8")
+            for node in ast.parse(src).body:
+                if not isinstance(node, ast.FunctionDef) or not node.name.startswith("render_"):
+                    continue
+                args = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+                for contract in ("plan", "groups", "model"):
+                    if contract in args:
+                        by_contract[contract].append(node.name)
+                        break
+
+        assert sorted(by_contract["plan"]) == [
+            "render_height_ladder",
+            "render_step_positions",
+        ], "the migrated set changed — update this and the ADR's inventory together"
+
+        assert sorted(by_contract["groups"]) == [
+            "render_boss_diameters",
+            "render_boss_heights",
+            "render_centermarks",
+            "render_chamfers",
+            "render_diameters",
+            "render_envelope",
+            "render_fillets",
+            "render_flats",
+            "render_grooves",
+            "render_plates",
+            "render_pocket_patterns",
+            "render_pockets",
+            "render_rotational",
+            "render_slot_patterns",
+            "render_slots",
+            "render_step_lengths",
+        ], f"the advisory-surface set changed: {sorted(by_contract['groups'])}"
+
+        assert sorted(by_contract["model"]) == [
             "render_gdt",
             "render_locations",
             "render_pmi",
-        ], f"the unmigrated set changed: {unmigrated}"
+        ], f"the raw-inventory set changed: {sorted(by_contract['model'])}"
 
     def test_the_pending_dimensional_paths_are_the_ones_the_adr_names(self):
         """Two paths still emit dimensional content of their own, and the ADR says so.
@@ -385,5 +445,9 @@ class TestTheBoundaryIsLoadBearing:
             / "adr"
             / "0016-declared-dimensioning-intent.md"
         ).read_text(encoding="utf-8")
-        for pending in ("Location dimensions are inside this rule", "Pattern pitch dimensions"):
-            assert pending in adr, f"the ADR stopped naming a pending path: {pending}"
+        assert "render_rotational" in adr and "render_envelope" in adr, (
+            "the ADR's pending inventory stopped naming the advisory-surface renderers — "
+            "it must list what has NOT crossed the boundary, not just what has"
+        )
+        assert "Pattern pitch dimensions" in adr, "pitch dims dropped off the pending list"
+        assert "#883" in adr, "locations dropped off the pending list"
