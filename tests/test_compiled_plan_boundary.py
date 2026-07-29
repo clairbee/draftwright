@@ -404,6 +404,7 @@ class TestTheBoundaryIsLoadBearing:
             "render_boss_diameters",
             "render_boss_heights",
             "render_chamfers",
+            "render_diameters",
             "render_envelope",
             "render_fillets",
             "render_flats",
@@ -417,7 +418,6 @@ class TestTheBoundaryIsLoadBearing:
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
-            "render_diameters",
             "render_rotational",
             "render_slots",
             "render_step_lengths",

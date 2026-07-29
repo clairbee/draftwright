@@ -86,6 +86,7 @@ from draftwright.layout import StripCandidate, plan_strip
 # drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
+from draftwright.model.compiled import resolve_feature
 from draftwright.model.ir import AUTHORED_DIMENSION_KINDS, HoleFeature, PatternFeature
 from draftwright.model.planner import plan_locations
 
@@ -1031,7 +1032,7 @@ def _diameter_column_left(dwg, items, start: int = 0, trace=None, *, ctx) -> int
     return placed
 
 
-def _diameter_step_anchor(anchor, features):
+def _diameter_step_anchor(anchor, groups):
     """Anchor point for a turned ⌀ leader tip.
 
     Centre the leader at the MID-LENGTH of the STEP carrying this diameter, rather
@@ -1051,26 +1052,30 @@ def _diameter_step_anchor(anchor, features):
     recorded subset, as the pre-#794 first-recorded-origin anchor also did.
     """
     steps = [
-        f for f in features if getattr(f, "kind", None) == "step" and getattr(f, "span", None)
+        (g, g.dim(kind="length"))
+        for g in groups
+        if g.feature_kind == "step" and g.dim(kind="length") is not None
     ]
+    steps = [(g, d) for g, d in steps if d.span is not None]
     if not steps:
         return anchor
-    idx = {"x": 0, "y": 1, "z": 2}[steps[0].frame.axis]
+    idx = {"x": 0, "y": 1, "z": 2}[steps[0][0].facts.frame.axis]
 
-    def _key(f):
-        ends = sorted(end[idx] for end in f.span)
+    def _key(item):
+        _g, dim = item
+        ends = sorted(end[idx] for end in dim.span)
         length = round(ends[1] - ends[0], 3)  # emitter rounds step length and centre (`at`) to
         at = round((ends[0] + ends[1]) / 2, 3)  # 3dp — quantise both so the selection round-trips
         return (length, -(at - length / 2))
 
-    step = max(steps, key=_key)
-    ends = sorted(end[idx] for end in step.span)
-    centred = list(step.frame.origin)  # the SELECTED step's own origin (radial + axial)
+    step, length = max(steps, key=_key)
+    ends = sorted(end[idx] for end in length.span)
+    centred = list(step.facts.frame.origin)  # the SELECTED step's own origin (radial + axial)
     centred[idx] = (ends[0] + ends[1]) / 2
     return tuple(centred)
 
 
-def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> int:
+def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     """ø leaders for a turned part's external step/boss diameters, from the IR —
     one distinct callout per diameter, in a tidy row below the front view
     (X-turning), a column to its left (Z-turning), or as radial leaders in the
@@ -1091,39 +1096,44 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
     row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, {features}, tolerance]  (X-turned)
     col_buckets: dict = {}  # Z-turned
     end_buckets: dict = {}  # Y-turned: radial leaders in the end-on front view
-    for g in groups:
-        if g.feature_kind not in ("step", "boss"):
+    for g in plan.of_kind("step", "boss"):
+        if only is not None and g.ref not in only:  # #426 finalize: recorded subset
             continue
-        if only is not None and g.feature not in only:  # #426 finalize: recorded subset
-            continue
-        dpd = next((pd for pd in g.dims if pd.param.kind == "diameter"), None)
+        dpd = g.dim(kind="diameter")
         if dpd is None:
             continue
-        dia = dpd.param.value
+        dia = dpd.value
         # An EXTERNAL thread (#859) makes a distinct callout: a threaded ⌀6 ("ø6 M6x1") and a
         # plain ⌀6 are NOT the same label, so the bucket keys on (⌀, thread) — this never drops a
         # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
         # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
         # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
-        thr = getattr(g.feature, "thread", None)
+        thr = g.facts.get("thread")
         # A coincident plain ⌀ already drawn (a bore, another step) dedups only an UNTHREADED ⌀;
         # a threaded ⌀ is a distinct callout, so a bare ⌀8 mention must not suppress ø8 M8x1.25.
         if thr is None and any(abs(dia - m) <= tol for m in mentioned):
             continue
-        bucket = {"x": row_buckets, "y": end_buckets, "z": col_buckets}.get(g.feature.frame.axis)
+        bucket = {"x": row_buckets, "y": end_buckets, "z": col_buckets}.get(g.facts.frame.axis)
         if bucket is None:
             continue
-        dtol = dpd.param.tolerance
+        dtol = dpd.tolerance
         dkey = (round(dia, 2), thr)
-        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr])
-        entry[2].add(g.feature)
+        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr, []])
+        entry[2].add(g.ref)
+        entry[5].append(g)
         if entry[3] is None:
             entry[3] = dtol
 
     def _items(buckets):
         return [
-            (_diameter_step_anchor(a, fs), d, next(iter(fs)) if len(fs) == 1 else None, t, thr)
-            for a, d, fs, t, thr in buckets.values()
+            (
+                _diameter_step_anchor(a, gs),
+                d,
+                next(iter(refs)) if len(refs) == 1 else None,
+                t,
+                thr,
+            )
+            for a, d, refs, t, thr, gs in buckets.values()
         ]
 
     # The placers name leaders m_dia_{x,z}{start+i} CONTIGUOUSLY from one start. The auto-pass
@@ -1157,26 +1167,25 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
         if vb is not None:
             reach = dwg.draft.font_size + 6 * dwg.draft.pad_around_text
             hole_circles = []
-            for g in groups:
-                feature = g.feature
+            for g in plan.of_kind("hole", "pattern"):
+                feature = g.facts
                 if feature.frame.axis != "y":
                     continue
-                if feature.kind == "hole":
-                    diameter = feature.diameter
-                    locations = feature.members or (feature.frame.origin,)
-                elif feature.kind == "pattern":
-                    diameter = feature.member.diameter
-                    locations = feature.members or (feature.frame.origin,)
-                else:
+                bore = g.dim(kind="diameter", role="bore")
+                if bore is None:
                     continue
+                diameter = bore.value
+                locations = feature.members or (feature.frame.origin,)
                 for location in locations:
                     px, py, *_ = dwg.at("front", *location)
                     hole_circles.append((px, py, diameter / 2 * a.SCALE))
             jobs = []
             covered_by_name = {}
-            for i, (_anchor, dia, features, dtol, thr) in enumerate(end_buckets.values()):
-                representative = next(iter(features))
-                owner = representative if len(features) == 1 else None
+            for i, (_anchor, dia, refs, dtol, thr, feature_groups) in enumerate(
+                end_buckets.values()
+            ):
+                representative = feature_groups[0].facts
+                owner = next(iter(refs)) if len(refs) == 1 else None
                 # Materialise now: a generator expression would close over ``owner``
                 # and all jobs would read the final loop iteration's feature when
                 # _leader_callout_pass consumes them (#890).
@@ -1434,7 +1443,10 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
             tried += 1
             ldr = Leader(tip=(tip[0], tip[1], 0), elbow=elbow, label=label, draft=dwg.draft)
             if _label_lands_clear(ldr, obstacles, vb, page, geom_clear=geom_clear):
-                ctx.place(ldr, name, view=view, feature=feature)
+                # Compiled renderers carry opaque FeatureRefs so they cannot recover
+                # measurements from the source feature. Provenance is the one seam
+                # where the registry intentionally needs the source object itself.
+                ctx.place(ldr, name, view=view, feature=resolve_feature(feature))
                 if ev is not None:
                     ev["items"].append(
                         {

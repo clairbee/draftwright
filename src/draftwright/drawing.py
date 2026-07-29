@@ -1888,7 +1888,20 @@ class Drawing:
             # deferred path different obstacle visibility).
             if r.only_dia:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_diameters(self, plan_dimensions(model), a, ctx=ctx, only=r.only_dia)
+                from typing import cast as _cast_dia
+
+                from draftwright.model.compiled import FeatureRef as _DiaRef
+                from draftwright.model.compiled import compile_dimensions as _compile_dia
+                from draftwright.model.ir import Feature as _DiaFeature
+
+                assert all(isinstance(f, _DiaFeature) for f in r.only_dia)
+                render_diameters(
+                    self,
+                    _compile_dia(model),
+                    a,
+                    ctx=ctx,
+                    only={_DiaRef(_cast_dia(_DiaFeature, f)) for f in r.only_dia},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.dia_ids]
 
         def _s_step_lengths():

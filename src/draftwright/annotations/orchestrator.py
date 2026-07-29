@@ -483,7 +483,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # below (X) / end-on radial leaders (Y) / column left (Z), one path by
         # frame axis. Replaces
         # _annotate_turned_diameters.
-        render_diameters(dwg, _groups, a, ctx=ctx)
+        render_diameters(dwg, _compiled, a, ctx=ctx)
 
     def _s_step_lengths():
         # The chain that locates every shoulder, X/Y/Z from one path (#223). A crowded

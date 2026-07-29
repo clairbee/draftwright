@@ -8741,6 +8741,7 @@ class TestPrismaticBossDiameter:
         from draftwright.annotations._common import PlacementContext, drain_corridors
         from draftwright.annotations.from_model import render_boss_heights
         from draftwright.model import plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         dwg = build_drawing(self._box_boss(), auto_dims=False)
         analysis = dwg._analysis
@@ -8751,7 +8752,10 @@ class TestPrismaticBossDiameter:
             }
         )
         ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-        render_boss_heights(dwg, plan_dimensions(dwg.model()), constrained, ctx=ctx)
+        groups = plan_dimensions(dwg.model())
+        render_boss_heights(
+            dwg, compile_dimensions(dwg.model(), groups=groups), constrained, ctx=ctx
+        )
         drain_corridors(ctx, dwg)
 
         boss_issues = [i for i in dwg.lint() if i.code.startswith("boss_height_")]
@@ -9326,12 +9330,25 @@ class TestDiameterStepAnchor:
         # (axial mid 30, radial y=20), not a hybrid that takes the axial from the
         # long step and the radial from the bucket's first (short) step — which
         # would land the arrow off the selected step's silhouette.
+        from types import SimpleNamespace
+
         from draftwright.annotations.from_model import _diameter_step_anchor
+        from draftwright.model.compiled import compile_dimensions
+        from draftwright.model.ir import PartModel
+        from draftwright.model.planner import plan_dimensions
 
         short = self._step("x", (0.0, 0.0, 0.0), -2.5, 2.5)  # len 5, centre x=0
         long = self._step("x", (30.0, 20.0, 0.0), 20.0, 40.0)  # len 20, centre x=30, y=20
+        bbox = SimpleNamespace(
+            size=SimpleNamespace(Z=20.0),
+            max=SimpleNamespace(X=40.0, Z=20.0),
+            min=SimpleNamespace(Y=0.0, Z=0.0),
+        )
+        model = PartModel(bbox=bbox, orientation="x", features=[short, long])
+        groups = plan_dimensions(model)
+        plan = compile_dimensions(model, groups=groups)
         # `anchor` is the FIRST-bucketed feature's origin (the short step, y=0).
-        got = _diameter_step_anchor(short.frame.origin, {short, long})
+        got = _diameter_step_anchor(short.frame.origin, plan.of_kind("step"))
         assert got == (30.0, 20.0, 0.0), f"hybrid/wrong anchor: {got}"
 
     def test_no_step_in_the_group_falls_back_to_the_given_anchor(self):

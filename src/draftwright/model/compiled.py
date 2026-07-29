@@ -179,7 +179,7 @@ class ApprovedDimension:
 #: measurements by default: it arrives with no facts at all until someone lists them.
 _FACTS: dict[str, tuple[str, ...]] = {
     "hole": ("frame", "through", "count", "members", "thread"),
-    "pattern": ("frame", "pattern", "count", "member", "members", "direction", "rows", "cols"),
+    "pattern": ("frame", "pattern", "count", "members", "direction", "rows", "cols"),
     "pocket": ("frame", "width_axis", "long_axis", "depth_axis", "edge_anchored"),
     "pocket_pattern": (
         "frame",
