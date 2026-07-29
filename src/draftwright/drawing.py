@@ -1136,8 +1136,17 @@ class Drawing:
             # as the placed name (Codex #811 r3). A drop (no clear room) changes nothing and
             # returns "" — the same empty-string drop signal the step/boss diameter branch gives.
             before = {n: id(o) for n, o in self.iter_annotations()}
+            # The compiled plan, and an OPAQUE reference in `only=`: the renderer selects
+            # its subset without ever holding a Feature (ADR 0016 Amdt 1).
+            from draftwright.model.compiled import FeatureRef as _FR
+            from draftwright.model.compiled import compile_dimensions as _cd3
+
             renderers[kind](
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                _cd3(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={_FR(feature)},
             )
             changed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return changed[0] if len(changed) == 1 else ""
@@ -1904,7 +1913,10 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from draftwright.model.compiled import FeatureRef as _FR2
+                from draftwright.model.compiled import compile_dimensions as _cd4
+
+                render(self, _cd4(model), a, ctx=ctx, only={_FR2(f) for f in feats})
             self._intents = [it for it in self._intents if id(it) not in ids]
 
         def _s_chamfers():

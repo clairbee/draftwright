@@ -95,10 +95,21 @@ class FeatureRef:
         return getattr(self._feature, "kind", "?")
 
     def __eq__(self, other) -> bool:
-        return isinstance(other, FeatureRef) and other._feature is self._feature
+        # STRUCTURAL, like `DimensionId` and for the same reason: a re-plan or a finalize
+        # drain rebuilds the feature objects, so identity-based equality would make a
+        # reference stop matching the thing it names the moment anything re-derived the
+        # model. That is exactly what `only=` selection needs — it used to compare features
+        # with `in`, i.e. frozen-dataclass equality, and matching that keeps the drain's
+        # per-feature subsets working (#923).
+        #
+        # Deliberately UNLIKE `_request_for`, which matches by `is` so two identical holes
+        # stay two distinct targets. The two answer different questions: a request addresses
+        # one declared instance within a build; a reference names which feature a mark came
+        # from, and two structurally identical features produce interchangeable marks.
+        return isinstance(other, FeatureRef) and other._feature == self._feature
 
     def __hash__(self) -> int:
-        return id(self._feature)
+        return hash(self._feature)
 
     def __repr__(self) -> str:
         return f"FeatureRef({self.kind})"
@@ -197,7 +208,13 @@ _FACTS: dict[str, tuple[str, ...]] = {
     "step_level": ("frame",),
     "envelope": ("frame",),
     "rotational": ("frame",),
-    "chamfer": ("frame", "axis"),
+    # `leg2`/`angle` are FORM discriminators: they decide whether the label reads `C3` (an
+    # equal-leg 45°) or `3 × 30°`. The angle is printed, and it is NOT a planned parameter —
+    # `ChamferFeature.parameters()` emits only the leg — so it cannot be suppressed or
+    # toleranced today. That is an IR gap, recorded in the ADR inventory rather than closed
+    # here: making the angle addressable adds a parameter to every chamfer's plan, which
+    # changes output, and a migration that claims byte-identity is the wrong place for it.
+    "chamfer": ("frame", "axis", "leg2", "angle"),
     "fillet": ("frame", "axis"),
     "flat": ("frame", "axis"),
     "groove": ("frame", "axis"),

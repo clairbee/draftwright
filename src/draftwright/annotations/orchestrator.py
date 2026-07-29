@@ -416,17 +416,17 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_chamfers():
         # Chamfer callouts (#560): C{leg} / {leg}×{angle}° via a leader off each chamfer face.
         # Planner-fed (#724): consumes the DimensionGroups so an authored tolerance renders.
-        render_chamfers(dwg, _groups, a, ctx=ctx)
+        render_chamfers(dwg, _compiled, a, ctx=ctx)
 
     def _s_fillets():
         # Fillet callouts (#561): R{radius} (grouped n× R) via a leader off each rounded edge.
         # Planner-fed (#725): consumes the DimensionGroups so an authored tolerance renders.
-        render_fillets(dwg, _groups, a, ctx=ctx)
+        render_fillets(dwg, _compiled, a, ctx=ctx)
 
     def _s_flats():
         # Machined-flat callouts (#148b): {across} A/F via a leader off each flat on round stock.
         # Planner-fed (#726): consumes the DimensionGroups so an authored tolerance renders.
-        render_flats(dwg, _groups, a, ctx=ctx)
+        render_flats(dwg, _compiled, a, ctx=ctx)
 
     def _s_pockets():
         # Blind-recess callouts (#148a): W × L × D DEEP via a leader off each floored pocket.
@@ -472,10 +472,10 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # which then sees the ø as 'mentioned' and skips it (#629 — the column-left strip
         # strands a boss ø when tight, even on a half-empty sheet). No-op on turned parts
         # (they keep the OD stack).
-        render_boss_diameters(dwg, _groups, a, ctx=ctx)
+        render_boss_diameters(dwg, _compiled, a, ctx=ctx)
 
     def _s_boss_heights():
-        render_boss_heights(dwg, _groups, a, ctx=ctx)
+        render_boss_heights(dwg, _compiled, a, ctx=ctx)
 
     def _s_diameters():
         # Turned-part dimensions via the IR (ADR 0008 convergence). The model is built
@@ -538,7 +538,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # furniture (else its room check can't see the not-yet-drained length dims and
         # collides, #148c crowded-shaft).
         # Planner-fed (#727): consumes the DimensionGroups so authored tolerances render.
-        render_grooves(dwg, _groups, a, ctx=ctx)
+        render_grooves(dwg, _compiled, a, ctx=ctx)
 
     def _s_section():
         # The section view renders after the corridor-drained furniture exists, so

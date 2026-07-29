@@ -1487,7 +1487,7 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     return n
 
 
-def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
+def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
     """Chamfer callouts (#560): a leader from each recognised chamfer face to its
     ``C{leg}`` / ``{leg}×{angle}°`` label, in the view normal to the chamfered edge (a Z
     edge reads in the plan, an X edge in the side, a Y edge in the front). The leader runs
@@ -1504,22 +1504,22 @@ def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
     ``_END_ON`` matches the pass's old z→plan / x→side / y→front map exactly."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    chamfer_groups = [g for g in groups if g.feature_kind == "chamfer"]
+    chamfer_groups = list(plan.of_kind("chamfer"))
     jobs = []
     for i, g in enumerate(
-        sorted(chamfer_groups, key=lambda g: (g.feature.axis, g.feature.frame.origin))
+        sorted(chamfer_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
-        ch = g.feature
+        ch = g.facts
         if only is not None and ch not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — i stays the model index
         # Bind the intended planned dim EXPLICITLY by (role, kind), never dims[0]
         # (#724 review): the pattern the remaining #698 migrations copy must not
         # silently grab the wrong dimension on a multi-parameter kind.
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("chamfer", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("chamfer", "length")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
         view = g.view
         vb = dwg.view_bounds(view)
@@ -1530,7 +1530,7 @@ def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
                 f"m_chamfer_{ch.axis}{i}",
                 view,
                 vb,
-                _chamfer_label(pd.param.value, ch) + _tol_suffix(pd.param.tolerance, draft),
+                _chamfer_label(pd.value, ch) + _tol_suffix(pd.tolerance, draft),
                 _corner_candidates(dwg, view, vb, [ch], reach),
             )
         )
@@ -1544,7 +1544,7 @@ def _fillet_label(radius, count) -> str:
     return f"{count}× {r}" if count > 1 else r
 
 
-def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
+def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
     """Fillet radius callouts (#561): a leader from an external edge fillet to its
     ``R{radius}`` label — the arc analog of :func:`render_chamfers`. Equal-radius fillets on
     the same edge axis share ONE ``n× R`` callout (#561 acceptance), placed in the view
@@ -1565,27 +1565,27 @@ def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     collapse: dict = {}
-    for g in (g for g in groups if g.feature_kind == "fillet"):
+    for g in plan.of_kind("fillet"):
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("fillet", "radius")),
+            (d for d in g.dims if (d.role, d.kind) == ("fillet", "radius")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
-        collapse.setdefault((g.feature.axis, round(pd.param.value, 3)), []).append((g, pd))
+        collapse.setdefault((g.facts.axis, round(pd.value, 3)), []).append((g, pd))
     jobs = []
     for gi, ((axis, _radius), members) in enumerate(sorted(collapse.items())):
         if only is not None:
             # #426 Ph2b subset (finalize): filter members AFTER the collapse is enumerated so
             # gi stays the full-drawing group index — a survivor keeps its m_fillet name even
             # when a sibling group is dropped (Codex #811). The n× count reflects survivors.
-            members = [gp for gp in members if gp[0].feature in only]
+            members = [gp for gp in members if gp[0].ref in only]
             if not members:
                 continue
         # One grouped ``n× R`` callout, but its leader may anchor at ANY of the equal fillets
         # — _corner_candidates tries each corner (nearest-clear first) so the group is not
         # dropped just because its first corner leads into an occupied region.
-        ordered = sorted(members, key=lambda gp: gp[0].feature.frame.origin)
+        ordered = sorted(members, key=lambda gp: gp[0].facts.frame.origin)
         view = ordered[0][0].view
         vb = dwg.view_bounds(view)
         if vb is None:
@@ -1593,16 +1593,14 @@ def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
         # First-AUTHORED tolerance wins: scan `members` in planner/model order (the
         # render_diameters precedent — Codex review), not the spatially-sorted
         # `ordered`, whose winner would change if the geometry moved.
-        tol = next(
-            (pd.param.tolerance for _, pd in members if pd.param.tolerance is not None), None
-        )
+        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
         jobs.append(
             (
                 f"m_fillet_{axis}{gi}",
                 view,
                 vb,
-                _fillet_label(members[0][1].param.value, len(ordered)) + _tol_suffix(tol, draft),
-                _corner_candidates(dwg, view, vb, [g.feature for g, _ in ordered], reach),
+                _fillet_label(members[0][1].value, len(ordered)) + _tol_suffix(tol, draft),
+                _corner_candidates(dwg, view, vb, [g.facts for g, _ in ordered], reach),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
@@ -1617,7 +1615,7 @@ def _flat_label(across, sfx="") -> str:
     return f"{_fmt(across)}{sfx} A/F"
 
 
-def render_flats(dwg, groups, a, *, ctx, only=None) -> int:
+def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
     """Machined-flat callouts (#148b): a leader from a flat truncating round stock to its
     ``{across} A/F`` label, in the view down the stock axis (a Z-axis bar reads in the plan).
     Flats sharing an axis and across-flats size — the faces of a double-D or hex — share ONE
@@ -1635,39 +1633,37 @@ def render_flats(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     collapse: dict = {}
-    for g in (g for g in groups if g.feature_kind == "flat"):
+    for g in plan.of_kind("flat"):
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("flat", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("flat", "length")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
-        collapse.setdefault((g.feature.axis, round(pd.param.value, 3)), []).append((g, pd))
+        collapse.setdefault((g.facts.axis, round(pd.value, 3)), []).append((g, pd))
     jobs = []
     for gi, ((axis, _across), members) in enumerate(sorted(collapse.items())):
         if only is not None:
             # #426 Ph2b subset (finalize): filter members AFTER enumerating the collapse so gi
             # stays the full-drawing group index (Codex #811) — see render_fillets.
-            members = [gp for gp in members if gp[0].feature in only]
+            members = [gp for gp in members if gp[0].ref in only]
             if not members:
                 continue
-        ordered = sorted(members, key=lambda gp: gp[0].feature.frame.origin)
+        ordered = sorted(members, key=lambda gp: gp[0].facts.frame.origin)
         view = ordered[0][0].view
         vb = dwg.view_bounds(view)
         if vb is None:
             continue
         # First-AUTHORED tolerance wins (planner/model order, not spatial — see the
         # fillet pass / render_diameters precedent, Codex review).
-        tol = next(
-            (pd.param.tolerance for _, pd in members if pd.param.tolerance is not None), None
-        )
+        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
         jobs.append(
             (
                 f"m_flat_{axis}{gi}",
                 view,
                 vb,
-                _flat_label(members[0][1].param.value, _tol_suffix(tol, draft)),
-                _corner_candidates(dwg, view, vb, [g.feature for g, _ in ordered], reach),
+                _flat_label(members[0][1].value, _tol_suffix(tol, draft)),
+                _corner_candidates(dwg, view, vb, [g.facts for g, _ in ordered], reach),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
@@ -1842,7 +1838,7 @@ def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
     return _leader_callout_pass(dwg, a, jobs, noun="pocket", drop_code="pocket_dropped", ctx=ctx)
 
 
-def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
+def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
     """Turned/circlip-groove callouts (#148c): a leader from each annular groove in round
     stock to its ``{width} WIDE × ø{diameter}`` label. The groove's width is *axial*, so the
     callout lands in the **profile** view (the one showing the stock axis in-plane, where the
@@ -1863,21 +1859,17 @@ def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     view_of = {"z": "front", "x": "front", "y": "side"}
-    groove_groups = [g for g in groups if g.feature_kind == "groove"]
+    groove_groups = list(plan.of_kind("groove"))
     jobs = []
     for gi, g in enumerate(
-        sorted(groove_groups, key=lambda g: (g.feature.axis, g.feature.frame.origin))
+        sorted(groove_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
-        gr = g.feature
+        gr = g.facts
         if only is not None and gr not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — gi stays the model index
-        wpd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("groove", "length")), None
-        )
-        dpd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("groove", "diameter")), None
-        )
-        if wpd is None or dpd is None or wpd.suppressed or dpd.suppressed:
+        wpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "length")), None)
+        dpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "diameter")), None)
+        if wpd is None or dpd is None:
             continue
         view = view_of.get(gr.axis)
         if view is None:
@@ -1891,10 +1883,10 @@ def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _groove_label(
-                    wpd.param.value,
-                    dpd.param.value,
-                    wsfx=_tol_suffix(wpd.param.tolerance, draft),
-                    dsfx=_tol_suffix(dpd.param.tolerance, draft),
+                    wpd.value,
+                    dpd.value,
+                    wsfx=_tol_suffix(wpd.tolerance, draft),
+                    dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
                 _radial_candidates(dwg, view, vb, gr, reach),
             )
@@ -1902,7 +1894,7 @@ def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
     return _leader_callout_pass(dwg, a, jobs, noun="groove", drop_code="groove_dropped", ctx=ctx)
 
 
-def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
+def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
     """ø leaders for a PRISMATIC part's bosses (#629). A boss reads as a circle looking down its
     axis, so its diameter is called out with a leader to that circle in the view normal to the
     axis — a Z boss in the plan, X in the side, Y in the front — free to exit into clear margin
@@ -1926,19 +1918,19 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
         return 0
     draft = dwg.draft
     view_of = {"z": "plan", "x": "side", "y": "front"}  # the view looking down the boss axis
-    boss_groups = [g for g in groups if g.feature_kind == "boss"]
+    boss_groups = list(plan.of_kind("boss"))
     mentioned = _mentioned_diameters(dwg)
     reach = draft.font_size + 6 * draft.pad_around_text
     jobs = []
     for bi, g in enumerate(
-        sorted(boss_groups, key=lambda g: (g.feature.frame.axis, g.feature.frame.origin))
+        sorted(boss_groups, key=lambda g: (g.facts.frame.axis, g.facts.frame.origin))
     ):
-        b = g.feature
-        dpd = next((pd for pd in g.dims if pd.param.kind == "diameter"), None)
+        b = g.facts
+        dpd = next((pd for pd in g.dims if pd.kind == "diameter"), None)
         if dpd is None:
             continue
-        dia = dpd.param.value
-        dtol = dpd.param.tolerance
+        dia = dpd.value
+        dtol = dpd.tolerance
         thr = getattr(b, "thread", None)  # external thread appends to the OD callout (#859)
         # A coincident plain ⌀ dedups only an UNTHREADED boss; a threaded ⌀ is a distinct callout,
         # so a bare ⌀8 mention (a bore, a step) must not suppress ø8 M8x1.25 (#859).
@@ -1965,7 +1957,7 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
     )
 
 
-def render_boss_heights(dwg, groups, a, *, ctx) -> int:
+def render_boss_heights(dwg, plan, a, *, ctx) -> int:
     """Queue the axial height of each prismatic boss in a profile-view corridor (#632)."""
     if a.is_rotational or a.prof is not None:
         return 0
@@ -1978,22 +1970,22 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
     n = 0
     for bi, g in enumerate(
         sorted(
-            (g for g in groups if g.feature_kind == "boss"),
-            key=lambda g: (g.feature.frame.axis, g.feature.frame.origin),
+            plan.of_kind("boss"),
+            key=lambda g: (g.facts.frame.axis, g.facts.frame.origin),
         )
     ):
-        b = g.feature
+        b = g.facts
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("boss_height", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("boss_height", "length")),
             None,
         )
-        if pd is None or pd.suppressed or pd.param.span is None:
+        if pd is None or pd.span is None:
             continue
         view, side, strip, stack = specs[b.frame.axis]
-        p1 = dwg.at(view, *pd.param.span[0])
-        p2 = dwg.at(view, *pd.param.span[1])
+        p1 = dwg.at(view, *pd.span[0])
+        p2 = dwg.at(view, *pd.span[1])
         edge = max(p1[0], p2[0]) if side == "right" else max(p1[1], p2[1])
-        label = _fmt(pd.param.value) + _tol_suffix(pd.param.tolerance, dwg.draft)
+        label = _fmt(pd.value) + _tol_suffix(pd.tolerance, dwg.draft)
         name = f"m_bossheight_{b.frame.axis}{bi}"
 
         def build(pos, p1=p1, p2=p2, side=side, edge=edge, label=label):
@@ -2019,7 +2011,7 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
                 # second build-time drop here would double-count the same omission.
                 on_drop=lambda _nm: None,
                 force=True,
-                feature=b,
+                feature=g.ref,
                 footprint=footprint,
             ),
         )

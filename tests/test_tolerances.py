@@ -512,7 +512,7 @@ class TestChamferTolerance:
         planned = replace(pd, param=replace(pd.param, value=7.0))  # ≠ ch.leg1 == 12
         g2 = replace(g, units=_addressable(g.feature, [decoy, planned]))
         ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-        assert render_chamfers(dwg, [g2], dwg._analysis, ctx=ctx) == 1
+        assert render_chamfers(dwg, _plan_of(g2), dwg._analysis, ctx=ctx) == 1
         labels = [
             dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_chamfer")
         ]
@@ -663,7 +663,7 @@ class TestGrooveTolerance:
             g, units=_addressable(g.feature, [decoy, planned_w, by_key[("groove", "diameter")]])
         )
         ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-        assert render_grooves(dwg, [g2], dwg._analysis, ctx=ctx) == 1
+        assert render_grooves(dwg, _plan_of(g2), dwg._analysis, ctx=ctx) == 1
         labels = [
             dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_groove")
         ]
