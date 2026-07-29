@@ -1136,18 +1136,29 @@ class Drawing:
             # as the placed name (Codex #811 r3). A drop (no clear room) changes nothing and
             # returns "" — the same empty-string drop signal the step/boss diameter branch gives.
             before = {n: id(o) for n, o in self.iter_annotations()}
-            # The compiled plan, and an OPAQUE reference in `only=`: the renderer selects
-            # its subset without ever holding a Feature (ADR 0016 Amdt 1).
-            from draftwright.model.compiled import FeatureRef as _FR
-            from draftwright.model.compiled import compile_dimensions as _cd3
+            # Migrated renderers consume the compiled plan and select by opaque reference.
+            # Pocket remains on the legacy planner surface until its renderer migrates; do
+            # not hand a RenderableDimensionPlan to an iterable-DimensionGroup API merely
+            # because both participate in the same dispatch table.
+            if kind == "pocket":
+                renderers[kind](
+                    self,
+                    plan_dimensions(self._part_model),
+                    self._analysis,
+                    ctx=ctx,
+                    only={feature},
+                )
+            else:
+                from draftwright.model.compiled import FeatureRef as _FR
+                from draftwright.model.compiled import compile_dimensions as _cd3
 
-            renderers[kind](
-                self,
-                _cd3(self._part_model),
-                self._analysis,
-                ctx=ctx,
-                only={_FR(feature)},
-            )
+                renderers[kind](
+                    self,
+                    _cd3(self._part_model),
+                    self._analysis,
+                    ctx=ctx,
+                    only={_FR(feature)},
+                )
             changed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return changed[0] if len(changed) == 1 else ""
         if kind == "pocket_pattern":
@@ -1913,10 +1924,23 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                from draftwright.model.compiled import FeatureRef as _FR2
-                from draftwright.model.compiled import compile_dimensions as _cd4
+                if kind == "pocket":
+                    render(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                else:
+                    from typing import cast as _cast
 
-                render(self, _cd4(model), a, ctx=ctx, only={_FR2(f) for f in feats})
+                    from draftwright.model.compiled import FeatureRef as _FR2
+                    from draftwright.model.compiled import compile_dimensions as _cd4
+                    from draftwright.model.ir import Feature as _Feature
+
+                    assert all(isinstance(f, _Feature) for f in feats)
+                    render(
+                        self,
+                        _cd4(model),
+                        a,
+                        ctx=ctx,
+                        only={_FR2(_cast(_Feature, f)) for f in feats},
+                    )
             self._intents = [it for it in self._intents if id(it) not in ids]
 
         def _s_chamfers():

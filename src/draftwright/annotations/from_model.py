@@ -1510,7 +1510,7 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
         sorted(chamfer_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
         ch = g.facts
-        if only is not None and ch not in only:
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — i stays the model index
         # Bind the intended planned dim EXPLICITLY by (role, kind), never dims[0]
         # (#724 review): the pattern the remaining #698 migrations copy must not
@@ -1865,7 +1865,7 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
         sorted(groove_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
         gr = g.facts
-        if only is not None and gr not in only:
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — gi stays the model index
         wpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "length")), None)
         dpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "diameter")), None)

@@ -402,21 +402,21 @@ class TestTheBoundaryIsLoadBearing:
                         break
 
         assert sorted(by_contract["plan"]) == [
+            "render_boss_diameters",
+            "render_boss_heights",
+            "render_chamfers",
+            "render_fillets",
+            "render_flats",
+            "render_grooves",
             "render_height_ladder",
             "render_plates",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
-            "render_boss_diameters",
-            "render_boss_heights",
             "render_centermarks",
-            "render_chamfers",
             "render_diameters",
             "render_envelope",
-            "render_fillets",
-            "render_flats",
-            "render_grooves",
             "render_pocket_patterns",
             "render_pockets",
             "render_rotational",
