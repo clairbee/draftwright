@@ -438,14 +438,14 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # (n-1)× pitch dim(s), instead of N competing per-pocket size dims. Placed after
         # "pockets" (same leader mechanism); its member pockets are composed into the pattern,
         # so render_pockets never double-renders them.
-        render_pocket_patterns(dwg, _groups, a, ctx=ctx)
+        render_pocket_patterns(dwg, _compiled, a, ctx=ctx)
 
     def _s_slot_patterns():
         # Grouped through-slot-array callouts (#841): ONE count× SLOT W × L leader + the (n-1)×
         # pitch dim(s), instead of N competing per-slot size dims (some of which drop, #841
         # behaviour 1). Member slots are composed into the pattern, so render_slots never
         # double-renders them.
-        render_slot_patterns(dwg, _groups, a, ctx=ctx)
+        render_slot_patterns(dwg, _compiled, a, ctx=ctx)
 
     def _s_off_axis_across():
         # Side-drilled holes' in-plane (side-below) locations share the below corridor with

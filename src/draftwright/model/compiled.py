@@ -185,7 +185,6 @@ _FACTS: dict[str, tuple[str, ...]] = {
         "frame",
         "pattern",
         "count",
-        "member",
         "members",
         "direction",
         "rows",
@@ -196,7 +195,6 @@ _FACTS: dict[str, tuple[str, ...]] = {
         "frame",
         "pattern",
         "count",
-        "member",
         "members",
         "direction",
         "rows",
@@ -238,12 +236,23 @@ class FeatureFacts:
     def __init__(self, feature) -> None:
         kind = getattr(feature, "kind", "?")
         allowed = _FACTS.get(kind, ())
+        values = {name: getattr(feature, name) for name in allowed if hasattr(feature, name)}
+        # Pattern renderers need the representative member's ORIENTATION, never its
+        # printable sizes. Flatten those structural facts here instead of exposing the
+        # member object (which would put width/length/depth back one attribute away).
+        member = getattr(feature, "member", None)
+        if kind in ("pocket_pattern", "slot_pattern") and member is not None:
+            values.update(
+                {
+                    "member_frame": member.frame,
+                    "member_width_axis": member.width_axis,
+                    "member_long_axis": member.long_axis,
+                }
+            )
+            if kind == "pocket_pattern":
+                values["member_depth_axis"] = member.depth_axis
         object.__setattr__(self, "_kind", kind)
-        object.__setattr__(
-            self,
-            "_values",
-            {name: getattr(feature, name) for name in allowed if hasattr(feature, name)},
-        )
+        object.__setattr__(self, "_values", values)
 
     def __getattr__(self, name: str):
         try:

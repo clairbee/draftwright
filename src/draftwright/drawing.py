@@ -1120,7 +1120,6 @@ class Drawing:
                 render_grooves,
                 render_pockets,
             )
-            from draftwright.model import plan_dimensions
 
             renderers = {
                 "chamfer": render_chamfers,
@@ -1160,11 +1159,15 @@ class Drawing:
                     "add it to a drawing built by build_drawing(), not a bare Drawing"
                 )
             from draftwright.annotations.holes import render_pocket_patterns
-            from draftwright.model import plan_dimensions
+            from draftwright.model.compiled import FeatureRef, compile_dimensions
 
             before = {n: id(o) for n, o in self.iter_annotations()}
             render_pocket_patterns(
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                compile_dimensions(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={FeatureRef(feature)},
             )
             placed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return next((n for n in placed if n.startswith("m_pocketpat")), "")
@@ -1179,11 +1182,15 @@ class Drawing:
                     "add it to a drawing built by build_drawing(), not a bare Drawing"
                 )
             from draftwright.annotations.holes import render_slot_patterns
-            from draftwright.model import plan_dimensions
+            from draftwright.model.compiled import FeatureRef, compile_dimensions
 
             before = {n: id(o) for n, o in self.iter_annotations()}
             render_slot_patterns(
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                compile_dimensions(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={FeatureRef(feature)},
             )
             placed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return next((n for n in placed if n.startswith("m_slotpat")), "")
@@ -1951,7 +1958,20 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in r.pocket_pattern_ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_pocket_patterns(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from typing import cast as _cast_pp
+
+                from draftwright.model.compiled import FeatureRef as _PPRef
+                from draftwright.model.compiled import compile_dimensions as _compile_pp
+                from draftwright.model.ir import Feature as _PPFeature
+
+                assert all(isinstance(f, _PPFeature) for f in feats)
+                render_pocket_patterns(
+                    self,
+                    _compile_pp(model),
+                    a,
+                    ctx=ctx,
+                    only={_PPRef(_cast_pp(_PPFeature, f)) for f in feats},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.pocket_pattern_ids]
 
         def _s_slot_patterns():
@@ -1961,7 +1981,20 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in r.slot_pattern_ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_slot_patterns(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from typing import cast as _cast_sp
+
+                from draftwright.model.compiled import FeatureRef as _SPRef
+                from draftwright.model.compiled import compile_dimensions as _compile_sp
+                from draftwright.model.ir import Feature as _SPFeature
+
+                assert all(isinstance(f, _SPFeature) for f in feats)
+                render_slot_patterns(
+                    self,
+                    _compile_sp(model),
+                    a,
+                    ctx=ctx,
+                    only={_SPRef(_cast_sp(_SPFeature, f)) for f in feats},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.slot_pattern_ids]
 
         def _s_user_dims():

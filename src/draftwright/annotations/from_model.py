@@ -1392,7 +1392,7 @@ def _label_lands_clear(ldr, obstacles, silhouette, page, *, geom_clear=False) ->
     )
 
 
-def _corner_candidates(dwg, view, vb, members, reach):
+def _corner_candidates(dwg, view, vb, members, reach, *, provenances=None):
     """Lead candidates for a corner-sitting feature (chamfer/fillet/flat): from each member's
     projected origin, a diagonal from the view centre out through the corner, *reach* beyond
     the tip — a corner clears the silhouette this way. Yields ``(tip, elbow, member)`` in the
@@ -1400,12 +1400,13 @@ def _corner_candidates(dwg, view, vb, members, reach):
     one-element *members*."""
     x0, y0, x1, y1 = vb
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    for m in members:
+    owners = provenances if provenances is not None else members
+    for m, owner in zip(members, owners):
         tip = dwg.at(view, *m.frame.origin)
         dx, dy = tip[0] - cx, tip[1] - cy
         d = math.hypot(dx, dy) or 1.0
         elbow = (tip[0] + dx / d * reach, tip[1] + dy / d * reach, 0)
-        yield (tip, elbow, m)
+        yield (tip, elbow, owner)
 
 
 def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False) -> int:
@@ -1512,7 +1513,7 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _chamfer_label(pd.value, ch) + _tol_suffix(pd.tolerance, draft),
-                _corner_candidates(dwg, view, vb, [ch], reach),
+                _corner_candidates(dwg, view, vb, [ch], reach, provenances=[g.ref]),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="chamfer", drop_code="chamfer_dropped", ctx=ctx)
@@ -1581,7 +1582,14 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _fillet_label(members[0][1].value, len(ordered)) + _tol_suffix(tol, draft),
-                _corner_candidates(dwg, view, vb, [g.facts for g, _ in ordered], reach),
+                _corner_candidates(
+                    dwg,
+                    view,
+                    vb,
+                    [g.facts for g, _ in ordered],
+                    reach,
+                    provenances=[g.ref for g, _ in ordered],
+                ),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
@@ -1644,7 +1652,14 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _flat_label(members[0][1].value, _tol_suffix(tol, draft)),
-                _corner_candidates(dwg, view, vb, [g.facts for g, _ in ordered], reach),
+                _corner_candidates(
+                    dwg,
+                    view,
+                    vb,
+                    [g.facts for g, _ in ordered],
+                    reach,
+                    provenances=[g.ref for g, _ in ordered],
+                ),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
@@ -1711,7 +1726,17 @@ _POCKET_LEAD_DIRS = (
 )
 
 
-def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0, directions=_POCKET_LEAD_DIRS):
+def _radial_candidates(
+    dwg,
+    view,
+    vb,
+    feature,
+    reach,
+    *,
+    rim=0.0,
+    directions=_POCKET_LEAD_DIRS,
+    provenance=None,
+):
     """Lead candidates for a mid-face feature (pocket/groove/boss ø): from the feature's
     projected origin, one candidate per *directions* entry (pocket-style diagonals
     first by default) — exit the silhouette along it (:func:`_ray_exit_dist`) then
@@ -1728,7 +1753,7 @@ def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0, directions=_PO
         tip = (origin[0] + ux * rim, origin[1] + uy * rim)
         exit_d = _ray_exit_dist(tip[0], tip[1], ux, uy, (x0, y0, x1, y1))
         elbow = (tip[0] + ux * (exit_d + reach), tip[1] + uy * (exit_d + reach), 0)
-        yield (tip, elbow, feature)
+        yield (tip, elbow, provenance if provenance is not None else feature)
 
 
 def _leader_hole_clearance(
@@ -1811,7 +1836,7 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
                     lsfx=_tol_suffix(lpd.tolerance, draft),
                     dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
-                _radial_candidates(dwg, view, vb, pk, reach),
+                _radial_candidates(dwg, view, vb, pk, reach, provenance=g.ref),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="pocket", drop_code="pocket_dropped", ctx=ctx)
@@ -1867,7 +1892,7 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
                     wsfx=_tol_suffix(wpd.tolerance, draft),
                     dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
-                _radial_candidates(dwg, view, vb, gr, reach),
+                _radial_candidates(dwg, view, vb, gr, reach, provenance=g.ref),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="groove", drop_code="groove_dropped", ctx=ctx)
@@ -1928,7 +1953,9 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
                 vb,
                 f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else ""),
                 # arrowhead on the boss circle's rim, not its centre
-                _radial_candidates(dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE),
+                _radial_candidates(
+                    dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE, provenance=g.ref
+                ),
             )
         )
     return _leader_callout_pass(

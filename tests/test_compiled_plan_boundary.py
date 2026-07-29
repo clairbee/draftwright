@@ -410,15 +410,15 @@ class TestTheBoundaryIsLoadBearing:
             "render_grooves",
             "render_height_ladder",
             "render_plates",
+            "render_pocket_patterns",
             "render_pockets",
+            "render_slot_patterns",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
             "render_diameters",
-            "render_pocket_patterns",
             "render_rotational",
-            "render_slot_patterns",
             "render_slots",
             "render_step_lengths",
         ], f"the advisory-surface set changed: {sorted(by_contract['groups'])}"
