@@ -111,8 +111,8 @@ lists, so this inventory cannot drift from the code:
 
 | Contract | Meaning | Renderers |
 |---|---|---|
-| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions` (+ the detail redraw) |
-| `groups` | advisory `suppressed` — **pending** | `render_slots`, `render_centermarks`, `render_diameters`, `render_chamfers`, `render_fillets`, `render_flats`, `render_pockets`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_plates`, `render_envelope`, `render_step_lengths`, `render_rotational`, `render_pocket_patterns`, `render_slot_patterns` |
+| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates` (+ the detail redraw) |
+| `groups` | advisory `suppressed` — **pending** | `render_slots`, `render_centermarks`, `render_diameters`, `render_chamfers`, `render_fillets`, `render_flats`, `render_pockets`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope`, `render_step_lengths`, `render_rotational`, `render_pocket_patterns`, `render_slot_patterns` |
 | `model` | raw inventory — **pending**, except PMI | `render_locations` (#883), `render_gdt`, `render_pmi` (permitted) |
 
 Pattern pitch dimensions (`_add_furniture` → `_place_pitch_dim`) are pending too: they are

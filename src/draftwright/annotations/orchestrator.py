@@ -406,7 +406,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # recognised slab, placed in the view where its thin axis is visible. A single flat
         # plate has none (its thickness IS the envelope height).
         # Planner-fed (#729): consumes the DimensionGroups so an authored tolerance renders.
-        render_plates(dwg, _groups, a, ctx=ctx)
+        render_plates(dwg, _compiled, a, ctx=ctx)
 
     def _s_step_positions():
         # Prismatic step POSITIONS (#555): where each shoulder sits along its axis, so a

@@ -2027,7 +2027,7 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
     return n
 
 
-def render_plates(dwg, groups, a, *, ctx) -> int:
+def render_plates(dwg, plan, a, *, ctx) -> int:
     """Plate/wall thicknesses (#559): the thin extent of each recognised slab
     (`PlateFeature`), placed in the view where its thin axis is characteristic — a Z
     plate (horizontal slab) as a vertical dim left of the front elevation, a Y plate
@@ -2039,7 +2039,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
 
     Planner-fed (#729 / #698): the thickness VALUE + its tolerance come from the
     planner's ``DimParameter``, bound explicitly by ``(role, kind)`` —
-    ``("thickness", "length")`` — never ``dims[0]``. Formatting ``pl.hi - pl.lo``
+    ``("thickness", "length")`` — never ``dims[0]``. Formatting ``hi - lo``
     directly dropped an authored tolerance (the #629 class). Placement mechanics
     (strips, tier stacking, the allowlisted carve fallthrough) are untouched. The
     pass KEEPS its own axis→view map: ``g.view`` is ``_END_ON`` (z→plan / y→front /
@@ -2047,37 +2047,48 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
     y→side-above, x→front-below)."""
     draft = dwg.draft
     tier = draft.font_size + 2 * draft.pad_around_text
-    plate_groups = [g for g in groups if g.feature_kind == "plate"]
+    # Migrated to the ADR 0016 boundary: approved entries only, and the plate's `lo`/`hi`
+    # come from the thickness dim's SPAN rather than the feature — they are the two ends of
+    # the measurement, so the span is where they belong. `axis` stays a fact because no span
+    # says which way a slab is thin.
     n = 0
     counts: dict = {"x": 0, "y": 0, "z": 0}
-    for g in sorted(plate_groups, key=lambda g: (g.feature.axis, g.feature.lo, g.feature.hi)):
-        pl = g.feature
-        pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("thickness", "length")),
-            None,
-        )
-        if pd is None or pd.suppressed:
-            continue
-        val = pd.param.value
-        lbl = _fmt(val) + _tol_suffix(pd.param.tolerance, draft)
-        i = counts[pl.axis]
-        counts[pl.axis] += 1
-        if pl.axis == "z":
+    plate_groups = [
+        (g, pd)
+        for g in plan.of_kind("plate")
+        if (pd := g.dim(role="thickness", kind="length")) is not None and pd.span is not None
+    ]
+    for g, pd in sorted(
+        plate_groups, key=lambda gp: (gp[0].facts.axis, gp[1].span[0], gp[1].span[1])
+    ):
+        axis = g.facts.axis
+        # The span's two ends ARE the plate's lo/hi along its thin axis, and its other two
+        # coordinates are the in-plane centroids the witness sits at — `PlateFeature._span`
+        # builds it from exactly those. So the renderer reads points, not a feature.
+        lo_pt, hi_pt = pd.span
+        oi = [j for j in (0, 1, 2) if j != "xyz".index(axis)]
+        lo, hi = lo_pt["xyz".index(axis)], hi_pt["xyz".index(axis)]
+        u, v = lo_pt[oi[0]], lo_pt[oi[1]]
+        val = pd.value
+        lbl = pd.label + _tol_suffix(pd.tolerance, draft)
+        i = counts[axis]
+        counts[axis] += 1
+        if axis == "z":
             # Horizontal slab (base plate): vertical dim on the front-elevation left strip.
             # For a Z plate the in-plane centroids are (u=X, v=Y); the front view discards
-            # Y, so the depth arg is inert, but pass the Y-centroid (pl.v) for correctness.
+            # Y, so the depth arg is inert, but pass the Y-centroid (v) for correctness.
             view, strip, stack, side = "front", a.fv_zones.left, "x", "left"
-            p1 = dwg.at(view, a.bb.min.X, pl.v, pl.lo)
-            p2 = dwg.at(view, a.bb.min.X, pl.v, pl.hi)
+            p1 = dwg.at(view, a.bb.min.X, v, lo)
+            p2 = dwg.at(view, a.bb.min.X, v, hi)
             edge = p1[0]
             pa, pb = (edge, p1[1], 0), (edge, p2[1], 0)
             # Right-strip fallthrough anchors (helpers ≥0.14): a tight-span thickness
             # dim's witness hull overlaps the below strip's at the view corner at EVERY
             # position (AABB artifact — the ink never touches), so a full left strip
             # retries on the opposite side before dropping.
-            q1 = dwg.at(view, a.bb.max.X, pl.v, pl.lo)
-            s1 = dwg.at("side", a.bb.min.X, a.bb.max.Y, pl.lo)
-            s2 = dwg.at("side", a.bb.min.X, a.bb.max.Y, pl.hi)
+            q1 = dwg.at(view, a.bb.max.X, v, lo)
+            s1 = dwg.at("side", a.bb.min.X, a.bb.max.Y, lo)
+            s2 = dwg.at("side", a.bb.min.X, a.bb.max.Y, hi)
             alt = [
                 (
                     "front",
@@ -2098,25 +2109,25 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
                     s1[0],
                 ),
             ]
-        elif pl.axis == "y":
+        elif axis == "y":
             # Upright wall: horizontal dim above the side (end) view, which shows the
             # wall edge-on on the L-profile — a different view from the Z base plate.
             # Witness from the view's top edge (like the Z/X plates anchor at their view
             # outline) so the extension lines don't originate mid-view.
             view, strip, stack, side = "side", a.sv_zones.above, "y", "above"
-            p1 = dwg.at(view, a.bb.min.X, pl.lo, a.bb.max.Z)
-            p2 = dwg.at(view, a.bb.min.X, pl.hi, a.bb.max.Z)
+            p1 = dwg.at(view, a.bb.min.X, lo, a.bb.max.Z)
+            p2 = dwg.at(view, a.bb.min.X, hi, a.bb.max.Z)
             edge = p1[1]
             pa, pb = (p1[0], edge, 0), (p2[0], edge, 0)
             alt = None
         else:  # x — thin wall along X → horizontal dim below the front view
             view, strip, stack, side = "front", a.fv_zones.below, "y", "below"
-            p1 = dwg.at(view, pl.lo, pl.u, a.bb.min.Z)
-            p2 = dwg.at(view, pl.hi, pl.u, a.bb.min.Z)
+            p1 = dwg.at(view, lo, u, a.bb.min.Z)
+            p2 = dwg.at(view, hi, u, a.bb.min.Z)
             edge = p1[1]
             pa, pb = (p1[0], edge, 0), (p2[0], edge, 0)
             alt = None
-        name = f"dim_plate_{pl.axis}{i}"
+        name = f"dim_plate_{axis}{i}"
 
         def _build(pos, pa=pa, pb=pb, side=side, edge=edge, lbl=lbl):
             return _dim(pa, pb, side, pos - edge, draft, label=lbl)
@@ -2124,7 +2135,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
         def _foot(pos, pa=pa, pb=pb, side=side, edge=edge, lbl=lbl):
             return dim_footprint(pa, pb, side, pos - edge, draft, lbl)
 
-        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=pl):  # noqa: B008
+        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=g.ref):  # noqa: B008
             # Opposite-strip fallthrough (mirrors the GD&T #481 pattern), DEFERRED to
             # ctx.post_drain so it runs after EVERY corridor has drained (#684 review):
             # a mid-drain carve could occupy a corner a later sibling's force candidate
@@ -2188,7 +2199,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
                 on_place=lambda nm: None,
                 on_drop=_drop,
                 force=True,
-                feature=pl,
+                feature=g.ref,  # opaque provenance handle
                 footprint=_foot,  # analytical measure — no probe build (#602)
             ),
         )

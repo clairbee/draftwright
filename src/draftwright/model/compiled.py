@@ -132,6 +132,147 @@ class ApprovedDimension:
     value: float
     span: tuple[Point, Point] | None
     ref: FeatureRef | None = None
+    #: The parameter's semantic coordinates, flattened off `DimParameter` so a renderer
+    #: selects by meaning without holding the planned object its `suppressed` flag lives on.
+    kind: str = ""
+    role: str = ""
+    discriminator: str | None = None
+    tolerance: object | None = None
+
+    @property
+    def parameter_id(self) -> str:
+        base = f"{self.role}.{self.kind}"
+        return f"{base}.{self.discriminator}" if self.discriminator else base
+
+
+#: The NON-dimensional facts each feature kind may hand a renderer, by kind.
+#:
+#: This table is where "is this a measurement?" gets decided, once and in writing, for all
+#: nineteen IR feature kinds. A renderer forming a callout legitimately needs structure — a
+#: pocket's `width_axis` to know which way it runs, a pattern's `count` and `rows`, a hole's
+#: `through` — and denying it that would only push the renderer back to the feature.
+#:
+#: What must NOT appear here is any quantity the drawing prints. `PocketFeature.width_axis`
+#: is structure; `PocketFeature.width` is a measurement and travels as an approved dimension
+#: or not at all. That distinction is the whole boundary, so it is stated per kind rather
+#: than left to whoever is editing a renderer — the arrangement that let eight renderers
+#: read `pd.param.value` past a suppression flag they never checked.
+#:
+#: The dividing rule, which the plate case settled: **positions that define what a
+#: dimension measures travel in its SPAN; facts carry only what a span cannot express.** A
+#: plate's `lo`/`hi` are not facts — they are the two ends of its thickness, and they arrive
+#: as `span`. Its `axis` is a fact, because no span says which way the slab is thin. Apply
+#: that test to each new entry and the table stays small.
+#:
+#: The compiler refuses anything absent from this table, so a new feature kind cannot leak
+#: measurements by default: it arrives with no facts at all until someone lists them.
+_FACTS: dict[str, tuple[str, ...]] = {
+    "hole": ("frame", "through", "count", "members", "thread"),
+    "pattern": ("frame", "pattern", "count", "member", "members", "direction", "rows", "cols"),
+    "pocket": ("frame", "width_axis", "long_axis", "edge_anchored"),
+    "pocket_pattern": (
+        "frame",
+        "pattern",
+        "count",
+        "member",
+        "members",
+        "direction",
+        "rows",
+        "cols",
+    ),
+    "slot": ("frame", "width_axis", "long_axis"),
+    "slot_pattern": (
+        "frame",
+        "pattern",
+        "count",
+        "member",
+        "members",
+        "direction",
+        "rows",
+        "cols",
+    ),
+    "pad": ("frame", "width_axis", "long_axis"),
+    "boss": ("frame", "thread"),
+    "step": ("frame", "thread"),
+    "step_level": ("frame",),
+    "envelope": ("frame",),
+    "rotational": ("frame",),
+    "chamfer": ("frame", "axis"),
+    "fillet": ("frame", "axis"),
+    "flat": ("frame", "axis"),
+    "groove": ("frame", "axis"),
+    "plate": ("frame", "axis"),
+    "pmi": ("frame", "pmi_kind", "dominant_axis", "ref_bbox", "ref_pts", "label"),
+    "authored_dimension": ("frame", "dimension_kind", "dominant_axis", "ref_pts", "ref_bbox"),
+}
+
+
+class FeatureFacts:
+    """The structural, non-dimensional facts of one feature — never its measurements.
+
+    A frozen view over the subset of attributes :data:`_FACTS` allows for the kind. Reading
+    anything else raises rather than falling back to the feature, so a renderer that needs a
+    new fact has to add it to the table, in a diff someone reviews, next to the sentence
+    explaining what belongs there.
+    """
+
+    __slots__ = ("_kind", "_values")
+
+    def __init__(self, feature) -> None:
+        kind = getattr(feature, "kind", "?")
+        allowed = _FACTS.get(kind, ())
+        object.__setattr__(self, "_kind", kind)
+        object.__setattr__(
+            self,
+            "_values",
+            {name: getattr(feature, name) for name in allowed if hasattr(feature, name)},
+        )
+
+    def __getattr__(self, name: str):
+        try:
+            return self._values[name]
+        except KeyError:
+            raise AttributeError(
+                f"{self._kind!r} exposes no fact {name!r} to renderers. If it is structure "
+                f"rather than a measurement, add it to _FACTS[{self._kind!r}]; if it is a "
+                "quantity the drawing prints, it must travel as an approved dimension."
+            ) from None
+
+    def get(self, name: str, default=None):
+        return self._values.get(name, default)
+
+    def __repr__(self) -> str:
+        return f"FeatureFacts({self._kind}, {sorted(self._values)})"
+
+
+@dataclass(frozen=True)
+class ApprovedGroup:
+    """One feature's approved dimensions, plus the structure a renderer needs to draw them.
+
+    The general replacement for `DimensionGroup` at the renderer boundary. Same shape —
+    `dims`, `view`, `anchor`, `feature_kind` — with two differences that are the point:
+    `dims` holds only what the compiler approved and has no `suppressed` field, and the
+    feature is reachable only as :class:`FeatureFacts` (structure) or an opaque
+    :class:`FeatureRef` (identity), never as the object whose measurements a renderer could
+    read past the plan.
+    """
+
+    feature_kind: str
+    view: str
+    anchor: Point
+    ref: FeatureRef
+    facts: FeatureFacts
+    dims: tuple[ApprovedDimension, ...]
+
+    def dim(self, *, kind: str | None = None, role: str | None = None):
+        """The first approved dimension matching *kind* and/or *role*, or ``None``.
+
+        ``None`` means "not approved" — there is no second state to check. A renderer that
+        used to write ``if pd is None or pd.suppressed`` writes ``if pd is None``."""
+        for d in self.dims:
+            if (kind is None or d.kind == kind) and (role is None or d.role == role):
+                return d
+        return None
 
 
 @dataclass(frozen=True)
@@ -186,8 +327,17 @@ class RenderableDimensionPlan:
     an output with a named owner and a date, not a claim about today's behaviour.
     """
 
+    groups: tuple[ApprovedGroup, ...] = ()
     ladders: tuple[ApprovedLadder, ...] = ()
     diagnostics: tuple[Omission, ...] = field(default=())
+
+    def of_kind(self, *kinds: str) -> tuple[ApprovedGroup, ...]:
+        """Every approved group whose feature is one of *kinds*, in model order."""
+        return tuple(g for g in self.groups if g.feature_kind in kinds)
+
+    def group_for(self, ref) -> ApprovedGroup | None:
+        """The approved group for a feature reference, or ``None`` if nothing survived."""
+        return next((g for g in self.groups if g.ref == ref), None)
 
     def ladder(self, kind: str) -> ApprovedLadder | None:
         """The approved ladder of *kind*, or ``None`` if it was not approved."""
@@ -400,6 +550,44 @@ def _compile_overall_height(
     )
 
 
+def _compile_groups(planned) -> list[ApprovedGroup]:
+    """Every planned group, reduced to what the compiler approved.
+
+    The general path all remaining renderers migrate onto: same per-feature shape they
+    already consume, with the suppressed entries REMOVED rather than marked. A renderer
+    receiving one of these cannot draw a withheld measurement, because it was never
+    handed it — which is the whole rule, applied to every feature kind rather than the
+    three that had bespoke migrations."""
+    out: list[ApprovedGroup] = []
+    for g in planned:
+        approved = tuple(
+            ApprovedDimension(
+                id=DimensionId(g.feature, pd.param.parameter_id),
+                label=_fmt(pd.param.value) if pd.param.value is not None else "",
+                value=pd.param.value,
+                span=pd.param.span,
+                ref=FeatureRef(g.feature),
+                kind=pd.param.kind,
+                role=pd.param.role,
+                discriminator=pd.param.discriminator,
+                tolerance=pd.param.tolerance,
+            )
+            for pd in g.dims
+            if not pd.suppressed
+        )
+        out.append(
+            ApprovedGroup(
+                feature_kind=g.feature_kind,
+                view=g.view,
+                anchor=g.anchor,
+                ref=FeatureRef(g.feature),
+                facts=FeatureFacts(g.feature),
+                dims=approved,
+            )
+        )
+    return out
+
+
 def compile_dimensions(
     model: PartModel, *, include_overall: bool = True, groups=None
 ) -> RenderableDimensionPlan:
@@ -412,7 +600,8 @@ def compile_dimensions(
     plan-once invariant holds through the migration instead of the compiler quietly
     re-planning behind it (#923 review).
     """
-    marked = _suppressed_dims(model, groups)
+    planned = groups if groups is not None else plan_dimensions(model)
+    marked = _suppressed_dims(model, planned)
     ladders, omissions = _compile_step_ladders(model, marked)
     overall, height_omissions = _compile_overall_height(
         model, marked, include_overall=include_overall
@@ -420,5 +609,7 @@ def compile_dimensions(
     if overall is not None:
         ladders.append(overall)
     return RenderableDimensionPlan(
-        ladders=tuple(ladders), diagnostics=tuple(omissions + height_omissions)
+        groups=tuple(_compile_groups(planned)),
+        ladders=tuple(ladders),
+        diagnostics=tuple(omissions + height_omissions),
     )

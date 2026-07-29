@@ -403,6 +403,7 @@ class TestTheBoundaryIsLoadBearing:
 
         assert sorted(by_contract["plan"]) == [
             "render_height_ladder",
+            "render_plates",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
@@ -416,7 +417,6 @@ class TestTheBoundaryIsLoadBearing:
             "render_fillets",
             "render_flats",
             "render_grooves",
-            "render_plates",
             "render_pocket_patterns",
             "render_pockets",
             "render_rotational",
