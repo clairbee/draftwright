@@ -94,8 +94,8 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 
 ### Scope, stated so the exceptions cannot be mistaken for completeness
 
-**The rule is the destination. The migration is at its FIRST SLICE, and the inventory
-below is the honest state of it.**
+**The rule is the destination. The migration is substantially advanced but not complete;
+the inventory below is the honest state of it.**
 
 Sixteen renderers have crossed: `render_height_ladder`, `render_step_positions`,
 `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`,
