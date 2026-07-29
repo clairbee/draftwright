@@ -76,76 +76,18 @@ from draftwright.annotations._common import (
     strip_obstacles,
 )
 from draftwright.layout import StripCandidate, plan_strip
+
+# Re-exported: `annotations/holes.py` and the tests import the spec from here, and the
+# renderer is its natural home from a caller's point of view even though the reading
+# itself now lives in the IR waist so the page estimator can share it (#875 review).
+# `hole_callout_spec` is re-exported: `annotations/holes.py` and the tests reach it here, and
+# the renderer is its natural home from a caller's point of view — the READING moved down to the
+# IR waist only so the page/scale estimator can share it instead of keeping a second copy that
+# drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
+from draftwright.model.callout import _first as _first
+from draftwright.model.callout import hole_callout_spec as hole_callout_spec
 from draftwright.model.ir import AUTHORED_DIMENSION_KINDS, HoleFeature, PatternFeature
-from draftwright.model.planner import DimensionGroup, plan_locations
-
-
-def _first(group: DimensionGroup, kind: str, *roles: str) -> float | None:
-    """First parameter value matching *kind* and any of *roles*, in role order."""
-    for role in roles:
-        for pd in group.dims:
-            if pd.param.kind == kind and pd.param.role == role:
-                return pd.param.value
-    return None
-
-
-def hole_callout_spec(group: DimensionGroup) -> dict | None:
-    """A hole/pattern group's plan → `HoleCallout` kwargs, mirroring the engine's
-    convention. ``None`` if not a hole-bearing callout.
-
-    From the plan: bore from `DimParameter` roles; the cbore/spotface *step* with
-    counterbore precedence (``step = cbore or spotface``, as the engine does);
-    ``count`` and the pattern *suffix* (``EQ SP ON ø50 BC`` / ``(3×3)``) from the
-    source feature.
-
-    ``through`` is read off the FEATURE, never inferred from a missing bore-depth
-    param (#868). `HoleFeature.parameters()` only emits the depth for a blind hole,
-    so absence-as-signal would make any consumer that filters the parameter list —
-    ADR 0016 suppression above all — silently render a blind hole as ``THRU``. The
-    rule that follows (ADR 0016): a renderer may not infer an engineering *fact*
-    from the presence or absence of a dimension parameter — parameters carry values
-    for display, facts live on the feature."""
-    feat = group.feature
-    if not isinstance(feat, HoleFeature | PatternFeature):
-        return None
-    bore = _first(group, "diameter", "bore")
-    if bore is None:
-        return None
-    bore_tol = next(
-        (
-            pd.param.tolerance
-            for pd in group.dims
-            if pd.param.kind == "diameter" and pd.param.role == "bore"
-        ),
-        None,
-    )
-    depth = _first(group, "depth", "bore")
-    count = feat.count
-    suffix = None
-    if isinstance(feat, PatternFeature):
-        if feat.pattern == "bolt_circle" and feat.bcd is not None:
-            suffix = f"EQ SP ON ø{_fmt(feat.bcd)} BC"
-        elif feat.pattern == "grid" and feat.rows and feat.cols:
-            suffix = f"({feat.rows}×{feat.cols})"
-    # A thread spec (#764) folds onto the compound callout — it lives on the bore hole
-    # (the pattern's member for a threaded array). Lead with it (the tap/thread is the
-    # defining call), then any pattern suffix: e.g. "M3x0.5" or "M3x0.5 EQ SP ON ø50 BC".
-    hole = feat.member if isinstance(feat, PatternFeature) else feat
-    thread = getattr(hole, "thread", None)
-    suffix = " ".join(p for p in (thread, suffix) if p) or None
-    return {
-        "diameter": bore,
-        "count": count if count and count > 1 else None,
-        "through": hole.through,  # the feature's fact, not the param list's shape (#868)
-        "depth": depth,
-        # counterbore precedence, spotface fallback — the engine's mapping
-        "cbore_dia": _first(group, "diameter", "counterbore", "spotface"),
-        "cbore_depth": _first(group, "depth", "counterbore", "spotface"),
-        "csink_dia": _first(group, "diameter", "countersink"),
-        "csink_angle": _first(group, "angle", "countersink"),
-        "suffix": suffix,
-        "tolerance": bore_tol,  # P2a: ± on the bore ⌀, baked into the callout string below
-    }
+from draftwright.model.planner import plan_locations
 
 
 def callout_from_spec(spec, draft, count) -> HoleCallout | None:
@@ -826,13 +768,21 @@ def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
 def render_centermarks(dwg, groups, *, ctx) -> int:
     """A centre mark on every hole (plain holes + each pattern member), in the view
     normal to the hole's axis (`_END_ON`), sized by its diameter — the IR migration
-    of the engine's inline centre-mark loop. Returns the count placed."""
+    of the engine's inline centre-mark loop. Returns the count placed.
+
+    The size comes off the FEATURE, not the planned bore parameter (ADR 0016 / #875 review).
+    A centre mark is furniture derived from the hole's physical size; it is not a displayed
+    value, so suppressing the bore dimension must not shrink it. Reading the parameter here
+    made a suppressed ⌀20 collapse from a 42 mm mark to the 2.5 mm floor — the governing rule
+    (facts live on the feature, parameters carry display values) applied to geometry rather
+    than to text."""
     n = 0
     for g in groups:
         feat = g.feature
         if not isinstance(feat, HoleFeature | PatternFeature):
             continue
-        dia = _first(g, "diameter", "bore") or 0.0
+        hole = feat.member if isinstance(feat, PatternFeature) else feat
+        dia = hole.diameter or 0.0
         size = max(2.5, dia * dwg.scale + 2.0)
         view = _END_ON.get(feat.frame.axis, "plan")
         members = feat.members or (g.anchor,)
