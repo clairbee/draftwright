@@ -21,6 +21,80 @@
 > therefore be substantially less blocked than this ADR assumed. The constraint below is
 > flagged in step.
 
+## Amendment 1 — the compiled-plan boundary (2026-07-29)
+
+**Renderers may emit dimensional content only from the compiled plan.**
+
+A dimensional renderer receives approved entries and decides *where* and *how* to draw
+them. It does not decide *what*, and it is not given the feature inventory or the bounding
+box it would need to decide otherwise. The corollary is the part worth stating outright:
+**suppression is not a flag renderers check, it is content they never receive.**
+
+### Why this is a rule and not a review note
+
+Everything above this amendment says the planner decides suppression. It did — and the
+decision was routinely ignored, because `PlannedDimension.suppressed` was advisory. A
+renderer got the planned groups *and* the `PartModel` *and* the `Analysis`, so honouring the
+plan was a convention it had to opt into, and reconstructing a suppressed dimension from
+`feature.levels` or `a.bb` stayed one attribute access away.
+
+Eight adversarial review rounds on #921 found eight renderers that had not opted in: the
+height ladder and step positions rebuilding their marks from the feature and the bounding
+box; `render_diameters`, `render_boss_diameters`, `render_step_lengths` and
+`render_rotational` selecting parameters with no suppression check at all; the compound
+callout, the deferred-edit path, the script emitter, and `from_part` each needing separate
+enforcement. Every one was a real omission reaching a real drawing.
+
+Fixing them individually produced four mechanisms for saying the same thing — `pd.suppressed`
+reads, `env_dim_placed`, `set_dim_placed`, and a `_CALLOUT_PARAM_KINDS` policy table — and
+no reason to think the ninth renderer would be different. That is the signature of a missing
+boundary, not of missing tests.
+
+### The shape
+
+```
+PartModel
+  → compile_dimensions()            # one place: rules, requests, authored sets
+      → RenderableDimensionPlan     # APPROVED entries only
+      → diagnostics                 # what was omitted, and why
+  → renderers consume approved entries; lint/coverage consume diagnostics
+```
+
+- `ApprovedDimension` has **no `suppressed` field**. There is nothing to forget.
+- Correlated sets (a step-height ladder, a shoulder chain) arrive as explicit
+  `ApprovedLadder` groups, so a renderer never rebuilds one from a feature. This preserves
+  the tier-3 identity rule — the set is approved or omitted whole, never half a staircase.
+- Spans travel in **part space**; the renderer projects them. That is the split in one line:
+  the compiler says "this measurement, this value, between these two points"; the renderer
+  says which view, which strip, which side, and what happens when it does not fit.
+- Dimensional renderers take a `LayoutFrame` — projectors, view rectangles in page space,
+  strips, scale — rather than the `Analysis`. View *edges* are page-space rectangles rather
+  than projected bbox extents, so "just right of the front view" needs no part geometry.
+- **Omission is not a drop.** The compiler's omission never arrives and is reported through
+  diagnostics; the placer's drop arrived and did not fit, and is reported as
+  `placement_unsatisfiable`. Conflating them is how a deliberate suppression came to look
+  like a layout failure.
+
+### What the compiler may do that renderers may not
+
+Read the bounding box. A model with no `EnvelopeFeature` — a round body, or a `Sheet` that
+never called `.envelope()` — has no parameter naming its overall height, and the value falls
+back to the bbox. That fallback is legitimate and now lives in exactly one place, instead of
+being a thing the height-ladder renderer did while claiming to be doing layout.
+
+### Scope, stated so the exceptions cannot be mistaken for completeness
+
+- **Location dimensions are inside this rule.** They are dimensions, and letting
+  `render_locations` rebuild them from the model preserves the same bypass class.
+  `plan_locations` returns a flat, cross-feature, ref-deduped list that never enters a
+  `DimensionGroup`, so they are sequenced later in the migration rather than carved out
+  (#883). The boundary is not complete until they are inside it.
+- **Raw AP242 PMI is a documented exception.** `PmiFeature.parameters()` is empty by design
+  and the record renders verbatim, so there is no compiled content for it to come from. It
+  is an explicit provenance-preserving escape hatch, not an oversight.
+- **Furniture is not dimensional content.** Centrelines, centre marks and section arrows
+  print no value; they are sized off the geometry they mark and stay outside this rule.
+
 ## Context
 
 A user reading a generated `Sheet` script today sees the part's **features** — one

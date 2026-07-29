@@ -31,6 +31,7 @@ from draftwright._core import (
     _log,
     _tag_sequence,
     _wrap_rows,  # noqa: F401 — re-exported via the annotate facade (#700: one copy, in _core)
+    layout_frame,
 )
 from draftwright.analysis import _sizing_bores
 from draftwright.annotations._common import PlacementContext
@@ -80,6 +81,7 @@ from draftwright.model import (
     plan_dimensions,
     plan_sections,
 )
+from draftwright.model.compiled import compile_dimensions
 from draftwright.repair import reconcile_witness_labels
 
 # ── the ONE auto-pass stage sequence (#699 slice b) ──────────────────────────
@@ -381,7 +383,11 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # through fv_zones.right preserving the leapfrog cursor (#237). Replaces the inline
         # dim_step_* + dim_height; the turned step-length chain (render_step_lengths) handles
         # turned parts, and a Z-turned overall height is suppressed there (ISO 129).
-        render_height_ladder(dwg, _model, a, ctx=ctx, detail_view=detail_view)
+        # The ADR 0016 boundary: compile WHAT is drawn, hand the renderer that plus the
+        # page geometry it needs to decide WHERE. It no longer sees `_model` or `a`.
+        render_height_ladder(
+            dwg, compile_dimensions(_model), layout_frame(a), ctx=ctx, detail_view=detail_view
+        )
 
     def _s_plates():
         # Plate/wall thicknesses on a multi-plate prismatic (#559): the thin extent of each

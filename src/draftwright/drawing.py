@@ -1830,12 +1830,17 @@ class Drawing:
             # leaves them recorded so a retry rebuilds the batch (#639).
             if r.height_ladder_ids:
                 assert a is not None and isinstance(model, PartModel)
+                from draftwright._core import layout_frame
+                from draftwright.model.compiled import compile_dimensions
+
                 render_height_ladder(
                     self,
-                    model,
-                    a,
+                    # `include_overall` is drawing state, so it is an input to the COMPILE
+                    # (whether the overall height is in the set) rather than something the
+                    # renderer decides after the fact.
+                    compile_dimensions(model, include_overall=not r.explicit_envelope_height),
+                    layout_frame(a),
                     ctx=ctx,
-                    include_overall=not r.explicit_envelope_height,
                     detail_view=self._build.detail_view,
                 )
 

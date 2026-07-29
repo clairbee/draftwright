@@ -2826,57 +2826,67 @@ def _detect_step_repeat(step_zs, bb_min_z, bb_max_z, tol_frac=0.10):
     return n, mean_rise
 
 
-def render_height_ladder(
-    dwg, model, a, *, ctx, include_overall: bool = True, detail_view: bool = False
-) -> int:
-    """Front-view right ladder: prismatic step heights (from `StepLevelFeature`)
-    stacked inner→outer, then the overall height outermost — registered as
-    :class:`CorridorCandidate`s in the shared ``(front, right)`` corridor (#636;
-    formerly the last solver-invisible `carve_free_position` auto-pass). The leapfrog
-    witness cursor (#237) survives as a *build-time chain*: candidates share a
-    ``solved`` position map, and each dim's witness anchors on its nearest already-
-    built predecessor's line (the view edge for the first) — build order follows the
-    candidate order, so the chain is deterministic. Prediction uses an analytical
-    footprint with the witness modelled from the view edge (a conservative
-    over-cover along the stack axis; the accept-time real-box validation trims any
-    drift). A turned part has no `StepLevelFeature`; a Z-turned part suppresses the
-    overall height (the chain tiles it, ISO 129). Returns the count REGISTERED."""
+def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) -> int:
+    """Front-view right ladder: prismatic step heights stacked inner→outer, then the overall
+    height outermost — registered as :class:`CorridorCandidate`s in the shared
+    ``(front, right)`` corridor (#636). The leapfrog witness cursor (#237) survives as a
+    *build-time chain*: candidates share a ``solved`` position map, and each dim's witness
+    anchors on its nearest already-built predecessor's line (the view edge for the first).
+
+    **The first renderer migrated to the ADR 0016 boundary.** It takes the compiled
+    :class:`RenderableDimensionPlan` and a :class:`LayoutFrame`, not the `PartModel` and the
+    `Analysis`. Everything it used to decide about WHAT to draw — which rungs exist, their
+    values and labels, whether a uniform staircase collapses to one ``n×`` mark, whether the
+    overall height is drawn at all and what its value is — now arrives already decided. It
+    could previously reach `StepLevelFeature.levels` and `a.bb` and rebuild all of it, and
+    for four review rounds it did exactly that in defiance of the plan.
+
+    What stays here is placement, and it is a real job: legibility at this scale, the
+    leapfrog chain, corridor registration, the left-strip escape for short rises, and the
+    lint code when the strip is physically full. Note the two kinds of "not drawn" that meet
+    here and must not be confused — the compiler's omission (never arrives; reported through
+    the plan's diagnostics) and this pass's drop (arrived, did not fit; reported as
+    ``placement_unsatisfiable``). Returns the count REGISTERED."""
     draft = dwg.draft
-    FX, FZ = a.proj.front_x, a.proj.front_z
-    edge2 = FX(a.bb.max.X) + 2
-    zmin = FZ(a.bb.min.Z)
+    _left, right, bottom, _top = frame.edges("front")
+    edge2 = right + 2
+    zmin = bottom
     tier = draft.font_size + 2 * draft.pad_around_text
-    step = next((f for f in model.features if f.kind == "step_level"), None)
-    levels = list(step.levels) if step is not None else []
-    step_shoulders = tuple(step.shoulders) if step is not None else ()
-    short_levels: list[float] = []
-    rep = _detect_step_repeat(levels, a.bb.min.Z, a.bb.max.Z) if levels else None
+    strip = frame.fv_zones.right
+
+    rung_set = plan.ladder("step_height")
+    rungs = list(rung_set.rungs) if rung_set is not None else []
+    step = rung_set.feature if rung_set is not None else None
+    has_shoulders = plan.ladder("step_position") is not None
+    short_rungs: list = []
 
     # The chain, inner→outer: (name, page-z top, label, tier size, drop message).
     chain: list = []
-    if rep is not None:
-        n_rep, rise = rep
-        first = sorted(levels)[0]
+    if rung_set is not None and rung_set.representative:
+        (rep,) = rungs
         chain.append(
             (
                 "dim_step_typ",
-                FZ(first),
-                f"{n_rep}× {_fmt(rise)}",
+                frame.project("front", rep.span[1])[1],
+                rep.label,
                 _SLOT_DIM_STEP,
                 "representative step-height dimension dropped (front-view right strip full)",
             )
         )
-    elif levels:
-        # Recover a short *structural* rise with external arrows (#565).
-        # A tiny level with no recognised transition is incidental geometry
-        # (plate/pocket floor) and remains outside the height ladder.
-        kept, n_close = _legible_steps(
-            levels, a.bb.min.Z, a.SCALE, allow_short=bool(step_shoulders)
+    elif rungs:
+        # Legibility is a PLACEMENT decision — whether two rungs are too close to dimension
+        # depends on the page, not the model — so it stays here while the rung set itself
+        # comes from the compiler. Both bounds come off the approved span, not the bbox.
+        kept_z, n_close = _legible_steps(
+            [r.span[1][2] for r in rungs],
+            rungs[0].span[0][2],
+            frame.scale,
+            allow_short=has_shoulders,
         )
         if n_close:
-            # With the explicit detail opt-in the enlarged view owns the omitted
-            # rungs. Report the source-view drop only when no recovery was
-            # requested; a failed detail records ``detail_unplaceable`` instead.
+            # With the explicit detail opt-in the enlarged view owns the omitted rungs.
+            # Report the source-view drop only when no recovery was requested; a failed
+            # detail records ``detail_unplaceable`` instead.
             if not detail_view:
                 ctx.record_issue(
                     "warning",
@@ -2884,35 +2894,37 @@ def render_height_ladder(
                     f"{n_close} step height(s) too closely spaced to dimension at this scale "
                     "(use a detail view)",
                 )
-            # First-class escalation alongside the lint code (ADR 0009 Amdt 1, #351
-            # PR-4b) — `_request_prismatic_detail` (sections.py) consumes this instead
-            # of recomputing the legibility gate.
+            # First-class escalation alongside the lint code (ADR 0009 Amdt 1, #351 PR-4b) —
+            # `_request_prismatic_detail` (sections.py) consumes this instead of recomputing
+            # the legibility gate.
             ctx.escalations.append(
                 Escalation(kind="step", view="front", feature=step, reason="illegible")
             )
-        for col, z in enumerate(kept):
-            if step_shoulders and (z - a.bb.min.Z) * a.SCALE < _MIN_STEP_DIM_MM:
-                short_levels.append(z)
+        kept = [r for r in rungs if r.span[1][2] in set(kept_z)]
+        for col, rung in enumerate(kept):
+            # A short structural rise needs external arrows, whose ink would swamp the usual
+            # right-hand ladder; it goes to the left strip below (#565).
+            if has_shoulders and rung.value * frame.scale < _MIN_STEP_DIM_MM:
+                short_rungs.append(rung)
                 continue
             chain.append(
                 (
                     f"dim_step_{col}",
-                    FZ(z),
-                    _fmt(z - a.bb.min.Z),
+                    frame.project("front", rung.span[1])[1],
+                    rung.label,
                     _SLOT_DIM_STEP,
                     "step-height dimension dropped (front-view right strip full)",
                 )
             )
 
-    rot = next((f for f in model.features if f.kind == "rotational"), None)
-    od_is_height = rot is not None and rot.frame.axis in ("x", "y")
-    suppress_height = (not include_overall) or model.orientation == "z" or od_is_height
-    if not suppress_height:
+    overall = plan.ladder("overall_height")
+    if overall is not None:
+        (height,) = overall.rungs
         chain.append(
             (
                 "dim_height",
-                FZ(a.bb.max.Z),
-                _fmt(a.z_size),
+                frame.project("front", height.span[1])[1],
+                height.label,
                 _SLOT_DIM_HEIGHT,
                 "overall height dimension dropped (front-view right strip full)",
             )
@@ -2932,11 +2944,9 @@ def render_height_ladder(
             return _dim((base, zmin, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
 
         def _foot(pos, ztop=ztop, label=label, k=k):
-            # Predecessor-aware prediction (#689 review): the conservative
-            # edge-anchored witness can falsely exhaust the strip when an inner
-            # obstacle sits in the already-traversed region. Use the same solved
-            # map the build chain uses — empty on the first evaluation (edge-based,
-            # the prior behaviour), tight on later-segment retries.
+            # Predecessor-aware prediction (#689 review): the conservative edge-anchored
+            # witness can falsely exhaust the strip when an inner obstacle sits in the
+            # already-traversed region. Use the same solved map the build chain uses.
             base = edge2
             for pn in reversed(names[:k]):
                 if pn in solved:
@@ -2950,15 +2960,15 @@ def render_height_ladder(
 
         def _drop(nm, drop_msg=drop_msg, name=name):
             solved.pop(name, None)
-            # Name what filled the strip (#736): the #733 diagnosis ("which occupants
-            # exhausted the front-right strip?") becomes a glance at the lint message.
-            msg = full_strip_message(drop_msg, dwg, a.fv_zones.right, "front", "x")
+            # Name what filled the strip (#736): the #733 diagnosis becomes a glance at the
+            # lint message.
+            msg = full_strip_message(drop_msg, dwg, strip, "front", "x")
             ctx.record_issue("error", "placement_unsatisfiable", msg)
 
         register_corridor(
             ctx,
             ("front", "right"),
-            a.fv_zones.right,
+            strip,
             "front",
             "x",
             tier,
@@ -2966,8 +2976,8 @@ def render_height_ladder(
                 name=name,
                 build=_build,
                 # Steps stack inner→outer in chain order; the overall height rides the
-                # OVERALL subchain so it lands outermost by construction (as the
-                # envelope dims do), replacing the old carve's outermost=True.
+                # OVERALL subchain so it lands outermost by construction (as the envelope
+                # dims do), replacing the old carve's outermost=True.
                 order=(
                     (_OVERALL_SUBCHAIN, 0, name)
                     if name == "dim_height"
@@ -2983,14 +2993,14 @@ def render_height_ladder(
                 footprint=_foot,
             ),
         )
-    # A short rise needs external arrows, whose ink occupies most of the usual
-    # right-hand height ladder. Solve these exceptional rungs in the equivalent
-    # left strip so they do not make the mandatory overall height infeasible.
-    left_edge = FX(a.bb.min.X) - 2
-    for i, z in enumerate(short_levels):
+    # A short rise needs external arrows, whose ink occupies most of the usual right-hand
+    # height ladder. Solve these exceptional rungs in the equivalent left strip so they do
+    # not make the mandatory overall height infeasible.
+    left_edge = _left - 2
+    for i, rung in enumerate(short_rungs):
         name = f"dim_step_{i}"
-        ztop = FZ(z)
-        label = _fmt(z - a.bb.min.Z)
+        ztop = frame.project("front", rung.span[1])[1]
+        label = rung.label
 
         def _build_left(pos, ztop=ztop, label=label):
             return _dim(
@@ -3006,7 +3016,7 @@ def render_height_ladder(
             msg = full_strip_message(
                 "short step-height dimension dropped (front-view left strip full)",
                 dwg,
-                a.fv_zones.left,
+                frame.fv_zones.left,
                 "front",
                 "x",
             )
@@ -3015,7 +3025,7 @@ def render_height_ladder(
         register_corridor(
             ctx,
             ("front", "left"),
-            a.fv_zones.left,
+            frame.fv_zones.left,
             "front",
             "x",
             tier,
@@ -3037,7 +3047,7 @@ def render_height_ladder(
                 ),
             ),
         )
-    return len(chain) + len(short_levels)
+    return len(chain) + len(short_rungs)
 
 
 def render_step_positions(dwg, model, a, *, ctx) -> int:

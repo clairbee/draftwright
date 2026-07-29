@@ -715,6 +715,91 @@ class _Projector:
 
 
 @dataclass(frozen=True)
+class LayoutFrame:
+    """The page geometry a **dimensional** renderer may use — and nothing more.
+
+    ADR 0016's boundary rule splits a renderer's job in two: the compiled plan says WHAT is
+    drawn, this says where there is room to draw it. So a dimensional renderer takes a
+    `LayoutFrame` instead of the full :class:`Analysis`, which carries the feature
+    inventory, the part, and the raw bounding box — everything needed to reconstruct a
+    dimension the compiler decided not to approve, which is precisely what eight review
+    rounds on #921 found renderers doing.
+
+    What is deliberately absent: ``part``, ``bb``, the recognised-feature lists, the sizes.
+    A renderer that needs a part-space coordinate gets it from its approved entry's
+    ``span``, and projects it with :meth:`project`. View EDGES are page-space rectangles
+    here rather than projected bbox extents, so an anchor like "just right of the front
+    view" needs no part geometry at all — the form that let the height ladder read
+    ``a.bb.max.Z`` for the overall height while claiming to be doing layout.
+
+    ``scale`` remains because legibility is a genuine placement decision: whether two rungs
+    are too close to dimension depends on the page, not the model.
+    """
+
+    proj: _Projector
+    scale: float
+    front: tuple[float, float, float, float]  # page-space (left, right, bottom, top)
+    plan: tuple[float, float, float, float]
+    side: tuple[float, float, float, float]
+    fv_zones: ViewZones
+    pv_zones: ViewZones
+    sv_zones: ViewZones
+
+    def project(self, view: str, point) -> tuple[float, float]:
+        """A part-space *point* in *view*'s page coordinates."""
+        x, y, z = point
+        if view == "front":
+            return self.proj.front_x(x), self.proj.front_z(z)
+        if view == "side":
+            return self.proj.side_x(y), self.proj.side_z(z)
+        if view == "plan":
+            return self.proj.plan_x(x), self.proj.plan_y(y)
+        raise ValueError(f"unknown view {view!r}")
+
+    def edges(self, view: str) -> tuple[float, float, float, float]:
+        """*view*'s page-space ``(left, right, bottom, top)``."""
+        return {"front": self.front, "plan": self.plan, "side": self.side}[view]
+
+    def zones(self, view: str) -> ViewZones:
+        return {"front": self.fv_zones, "plan": self.pv_zones, "side": self.sv_zones}[view]
+
+
+def layout_frame(a: Analysis) -> LayoutFrame:
+    """The :class:`LayoutFrame` view of an :class:`Analysis`.
+
+    An adapter rather than a replacement: `_analyse` keeps producing the full `Analysis`
+    (recognition, sizing and the compose stage all need it), and each renderer narrows to
+    this as it migrates. When none take `Analysis` for dimensional work, the narrowing is
+    complete and this is the only door.
+    """
+    return LayoutFrame(
+        proj=a.proj,
+        scale=a.SCALE,
+        front=(
+            a.proj.front_x(a.bb.min.X),
+            a.proj.front_x(a.bb.max.X),
+            a.proj.front_z(a.bb.min.Z),
+            a.proj.front_z(a.bb.max.Z),
+        ),
+        plan=(
+            a.proj.plan_x(a.bb.min.X),
+            a.proj.plan_x(a.bb.max.X),
+            a.proj.plan_y(a.bb.min.Y),
+            a.proj.plan_y(a.bb.max.Y),
+        ),
+        side=(
+            a.proj.side_x(a.bb.min.Y),
+            a.proj.side_x(a.bb.max.Y),
+            a.proj.side_z(a.bb.min.Z),
+            a.proj.side_z(a.bb.max.Z),
+        ),
+        fv_zones=a.fv_zones,
+        pv_zones=a.pv_zones,
+        sv_zones=a.sv_zones,
+    )
+
+
+@dataclass(frozen=True)
 class Analysis:
     """Typed geometry+layout analysis produced by :func:`_analyse`.
 
