@@ -109,11 +109,43 @@ class TestTheRendererCannotSeeContent:
             for node in ast.walk(tree)
             if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
         }
-        forbidden = {"features", "bb", "levels", "shoulders", "orientation", "z_size", "base"}
+        # `_feature` is the FeatureRef escape hatch: resolving a provenance handle back to
+        # its feature inside a dimensional renderer is a boundary violation, and this is
+        # where it gets caught.
+        forbidden = {
+            "features",
+            "bb",
+            "levels",
+            "shoulders",
+            "orientation",
+            "z_size",
+            "base",
+            "_feature",
+        }
         assert not (reads & forbidden), (
             f"{sorted(reads & forbidden)} is model content — the ladder is drawn from the "
             "compiled plan's approved entries, whose spans carry every coordinate it needs"
         )
+
+    def test_the_provenance_handle_exposes_no_measurement(self):
+        """Carrying the `Feature` on an approved entry left the bypass one attribute access
+        away — `.feature.levels` rebuilds exactly what the compiler withheld (#923 review).
+        The handle exposes identity and category, and no measurement."""
+        from draftwright.model.compiled import FeatureRef
+
+        ladder = compile_dimensions(detect_part_model(_staircase())).ladder("step_height")
+        assert isinstance(ladder.ref, FeatureRef)
+        assert ladder.ref.kind == "step_level", "category is fine — it is not a measurement"
+        for content in ("levels", "shoulders", "base", "datum", "parameters"):
+            assert not hasattr(ladder.ref, content), f"FeatureRef exposes {content}"
+
+    def test_identities_survive_the_compile(self):
+        """`DimensionId` is ADR 0016's stable addressable identity; a renderer-facing result
+        that discarded it would create identity debt on the boundary meant to remove it."""
+        plan = compile_dimensions(detect_part_model(_staircase()))
+        for ladder in plan.ladders:
+            for rung in ladder.rungs:
+                assert rung.id is not None, f"{ladder.kind} rung lost its DimensionId"
 
     def test_the_layout_frame_carries_no_part_geometry(self):
         from draftwright._core import LayoutFrame
@@ -145,18 +177,32 @@ class TestOmissionIsNotADrop:
 
 
 class TestTheBoundaryIsLoadBearing:
-    def test_suppressing_the_whole_plan_empties_the_ladder(self):
-        """The behavioural statement, independent of any renderer's internals: nothing the
-        compiler withholds reaches the page. This is the test that would have caught all
-        four ladder-related rounds without knowing what any of them were."""
+    def test_an_empty_plan_draws_no_ladder_in_a_REAL_build(self, monkeypatch):
+        """The behavioural statement, and it has to render to mean anything.
+
+        The first version of this test built an empty `RenderableDimensionPlan` and asserted
+        its lookups returned `None` — which is a fact about a dataclass, not about the
+        engine. It would have passed with `render_height_ladder` ignoring the plan entirely
+        and rebuilding every dimension from the model, i.e. with the exact defect the
+        boundary exists to prevent (#923 review). Patching the compiler inside a real build
+        is what makes it load-bearing.
+        """
         part = _staircase()
         drawn = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
         assert [n for n in drawn if n.startswith(("dim_step", "dim_height"))], (
             "the fixture must draw a ladder to be worth emptying"
         )
 
-        empty = RenderableDimensionPlan()
-        assert empty.ladder("step_height") is None and empty.ladder("overall_height") is None
+        monkeypatch.setattr(
+            "draftwright.annotations.orchestrator.compile_dimensions",
+            lambda *a, **kw: RenderableDimensionPlan(),
+        )
+        empty = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
+        leaked = sorted(n for n in empty if n.startswith(("dim_step", "dim_height")))
+        assert not leaked, (
+            f"{leaked} reached the page from an EMPTY compiled plan — the renderer is "
+            "rebuilding dimensions from somewhere other than the plan"
+        )
 
     def test_the_migration_has_not_silently_stalled(self):
         """A count, so finishing the migration is visible rather than assumed. Lower it as

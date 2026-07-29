@@ -27,6 +27,7 @@ from draftwright._geometry import _boxes_overlap, _segment_crosses_box  # noqa: 
 from draftwright.layout import StripCandidate, plan_strip
 from draftwright.linting.issues import LintIssue
 from draftwright.linting.structural import _centerline_extent
+from draftwright.model.compiled import resolve_feature
 
 _log = logging.getLogger(__name__)
 
@@ -340,7 +341,9 @@ class SolveTrace:
                     "kind": e.kind,
                     "view": e.view,
                     "reason": e.reason,
-                    "feature": type(e.feature).__name__ if e.feature is not None else None,
+                    "feature": type(resolve_feature(e.feature)).__name__
+                    if e.feature is not None
+                    else None,
                 }
             )
 
@@ -935,7 +938,11 @@ def solve_corridor(dwg, strip, view, axis, cands, tier, corner_reserves=(), *, k
             trace.end_solve()
         return
     pairs = [(c.name, c.build) for c in kept]
-    feats = {c.name: c.feature for c in kept if c.feature is not None}  # provenance (ADR 0010)
+    # The ADR 0010 provenance seam — and one of the two places a `FeatureRef` is
+    # legitimately resolved back to its feature, because here the object IS the point.
+    # A migrated renderer passes the opaque handle through; `resolve_feature` is a
+    # no-op for the unmigrated ones that still pass the feature itself.
+    feats = {c.name: resolve_feature(c.feature) for c in kept if c.feature is not None}
     sizes = {c.name: c.size for c in kept if c.size is not None}  # real footprint (#61)
     forbid = {c.name: c.forbid for c in kept if c.forbid is not None}  # title-block box (#481)
     prio = {c.name: c.priority for c in kept if c.priority}  # over-capacity survival rank (#357)

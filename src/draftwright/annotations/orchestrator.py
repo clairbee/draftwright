@@ -386,7 +386,14 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # The ADR 0016 boundary: compile WHAT is drawn, hand the renderer that plus the
         # page geometry it needs to decide WHERE. It no longer sees `_model` or `a`.
         render_height_ladder(
-            dwg, compile_dimensions(_model), layout_frame(a), ctx=ctx, detail_view=detail_view
+            dwg,
+            # `groups=` so the planner runs ONCE per build: the orchestrator already
+            # planned, and a compiler re-planning behind it would create a second
+            # product that can drift while the migration is partial (#923 review).
+            compile_dimensions(_model, groups=_groups),
+            layout_frame(a),
+            ctx=ctx,
+            detail_view=detail_view,
         )
 
     def _s_plates():

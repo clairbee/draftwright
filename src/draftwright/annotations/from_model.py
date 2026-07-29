@@ -2802,30 +2802,6 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
     return _draw_step_chain(dwg, view, fsegs, "m_steplen", ctx=ctx, start=start)
 
 
-def _detect_step_repeat(step_zs, bb_min_z, bb_max_z, tol_frac=0.10):
-    """Return (n, rise) if *step_zs* form a uniform staircase, else None.
-
-    A uniform staircase has all inter-step rises (including from bb_min_z to the
-    first step) within *tol_frac* of their mean. Requires >=3 detected interior
-    steps to avoid false positives. *n* is len(step_zs) + 1 when the top gap
-    (bb_max_z - last step) also matches the mean, otherwise len(step_zs).
-    """
-    if len(step_zs) < 3:
-        return None
-    sorted_zs = sorted(step_zs)
-    rises = [sorted_zs[0] - bb_min_z] + [
-        sorted_zs[i + 1] - sorted_zs[i] for i in range(len(sorted_zs) - 1)
-    ]
-    mean_rise = sum(rises) / len(rises)
-    if mean_rise <= 0:
-        return None
-    if not all(abs(r - mean_rise) / mean_rise <= tol_frac for r in rises):
-        return None
-    top_gap = bb_max_z - sorted_zs[-1]
-    n = len(rises) + (1 if abs(top_gap - mean_rise) / mean_rise <= tol_frac else 0)
-    return n, mean_rise
-
-
 def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) -> int:
     """Front-view right ladder: prismatic step heights stacked inner→outer, then the overall
     height outermost — registered as :class:`CorridorCandidate`s in the shared
@@ -2856,7 +2832,10 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
 
     rung_set = plan.ladder("step_height")
     rungs = list(rung_set.rungs) if rung_set is not None else []
-    step = rung_set.feature if rung_set is not None else None
+    # An OPAQUE handle, passed straight through to the corridor candidate and the
+    # escalation. This pass never resolves it: the feature behind it carries the levels
+    # and the base, which is the content the compiler already ruled on (#923 review).
+    step = rung_set.ref if rung_set is not None else None
     has_shoulders = plan.ladder("step_position") is not None
     short_rungs: list = []
 

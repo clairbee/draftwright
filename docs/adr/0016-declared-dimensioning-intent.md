@@ -57,10 +57,20 @@ PartModel
   → compile_dimensions()            # one place: rules, requests, authored sets
       → RenderableDimensionPlan     # APPROVED entries only
       → diagnostics                 # what was omitted, and why
-  → renderers consume approved entries; lint/coverage consume diagnostics
+  → renderers consume approved entries (diagnostics: see below — no consumer yet)
 ```
 
 - `ApprovedDimension` has **no `suppressed` field**. There is nothing to forget.
+- Withheld measurements leave through `diagnostics`. **Nothing consumes them yet** — the
+  consumer is `linting/coverage.py` and it arrives with #921, whose authored sets are the
+  first omissions coverage must tell apart from a measurement simply missed. Until then
+  every omission is a planner rule the lint layer already knows by other means.
+- The feature a dimension came from travels as an **opaque `FeatureRef`**: identity and
+  category, no measurement. Carrying the `Feature` itself would have left the bypass one
+  attribute access away — `.feature.levels` rebuilds exactly what the compiler withheld.
+  The two seams that legitimately need the object (ADR 0010 provenance tagging, escalation
+  grouping) resolve it explicitly; a dimensional renderer doing so is a violation the
+  boundary guard catches.
 - Correlated sets (a step-height ladder, a shoulder chain) arrive as explicit
   `ApprovedLadder` groups, so a renderer never rebuilds one from a feature. This preserves
   the tier-3 identity rule — the set is approved or omitted whole, never half a staircase.

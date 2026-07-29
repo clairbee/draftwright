@@ -714,7 +714,7 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
     Fires on the "step"/"illegible" ``Escalation`` `render_height_ladder`
     (from_model.py) appends (ADR 0009 Amdt 1, #351 PR-4b) rather than
     independently recomputing the legibility gate from ``a.step_zs`` — a uniform
-    staircase (``_detect_step_repeat``) collapses to one representative dim with
+    staircase (``model.compiled._step_repeat``) collapses to one representative dim with
     no drop at all, and re-deriving legibility straight from the raw z-list here
     missed that case, queuing a spurious detail even though nothing was actually
     dropped (a real bug the escalation routing fixes as a side effect).

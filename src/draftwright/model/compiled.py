@@ -18,9 +18,16 @@ The structural answer is that **suppression is not a flag renderers check, it is
 they never receive**:
 
 - :class:`ApprovedDimension` has no ``suppressed`` field. There is nothing to forget.
-- What was *not* approved leaves through :attr:`RenderableDimensionPlan.diagnostics`, which
-  lint and coverage consume. Omission stays inspectable — ADR 0016's "marked, not filtered"
-  is preserved — but it is not on the path a renderer walks.
+- What was *not* approved leaves through :attr:`RenderableDimensionPlan.diagnostics`.
+  Omission stays inspectable — ADR 0016's "marked, not filtered" is preserved — but it is
+  not on the path a renderer walks.
+
+  **Nothing consumes diagnostics yet, and this is deliberately not claimed otherwise.**
+  The consumer arrives with #921: an authored set is the first source of omissions that
+  coverage must tell apart from a measurement simply missed, which is what
+  ``Omission.authored`` exists for. Until then every omission here is a planner rule the
+  lint layer already understands by other means, so wiring a consumer now would be
+  connecting a channel to nothing. The owner is `linting/coverage.py`, at the #921 rebase.
 - Correlated sets (a step-height ladder, a shoulder chain) arrive as explicit
   :class:`ApprovedLadder` groups, so a renderer never reconstructs one from a feature.
 
@@ -54,6 +61,60 @@ from draftwright.model.planner import DimensionId, plan_dimensions
 _AUTHORED_OMISSION = "not in the authored dimension set"
 
 
+class FeatureRef:
+    """An **opaque** provenance handle for the feature a dimension came from.
+
+    Carrying the `Feature` itself on an approved entry would have left the whole bypass
+    one attribute access away: a renderer could read `.levels`, `.base` or `.shoulders`
+    off it and rebuild exactly the content the compiler withheld (#923 review). The AST
+    guard proved only that today's renderer does not; the type still permitted it, and a
+    boundary that relies on renderers not doing the thing they can trivially do is the
+    convention this work exists to replace.
+
+    So the handle exposes identity and category — enough for provenance tagging
+    (ADR 0010), escalation grouping, and equality — and no measurement at all. The two
+    consumers that legitimately need the object (the corridor provenance seam and the
+    escalation resolver) call :func:`resolve_feature` where the object is the point.
+
+    Python cannot make this airtight, and it is not pretending to: ``ref._feature`` still
+    exists. What changes is that reading content now requires an obviously-wrong private
+    access that the boundary guard greps for, rather than an innocuous ``.feature.levels``
+    nobody would flag in review.
+    """
+
+    __slots__ = ("_feature",)
+
+    _feature: Feature
+
+    def __init__(self, feature: Feature) -> None:
+        object.__setattr__(self, "_feature", feature)
+
+    @property
+    def kind(self) -> str:
+        """The feature's category — ``"step_level"``, ``"envelope"``. Not a measurement."""
+        return getattr(self._feature, "kind", "?")
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, FeatureRef) and other._feature is self._feature
+
+    def __hash__(self) -> int:
+        return id(self._feature)
+
+    def __repr__(self) -> str:
+        return f"FeatureRef({self.kind})"
+
+
+def resolve_feature(ref):
+    """The `Feature` behind a :class:`FeatureRef` — for provenance and escalation ONLY.
+
+    Called at the seams where the feature object itself is the point: the corridor's
+    ADR 0010 provenance map, and the escalation resolver's grouping. A dimensional
+    renderer calling this is a boundary violation, and the guard says so."""
+    if ref is None or not isinstance(ref, FeatureRef):
+        return ref
+    return ref._feature
+
+
 @dataclass(frozen=True)
 class ApprovedDimension:
     """One measurement the compiler approved for drawing.
@@ -70,7 +131,7 @@ class ApprovedDimension:
     label: str
     value: float
     span: tuple[Point, Point] | None
-    feature: Feature | None = None
+    ref: FeatureRef | None = None
 
 
 @dataclass(frozen=True)
@@ -85,7 +146,7 @@ class ApprovedLadder:
 
     kind: str  # "step_height" | "step_position" | "overall_height"
     rungs: tuple[ApprovedDimension, ...]
-    feature: Feature | None = None
+    ref: FeatureRef | None = None
     #: A uniform staircase collapsed to a single ``n× rise`` mark. The COLLAPSE is a
     #: content decision and is made here; the renderer only needs to know so it can name
     #: the mark (``dim_step_typ`` rather than ``dim_step_0``) and skip the per-rung
@@ -120,6 +181,9 @@ class RenderableDimensionPlan:
     Grows one renderer at a time: :attr:`ladders` covers the height ladder and shoulder
     chain (the first migrated slice). Renderers not yet migrated keep consuming
     `plan_dimensions` directly, and the migration is finished when none do.
+
+    :attr:`diagnostics` is produced but not yet consumed — see the module docstring. It is
+    an output with a named owner and a date, not a claim about today's behaviour.
     """
 
     ladders: tuple[ApprovedLadder, ...] = ()
@@ -156,11 +220,16 @@ def _step_repeat(levels, base: float, top: float, tol_frac: float = 0.10):
     return len(rises) + (1 if abs((top - ordered[-1]) - mean) / mean <= tol_frac else 0), mean
 
 
-def _suppressed_dims(model: PartModel):
+def _suppressed_dims(model: PartModel, groups=None):
     """``{(feature, parameter_id): (value, reason)}`` for every dimension the planner
-    marked — the compiler's input for what NOT to approve."""
+    marked — the compiler's input for what NOT to approve.
+
+    *groups* lets a caller that has already planned pass the result in. The engine plans
+    once per build (ADR 0008 Amdt 5); a compiler that re-planned would both cost a second
+    pass and create two products that can drift while the migration is partial (#923
+    review)."""
     out = {}
-    for group in plan_dimensions(model):
+    for group in groups if groups is not None else plan_dimensions(model):
         for pd in group.dims:
             if pd.suppressed:
                 out[(id(group.feature), pd.param.parameter_id)] = (
@@ -168,6 +237,18 @@ def _suppressed_dims(model: PartModel):
                     pd.reason or "suppressed",
                 )
     return out
+
+
+def _dim_id(feature, parameter_id: str) -> DimensionId | None:
+    """The ADR 0016 identity for an approved entry.
+
+    Minted here rather than left ``None``: `DimensionId` is already the stable addressable
+    identity the ADR defines, and a renderer-facing result that discards it would create
+    identity debt on the very boundary meant to remove it — provenance, edits, diagnostics
+    and later de-duplication all key on it (#923 review)."""
+    if feature is None:
+        return None
+    return DimensionId(feature, parameter_id)
 
 
 def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder], list[Omission]]:
@@ -179,14 +260,15 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
     omissions: list[Omission] = []
     bb: Any = model.bbox  # build123d BoundBox
     x, y = float(bb.max.X), float(bb.min.Y)
+    step_ref = FeatureRef(step)
 
     heights = [
         ApprovedDimension(
-            id=None,
+            id=_dim_id(step, "step_height.length"),
             label=_fmt(z - step.base),
             value=z - step.base,
             span=((x, y, step.base), (x, y, z)),
-            feature=step,
+            ref=step_ref,
         )
         for z in sorted(step.levels)
     ]
@@ -202,16 +284,16 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
             first = sorted(step.levels)[0]
             heights = [
                 ApprovedDimension(
-                    id=None,
+                    id=_dim_id(step, "step_height.length"),
                     label=f"{n}× {_fmt(rise)}",
                     value=rise,
                     span=((x, y, step.base), (x, y, first)),
-                    feature=step,
+                    ref=step_ref,
                 )
             ]
         approved.append(
             ApprovedLadder(
-                "step_height", tuple(heights), feature=step, representative=rep is not None
+                "step_height", tuple(heights), ref=step_ref, representative=rep is not None
             )
         )
     else:
@@ -220,11 +302,11 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
     _di = {"x": 0, "y": 1, "z": 2}
     shoulders = [
         ApprovedDimension(
-            id=None,
+            id=_dim_id(step, "step_position.length"),
             label=_fmt(abs(pos - step.datum[_di[axis]])),
             value=abs(pos - step.datum[_di[axis]]),
             span=None,
-            feature=step,
+            ref=step_ref,
         )
         for axis, pos in sorted(step.shoulders)
     ]
@@ -234,7 +316,7 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
         if fid == id(step) and pid.startswith("step_position.")
     ]
     if shoulders and not pos_marks:
-        approved.append(ApprovedLadder("step_position", tuple(shoulders), feature=step))
+        approved.append(ApprovedLadder("step_position", tuple(shoulders), ref=step_ref))
     else:
         omissions += [Omission(step, pid, v, why) for pid, v, why in pos_marks]
     return approved, omissions
@@ -284,34 +366,39 @@ def _compile_overall_height(
         if mark is not None:
             return None, [Omission(env, "height.length", mark[0], mark[1])]
     value = float(env.height) if env is not None else float(bb.size.Z)
+    env_ref = FeatureRef(env) if env is not None else None
     x, y = float(bb.max.X), float(bb.min.Y)
     return (
         ApprovedLadder(
             "overall_height",
             (
                 ApprovedDimension(
-                    id=None,
+                    id=_dim_id(env, "height.length"),
                     label=_fmt(value),
                     value=value,
                     span=((x, y, float(bb.min.Z)), (x, y, float(bb.max.Z))),
-                    feature=env,
+                    ref=env_ref,
                 ),
             ),
-            feature=env,
+            ref=env_ref,
         ),
         [],
     )
 
 
 def compile_dimensions(
-    model: PartModel, *, include_overall: bool = True
+    model: PartModel, *, include_overall: bool = True, groups=None
 ) -> RenderableDimensionPlan:
     """Compile *model* into the dimensions that will be drawn, and the ones that will not.
 
     One pass, one policy. Everything a renderer needs to know about WHAT to draw is decided
     here; everything about WHERE stays in the renderer.
+
+    *groups* accepts a `plan_dimensions` result the caller already has, so the engine's
+    plan-once invariant holds through the migration instead of the compiler quietly
+    re-planning behind it (#923 review).
     """
-    marked = _suppressed_dims(model)
+    marked = _suppressed_dims(model, groups)
     ladders, omissions = _compile_step_ladders(model, marked)
     overall, height_omissions = _compile_overall_height(
         model, marked, include_overall=include_overall
