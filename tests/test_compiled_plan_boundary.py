@@ -367,6 +367,43 @@ class TestTheBoundaryIsLoadBearing:
             "the compiler did not approve"
         )
 
+    def test_rotational_furniture_cannot_rebuild_withheld_diameters(self, monkeypatch):
+        """Centrelines survive, but an OD and bore absent from the plan stay absent.
+
+        The legacy renderer asserted that every raw rotational diameter remained in
+        `DimensionGroup`, then used `rot.od` / `rot.bores` to build its geometry. That
+        made suppression an error rather than a supported compiler decision."""
+        part = (
+            Cylinder(15, 10)
+            - Pos(0, 0, 5) * Cylinder(4, 5)
+            - Pos(0, 0, -5) * Cylinder(2.5, 20)
+        )
+        model = detect_part_model(part)
+        full = compile_dimensions(model)
+        rotational = full.of_kind("rotational")
+        assert len(rotational) == 1
+        group = rotational[0]
+        bores = [d for d in group.dims if d.role == "bore"]
+        assert len(bores) >= 2, "fixture must provide an OD and two independently withheld bores"
+
+        # Withhold the OD and the first bore; approve only the second bore.
+        partial_group = replace(group, dims=(bores[1],))
+        partial = replace(
+            full,
+            groups=tuple(partial_group if g is group else g for g in full.groups),
+        )
+        monkeypatch.setattr(
+            "draftwright.annotations.orchestrator.compile_dimensions",
+            lambda *_a, **_kw: partial,
+        )
+
+        dwg = build_drawing(part)
+        assert "dim_od" not in dwg.annotations()
+        assert [o.label for n, o in dwg.iter_annotations() if n.startswith("ldr_z")] == [
+            f"ø{bores[1].label}"
+        ]
+        assert {"centerline_front", "centerline_side"} <= set(dwg.annotations())
+
     def test_the_migration_guard_measures_the_CONTRACT_not_the_signature(self):
         """How far the boundary actually reaches, by what each renderer is HANDED.
 
@@ -413,12 +450,12 @@ class TestTheBoundaryIsLoadBearing:
             "render_plates",
             "render_pocket_patterns",
             "render_pockets",
+            "render_rotational",
             "render_slot_patterns",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
-            "render_rotational",
             "render_slots",
             "render_step_lengths",
         ], f"the advisory-surface set changed: {sorted(by_contract['groups'])}"

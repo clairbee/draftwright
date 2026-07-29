@@ -3177,62 +3177,48 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
     return n
 
 
-def render_rotational(dwg, groups, a, *, ctx) -> int:
+def render_rotational(dwg, plan, a, *, ctx) -> int:
     """Rotational furniture from the IR `RotationalFeature` (#237): the OD dim (above
     the front view), the rotation-axis centrelines (front + side), and the concentric
     bore leaders stacked to the left of the front view. Returns the count placed.
 
-    The OD/bore dimension LABELS consume the feature's planned `DimensionGroup`
-    (#754): the value and any authored tolerance/fit folded on by `plan_dimensions`
-    now reach the label via `_tol_suffix`, closing the raw-field bypass ADR 0015
-    tracked. The centrelines and the bore-stack layout/drop bookkeeping stay
-    model-routed furniture, and geometry keeps using the raw `rot.od`/`rot.bores`
-    (equal to the planned value), so X/Y/Z placement is unchanged."""
-    g = next((g for g in groups if g.feature_kind == "rotational"), None)
+    The OD/bore dimensions consume only approved compiled entries. Suppressed entries
+    therefore cannot reach either a label or the geometry used to place that label.
+    Axis centrelines are furniture and remain even when every diameter is omitted."""
+    g = next(iter(plan.of_kind("rotational")), None)
     if g is None:
         return 0
-    rot = g.feature
     draft = dwg.draft
     FX, FZ = a.proj.front_x, a.proj.front_z
     SX, SZ = a.proj.side_x, a.proj.side_z
     PX, PY = a.proj.plan_x, a.proj.plan_y
     n = 0
-    od = rot.od
-    axis = rot.frame.axis
-    od_pd = next((pd for pd in g.dims if pd.param.role == "od"), None)
-    bore_pds = [pd for pd in g.dims if pd.param.role == "bore"]
-    # Contract: RotationalFeature.parameters() emits exactly one OD dim and one per
-    # bore in bores order, and plan_dimensions preserves that. Fail LOUD on a mismatch
-    # (#806 review) rather than silently rendering a raw, untoleranced label — or, for a
-    # missing MIDDLE bore, shifting every later bore_pds[i] onto the wrong physical bore.
-    if od_pd is None or len(bore_pds) != len(rot.bores):
-        raise AssertionError(
-            f"rotational plan mismatch: od_present={od_pd is not None}, "
-            f"planned bores={len(bore_pds)} vs {len(rot.bores)}"
-        )
+    axis = g.facts.frame.axis
+    od_dim = g.dim(kind="diameter", role="od")
+    bore_dims = [d for d in g.dims if d.kind == "diameter" and d.role == "bore"]
 
-    def _dia_label(pd):
+    def _dia_label(dim):
         # Planner-fed value + authored tolerance/fit suffix (#754).
-        return f"ø{_fmt(pd.param.value)}{_tol_suffix(pd.param.tolerance, draft)}"
-
-    od_label = _dia_label(od_pd)
+        return f"ø{_fmt(dim.value)}{_tol_suffix(dim.tolerance, draft)}"
 
     if axis == "z":
         # Vertical turning axis (the common case): OD across the top of the front
         # (profile) view; axis centrelines vertical on front + side.
-        ctx.place(
-            _dim(
-                (FX(a.cx - od / 2), FZ(a.bb.max.Z) + 2, 0),
-                (FX(a.cx + od / 2), FZ(a.bb.max.Z) + 2, 0),
-                "above",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="front",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (FX(a.cx - od / 2), FZ(a.bb.max.Z) + 2, 0),
+                    (FX(a.cx + od / 2), FZ(a.bb.max.Z) + 2, 0),
+                    "above",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="front",
+            )
+            n += 1
         ctx.place(
             Centerline((FX(a.cx), FZ(a.bb.min.Z) - 5, 0), (FX(a.cx), FZ(a.bb.max.Z) + 5, 0)),
             "centerline_front",
@@ -3245,7 +3231,7 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
         )
 
         # Concentric bore leaders to the left of the front view, centred on the axis.
-        if rot.bores:
+        if bore_dims:
             left_edge = FX(a.bb.min.X)
             if left_edge - a.margin >= a.DIM_PAD:
                 elbow_x = left_edge - a.DIM_PAD * 0.6
@@ -3256,7 +3242,7 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                 # leader keeps that same symmetric natural, so plan_strip reproduces the old
                 # positions exactly when there is room (zero displacement) and only compresses /
                 # drops (larger bore outranks smaller, priority=d) when the band is over capacity.
-                nb = len(rot.bores)
+                nb = len(bore_dims)
                 z_lo, z_hi = a.FV_Y - a.fv_hh, a.FV_Y + a.fv_hh
                 cands = [
                     StripCandidate(
@@ -3265,10 +3251,12 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                         size=(draft.font_size * 3, pitch),
                         priority=d,
                     )
-                    for i, d in enumerate(rot.bores)
+                    for i, dim in enumerate(bore_dims)
+                    for d in (dim.value,)
                 ]
                 placed = plan_strip(cands, z_lo, z_hi, pitch, axis="y").placed
-                for i, d in enumerate(rot.bores):
+                for i, dim in enumerate(bore_dims):
+                    d = dim.value
                     tip_z = placed.get(f"{i:03d}")
                     if tip_z is None:
                         continue  # over the front-view capacity — dropped (ranked), logged below
@@ -3276,14 +3264,16 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                         Leader(
                             tip=(FX(a.cx - d / 2), tip_z, 0),
                             elbow=(elbow_x, tip_z, 0),
-                            label=_dia_label(bore_pds[i]),
+                            label=_dia_label(dim),
                             draft=draft,
                         ),
                         f"ldr_z{i}",
                         view="front",
                     )
                     n += 1
-                dropped = [d for i, d in enumerate(rot.bores) if placed.get(f"{i:03d}") is None]
+                dropped = [
+                    dim.value for i, dim in enumerate(bore_dims) if placed.get(f"{i:03d}") is None
+                ]
                 for d in dropped:
                     ctx.coverage.drop_diam(
                         d
@@ -3298,25 +3288,27 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
             else:
                 _log.info(
                     "Additional diameters %s not annotated (insufficient left margin)",
-                    list(rot.bores),
+                    [dim.value for dim in bore_dims],
                 )
     elif axis == "x":
         # Horizontal turning axis along X (#222): the OD is the Z extent — a vertical
         # ø dim left of the front (profile) view; axis centrelines run horizontally
         # through z=cz on front and y=cy on plan.
-        ctx.place(
-            _dim(
-                (FX(a.bb.min.X) - 2, FZ(a.cz - od / 2), 0),
-                (FX(a.bb.min.X) - 2, FZ(a.cz + od / 2), 0),
-                "left",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="front",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (FX(a.bb.min.X) - 2, FZ(a.cz - od / 2), 0),
+                    (FX(a.bb.min.X) - 2, FZ(a.cz + od / 2), 0),
+                    "left",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="front",
+            )
+            n += 1
         ctx.place(
             Centerline((FX(a.bb.min.X) - 5, FZ(a.cz), 0), (FX(a.bb.max.X) + 5, FZ(a.cz), 0)),
             "centerline_front",
@@ -3331,19 +3323,21 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
         # Horizontal turning axis along Y (#222): the OD is the Z extent — a vertical
         # ø dim left of the side (profile) view; axis centrelines run horizontally
         # through z=cz on side and vertically through x=cx on plan.
-        ctx.place(
-            _dim(
-                (SX(a.bb.min.Y) - 2, SZ(a.cz - od / 2), 0),
-                (SX(a.bb.min.Y) - 2, SZ(a.cz + od / 2), 0),
-                "left",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="side",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (SX(a.bb.min.Y) - 2, SZ(a.cz - od / 2), 0),
+                    (SX(a.bb.min.Y) - 2, SZ(a.cz + od / 2), 0),
+                    "left",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="side",
+            )
+            n += 1
         ctx.place(
             Centerline((SX(a.bb.min.Y) - 5, SZ(a.cz), 0), (SX(a.bb.max.Y) + 5, SZ(a.cz), 0)),
             "centerline_side",

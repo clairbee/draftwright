@@ -346,7 +346,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_rotational():
         # Rotational furniture — OD dim + axis centrelines + concentric bore leaders — IR
         # renderer (#237), placed early like the engine's inline block it replaces.
-        render_rotational(dwg, _groups, a, ctx=ctx)
+        render_rotational(dwg, _compiled, a, ctx=ctx)
         # A stepped round stack on an otherwise non-rotational flange still needs
         # its local axis shown before centered-bore offsets can be suppressed (#881).
         render_local_turned_centerlines(dwg, a, ctx=ctx)

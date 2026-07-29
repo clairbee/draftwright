@@ -1241,10 +1241,10 @@ class Drawing:
             return []
         from draftwright.annotations._common import PlacementContext
         from draftwright.annotations.from_model import render_rotational
-        from draftwright.model import plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         ctx = PlacementContext(registry=self._registry, coverage=self._coverage, items=self.items)
-        render_rotational(self, plan_dimensions(self._part_model), self._analysis, ctx=ctx)
+        render_rotational(self, compile_dimensions(self._part_model), self._analysis, ctx=ctx)
         return []
 
     def section(self) -> list[str]:
@@ -1736,6 +1736,7 @@ class Drawing:
             feature_hole_keys,
         )
         from draftwright.model import PartModel, plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         routable = model is not None and a is not None
         queued_dim_ids: set = set()
@@ -1749,7 +1750,7 @@ class Drawing:
             # pass, so the reconstruction matches (== not ⊇, unlike the #424 diameter case).
             if r.rotational_ids:
                 assert a is not None and isinstance(model, PartModel)
-                render_rotational(self, plan_dimensions(model), a, ctx=ctx)
+                render_rotational(self, compile_dimensions(model), a, ctx=ctx)
             # Generated/deferred reconstruction starts with auto_dims=False, so
             # add a non-rotational stepped stack's local axis here before the
             # location stages suppress a centered bore as axis-located (#881).
