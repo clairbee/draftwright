@@ -406,7 +406,9 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_step_positions():
         # Prismatic step POSITIONS (#555): where each shoulder sits along its axis, so a
         # stepped block is fully constrained (the heights alone leave the shoulder implicit).
-        render_step_positions(dwg, _model, a, ctx=ctx)
+        render_step_positions(
+            dwg, compile_dimensions(_model, groups=_groups), layout_frame(a), ctx=ctx
+        )
 
     def _s_chamfers():
         # Chamfer callouts (#560): C{leg} / {leg}×{angle}° via a leader off each chamfer face.

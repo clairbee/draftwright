@@ -94,14 +94,22 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 
 ### Scope, stated so the exceptions cannot be mistaken for completeness
 
-**The rule is the destination, and the migration is partial. What is not yet inside it is
-scheduled, not excused — an unstated exception is how a rule like this rots.**
+**The rule is the destination; the migration is partial and its remainder is named.**
+Removing the qualification entirely once the detail path landed was wrong — two paths still
+emit dimensional content of their own, and a rule stated more broadly than it holds is worse
+than one honestly scoped (#923 review round 3). What is not yet inside is listed here, and
+`tests/test_compiled_plan_boundary.py` fails the moment an unlisted mark appears.
 
 - **Location dimensions are inside this rule.** They are dimensions, and letting
   `render_locations` rebuild them from the model preserves the same bypass class.
   `plan_locations` returns a flat, cross-feature, ref-deduped list that never enters a
   `DimensionGroup`, so they are sequenced later in the migration rather than carved out
   (#883). The boundary is not complete until they are inside it.
+- **Pattern pitch dimensions are inside this rule and not yet migrated.** `_add_furniture`
+  derives `n× pitch` from `PatternFeature.members`/`count`/`pitch` and places it directly
+  (`annotations/holes.py`), so it survives an empty compiled plan. It is grouped with
+  furniture in the code but it prints a VALUE, which is exactly what makes something
+  dimensional content under this rule — the grouping is the bug. Sequenced with locations.
 - **Raw AP242 PMI is a documented exception.** `PmiFeature.parameters()` is empty by design
   and the record renders verbatim, so there is no compiled content for it to come from. It
   is an explicit provenance-preserving escape hatch, not an oversight.

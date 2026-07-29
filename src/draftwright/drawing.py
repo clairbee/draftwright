@@ -1849,7 +1849,10 @@ class Drawing:
             # ladder above; placed and dropped at the drain (#639).
             if r.step_position_ids:
                 assert a is not None and isinstance(model, PartModel)
-                render_step_positions(self, model, a, ctx=ctx)
+                from draftwright._core import layout_frame as _lf
+                from draftwright.model.compiled import compile_dimensions as _cd2
+
+                render_step_positions(self, _cd2(model), _lf(a), ctx=ctx)
 
         def _s_detail_request():
             # Prismatic step-height detail (#661): queue it exactly as the auto pass

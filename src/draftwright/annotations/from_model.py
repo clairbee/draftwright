@@ -3043,7 +3043,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     return len(chain) + len(short_rungs)
 
 
-def render_step_positions(dwg, model, a, *, ctx) -> int:
+def render_step_positions(dwg, plan, frame, *, ctx) -> int:
     """Prismatic step POSITIONS (#555): where each shoulder sits along its axis,
     dimensioned from the part datum so a stepped block is fully constrained (the step
     heights alone leave the shoulder location implicit — two geometries draw the same
@@ -3051,61 +3051,79 @@ def render_step_positions(dwg, model, a, *, ctx) -> int:
     horizontally, where the step profile reads); an X shoulder is above the plan view —
     the same axis→view mapping the hole-location ladder uses. Mixed-axis transitions use
     the side-below strip so they do not collide with the isometric furniture above.
-    A shoulder whose strip is full drops with a lint code, not silently. Returns the
-    count placed."""
-    step = next((f for f in model.features if f.kind == "step_level"), None)
-    if step is None or not step.shoulders:
+    A shoulder whose strip is full drops with a lint code, not silently.
+
+    Migrated to the ADR 0016 boundary: the shoulder chain arrives as the compiled plan's
+    ``step_position`` :class:`ApprovedLadder`, and each rung's span carries the datum and
+    the station it runs between, so this pass never reaches for `step.shoulders` or the
+    bounding box. Returns the count placed."""
+    ladder = plan.ladder("step_position")
+    rungs = list(ladder.rungs) if ladder is not None else []
+    if not rungs:
         return 0
     draft = dwg.draft
-    axes = {axis for axis, _ in step.shoulders}
+
+    def _axis_of(rung):
+        """Which axis a shoulder runs along — read off the span's varying coordinate.
+
+        The span already says it, so an `axis` field would be a second statement of one
+        fact and a second thing to keep in step."""
+        lo, hi = rung.span
+        return "x" if lo[0] != hi[0] else "y"
+
+    axes = {_axis_of(r) for r in rungs}
     mixed_axes = len(axes) > 1
     # Dense transition ladders need only one text tier: arrowhead clearance is
     # along the measured axis, not between outward ladder tiers (#897). Retain
     # the established spacing for ordinary single-axis stepped profiles.
     tier = draft.font_size + (
-        draft.pad_around_text if len(step.shoulders) > 2 else 2 * draft.pad_around_text
+        draft.pad_around_text if len(rungs) > 2 else 2 * draft.pad_around_text
     )
     n = 0
     counts: dict = {"x": 0, "y": 0}
-    for axis, pos in sorted(step.shoulders):
-        di = {"x": 0, "y": 1}[axis]
-        datum = step.datum[di]
-        val = abs(pos - datum)
+    # Page-space view edges: the ladder anchors on the view silhouette, which is layout,
+    # while the STATIONS come from the approved spans, which is content.
+    _sl, _sr, side_bottom, side_top = frame.edges("side")
+    _pl, _pr, _pb, plan_top = frame.edges("plan")
+    for rung in rungs:
+        axis = _axis_of(rung)
+        lo, hi = rung.span
+        val = rung.value
         i = counts[axis]
         counts[axis] += 1
         if axis == "y" and mixed_axes:
             # Keep mixed-axis Y-profile stations below the side view. The iso
             # caption lives above it and is emitted after the corridor drain,
             # so an above ladder could not see/avoid that furniture (#897).
-            view, strip, direction = "side", a.sv_zones.below, "below"
-            p1 = dwg.at(view, a.bb.min.X, datum, a.bb.min.Z)
-            p2 = dwg.at(view, a.bb.min.X, pos, a.bb.min.Z)
+            view, strip, direction = "side", frame.sv_zones.below, "below"
+            p1 = (frame.project(view, lo)[0], side_bottom)
+            p2 = (frame.project(view, hi)[0], side_bottom)
         elif axis == "y":
-            view, strip, direction = "side", a.sv_zones.above, "above"
-            p1 = dwg.at(view, a.bb.min.X, datum, a.bb.max.Z)
-            p2 = dwg.at(view, a.bb.min.X, pos, a.bb.max.Z)
+            view, strip, direction = "side", frame.sv_zones.above, "above"
+            p1 = (frame.project(view, lo)[0], side_top)
+            p2 = (frame.project(view, hi)[0], side_top)
         else:  # x — shoulder along X → above the plan view
-            view, strip, direction = "plan", a.pv_zones.above, "above"
-            p1 = dwg.at(view, datum, a.bb.max.Y, a.bb.min.Z)
-            p2 = dwg.at(view, pos, a.bb.max.Y, a.bb.min.Z)
+            view, strip, direction = "plan", frame.pv_zones.above, "above"
+            p1 = (frame.project(view, lo)[0], plan_top)
+            p2 = (frame.project(view, hi)[0], plan_top)
         edge = p1[1]
         name = f"dim_shoulder_{axis}{i}"
 
-        def _build(pos, p1=p1, p2=p2, edge=edge, val=val, direction=direction):
+        def _build(pos, p1=p1, p2=p2, edge=edge, label=rung.label, direction=direction):
             return _dim(
                 (p1[0], edge, 0),
                 (p2[0], edge, 0),
                 direction,
                 pos - edge if direction == "above" else edge - pos,
                 draft,
-                label=_fmt(val),
+                label=label,
             )
 
-        def _drop(nm, val=val, view=view, direction=direction):
+        def _drop(nm, label=rung.label, view=view, direction=direction):
             ctx.record_issue(
                 "warning",
                 "step_position_dropped",
-                f"step position {_fmt(val)} not dimensioned ({view} {direction}-strip full)",
+                f"step position {label} not dimensioned ({view} {direction}-strip full)",
             )
 
         # ADR 0009 corridor candidate (#636): a shoulder position is a datum-referenced
@@ -3130,7 +3148,8 @@ def render_step_positions(dwg, model, a, *, ctx) -> int:
                 on_place=lambda nm: None,
                 on_drop=_drop,
                 force=True,
-                feature=step,
+                # The opaque provenance handle, passed straight through.
+                feature=ladder.ref,
             ),
         )
         n += 1

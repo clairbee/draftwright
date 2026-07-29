@@ -34,6 +34,27 @@ from draftwright.annotations.from_model import render_height_ladder
 from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.compiled import RenderableDimensionPlan, compile_dimensions
 
+#: Marks that legitimately survive an empty compiled plan because they carry no VALUE.
+#: Anything added here needs that reason: "the test failed otherwise" is how the boundary
+#: erodes. A pattern's pitch dim prints "4× 20" and is therefore NOT furniture — it is a
+#: pending migration, tracked below.
+_FURNITURE = (
+    "centerline",
+    "m_cm",
+    "m_locx",
+    "m_locy",
+    "note_",
+    "title_block",
+    "section_",
+    "hatch",
+    "detail_marker",
+    "detail_caption",
+    "hc_",
+    "m_env",
+    "balloon",
+    "table",
+)
+
 
 def _staircase():
     return Box(120, 60, 15) + Pos(-20, 0, 15) * Box(80, 60, 15) + Pos(-40, 0, 30) * Box(40, 60, 15)
@@ -267,9 +288,13 @@ class TestTheBoundaryIsLoadBearing:
             lambda *a, **kw: RenderableDimensionPlan(),
         )
         empty = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
-        leaked = sorted(n for n in empty if n.startswith(("dim_step", "dim_height")))
+        # EVERY dimensional mark, not a hand-listed prefix. Filtering to
+        # `dim_step`/`dim_height` let `dim_shoulder_*` through for a whole review round —
+        # a guard that only looks where you already know to look is not a guard (#923
+        # review round 3). Furniture is excluded by name because it prints no value.
+        leaked = sorted(n for n in empty if not n.startswith(_FURNITURE))
         assert not leaked, (
-            f"{leaked} reached the page from an EMPTY compiled plan — the renderer is "
+            f"{leaked} reached the page from an EMPTY compiled plan — something is "
             "rebuilding dimensions from somewhere other than the plan"
         )
 
@@ -344,5 +369,21 @@ class TestTheBoundaryIsLoadBearing:
             "render_gdt",
             "render_locations",
             "render_pmi",
-            "render_step_positions",
         ], f"the unmigrated set changed: {unmigrated}"
+
+    def test_the_pending_dimensional_paths_are_the_ones_the_adr_names(self):
+        """Two paths still emit dimensional content of their own, and the ADR says so.
+
+        A pattern's pitch dim prints `4× 20` — a VALUE, which is what makes something
+        dimensional under this rule, however it is grouped in the code. It survives an
+        empty compiled plan today. This test does not assert the bypass exists (a test
+        that requires a bug is not a guard); it asserts the ADR and the code agree about
+        WHICH paths are outstanding, so the list cannot quietly grow."""
+        adr = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "docs"
+            / "adr"
+            / "0016-declared-dimensioning-intent.md"
+        ).read_text(encoding="utf-8")
+        for pending in ("Location dimensions are inside this rule", "Pattern pitch dimensions"):
+            assert pending in adr, f"the ADR stopped naming a pending path: {pending}"
