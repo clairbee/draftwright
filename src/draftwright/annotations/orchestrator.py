@@ -459,7 +459,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # Overall width (plan, below) + depth (side, below) envelope dims — IR renderer,
         # queued into the shared corridor instead of claiming a post-hoc carve tier.
         # Suppression (square footprint / X-turned width) is the planner's decision (#250).
-        render_envelope(dwg, _groups, a, ctx=ctx)
+        render_envelope(dwg, _compiled, a, ctx=ctx)
 
     def _s_detail_request():
         # Prismatic step-height detail: queue it (only when build_drawing(detail_view=True))

@@ -55,7 +55,6 @@ _VALUE_FREE = (
 _PENDING_VALUE_CARRYING = (
     "m_locx",  # hole location ladders — #883
     "m_locy",
-    "m_env",  # envelope width/depth — render_envelope, still on the advisory surface
     "hc_",  # hole callouts — likewise
     "dim_pitch",  # pattern pitch — derived in _add_furniture from the feature
     "dim_od",  # rotational OD — render_rotational, still on the advisory surface
@@ -405,6 +404,7 @@ class TestTheBoundaryIsLoadBearing:
             "render_boss_diameters",
             "render_boss_heights",
             "render_chamfers",
+            "render_envelope",
             "render_fillets",
             "render_flats",
             "render_grooves",
@@ -414,9 +414,7 @@ class TestTheBoundaryIsLoadBearing:
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
-            "render_centermarks",
             "render_diameters",
-            "render_envelope",
             "render_pocket_patterns",
             "render_pockets",
             "render_rotational",
@@ -445,7 +443,7 @@ class TestTheBoundaryIsLoadBearing:
             / "adr"
             / "0016-declared-dimensioning-intent.md"
         ).read_text(encoding="utf-8")
-        assert "render_rotational" in adr and "render_envelope" in adr, (
+        assert "render_rotational" in adr and "render_pockets" in adr, (
             "the ADR's pending inventory stopped naming the advisory-surface renderers — "
             "it must list what has NOT crossed the boundary, not just what has"
         )

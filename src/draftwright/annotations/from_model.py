@@ -765,7 +765,7 @@ def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
     return n
 
 
-def render_centermarks(dwg, groups, *, ctx) -> int:
+def render_centermarks(dwg, furniture_groups, *, ctx) -> int:
     """A centre mark on every hole (plain holes + each pattern member), in the view
     normal to the hole's axis (`_END_ON`), sized by its diameter — the IR migration
     of the engine's inline centre-mark loop. Returns the count placed.
@@ -777,7 +777,7 @@ def render_centermarks(dwg, groups, *, ctx) -> int:
     (facts live on the feature, parameters carry display values) applied to geometry rather
     than to text."""
     n = 0
-    for g in groups:
+    for g in furniture_groups:
         feat = g.feature
         if not isinstance(feat, HoleFeature | PatternFeature):
             continue
@@ -1337,25 +1337,6 @@ def _reroute_crossing_diameters(dwg, *, ctx) -> int:
         if not placed_it and dwg.get_annotation(name) is None:
             ctx.place(old, name, view="front", feature=feat)  # restore (Phase-1 flags it)
     return rerouted
-
-
-def _env_pd(group, role):
-    """The PlannedDimension for an envelope role (width/depth/height), or None."""
-    return next((pd for pd in group.dims if pd.param.role == role), None)
-
-
-def envelope_group(groups):
-    """The envelope `DimensionGroup` in *groups*, or None."""
-    return next((g for g in groups if g.feature_kind == "envelope"), None)
-
-
-def env_dim_placed(pd) -> bool:
-    """Whether :func:`render_envelope` will actually place an envelope dim for the
-    PlannedDimension *pd* — present, not suppressed by the planner (square footprint /
-    X-turned, #250), and carrying a span. The single source of truth for that
-    decision, shared with the orchestrator's side-below tier reservation so the two
-    can never drift (#316 review)."""
-    return pd is not None and not pd.suppressed and pd.param.span is not None
 
 
 def _chamfer_label(leg, ch) -> str:
@@ -2199,15 +2180,15 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
     return n
 
 
-def render_envelope(dwg, groups, a, *, ctx) -> int:
+def render_envelope(dwg, plan, a, *, ctx) -> int:
     """Overall width (plan, below) + depth (side, below) envelope dims via the IR,
     registered into the same below-strip corridor as feature/location/GD&T/PMI candidates.
     The overall dims use the last ladder subchain so they stack outermost by construction,
     while their mandatory priority prevents best-effort below-strip occupants from starving
     principal dimensions. The **planner** decides suppression (square footprint / X-turned;
-    #250); this renderer just skips suppressed dims and queues the rest. Returns the count
-    queued."""
-    env = envelope_group(groups)
+    #250); suppressed entries never arrive. Returns the count queued."""
+    envs = plan.of_kind("envelope")
+    env = envs[0] if envs else None
     if env is None:
         return 0
     n = 0
@@ -2232,9 +2213,9 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             ),
         )
 
-    width = _env_pd(env, "width")
-    if env_dim_placed(width):
-        (x0, y0, z0), (x1, _, _) = width.param.span
+    width = env.dim(role="width")
+    if width is not None and width.span is not None:
+        (x0, y0, z0), (x1, _, _) = width.span
         p1, p2 = dwg.at("plan", x0, y0, z0), dwg.at("plan", x1, y0, z0)
         witness = p1[1] - _WITNESS_LIFT_MM
         _queue(
@@ -2243,7 +2224,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             "plan",
             _SLOT_DIM_WIDTH,
             abs(x1 - x0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.param.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -2251,14 +2232,14 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
                 dwg.draft,
                 label=_fmt(_v),
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.param.value: dim_footprint(
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
             ),
         )
         n += 1
-    depth = _env_pd(env, "depth")
-    if env_dim_placed(depth):
-        (x0, y0, z0), (_, y1, _) = depth.param.span
+    depth = env.dim(role="depth")
+    if depth is not None and depth.span is not None:
+        (x0, y0, z0), (_, y1, _) = depth.span
         p1, p2 = dwg.at("side", x0, y0, z0), dwg.at("side", x0, y1, z0)
         witness = p1[1] - _WITNESS_LIFT_MM
         _queue(
@@ -2267,7 +2248,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             "side",
             _SLOT_DIM_DEPTH,
             abs(y1 - y0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.param.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -2275,7 +2256,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
                 dwg.draft,
                 label=_fmt(_v),
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.param.value: dim_footprint(
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
             ),
         )
