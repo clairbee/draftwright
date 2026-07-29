@@ -86,6 +86,7 @@ from draftwright.layout import StripCandidate, plan_strip
 # drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
+from draftwright.model.compiled import resolve_feature
 from draftwright.model.ir import AUTHORED_DIMENSION_KINDS, HoleFeature, PatternFeature
 from draftwright.model.planner import plan_locations
 
@@ -765,7 +766,7 @@ def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
     return n
 
 
-def render_centermarks(dwg, groups, *, ctx) -> int:
+def render_centermarks(dwg, furniture_groups, *, ctx) -> int:
     """A centre mark on every hole (plain holes + each pattern member), in the view
     normal to the hole's axis (`_END_ON`), sized by its diameter — the IR migration
     of the engine's inline centre-mark loop. Returns the count placed.
@@ -777,7 +778,7 @@ def render_centermarks(dwg, groups, *, ctx) -> int:
     (facts live on the feature, parameters carry display values) applied to geometry rather
     than to text."""
     n = 0
-    for g in groups:
+    for g in furniture_groups:
         feat = g.feature
         if not isinstance(feat, HoleFeature | PatternFeature):
             continue
@@ -1031,7 +1032,7 @@ def _diameter_column_left(dwg, items, start: int = 0, trace=None, *, ctx) -> int
     return placed
 
 
-def _diameter_step_anchor(anchor, features):
+def _diameter_step_anchor(anchor, groups):
     """Anchor point for a turned ⌀ leader tip.
 
     Centre the leader at the MID-LENGTH of the STEP carrying this diameter, rather
@@ -1051,26 +1052,30 @@ def _diameter_step_anchor(anchor, features):
     recorded subset, as the pre-#794 first-recorded-origin anchor also did.
     """
     steps = [
-        f for f in features if getattr(f, "kind", None) == "step" and getattr(f, "span", None)
+        (g, g.dim(kind="length"))
+        for g in groups
+        if g.feature_kind == "step" and g.dim(kind="length") is not None
     ]
+    steps = [(g, d) for g, d in steps if d.span is not None]
     if not steps:
         return anchor
-    idx = {"x": 0, "y": 1, "z": 2}[steps[0].frame.axis]
+    idx = {"x": 0, "y": 1, "z": 2}[steps[0][0].facts.frame.axis]
 
-    def _key(f):
-        ends = sorted(end[idx] for end in f.span)
+    def _key(item):
+        _g, dim = item
+        ends = sorted(end[idx] for end in dim.span)
         length = round(ends[1] - ends[0], 3)  # emitter rounds step length and centre (`at`) to
         at = round((ends[0] + ends[1]) / 2, 3)  # 3dp — quantise both so the selection round-trips
         return (length, -(at - length / 2))
 
-    step = max(steps, key=_key)
-    ends = sorted(end[idx] for end in step.span)
-    centred = list(step.frame.origin)  # the SELECTED step's own origin (radial + axial)
+    step, length = max(steps, key=_key)
+    ends = sorted(end[idx] for end in length.span)
+    centred = list(step.facts.frame.origin)  # the SELECTED step's own origin (radial + axial)
     centred[idx] = (ends[0] + ends[1]) / 2
     return tuple(centred)
 
 
-def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> int:
+def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     """ø leaders for a turned part's external step/boss diameters, from the IR —
     one distinct callout per diameter, in a tidy row below the front view
     (X-turning), a column to its left (Z-turning), or as radial leaders in the
@@ -1091,39 +1096,44 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
     row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, {features}, tolerance]  (X-turned)
     col_buckets: dict = {}  # Z-turned
     end_buckets: dict = {}  # Y-turned: radial leaders in the end-on front view
-    for g in groups:
-        if g.feature_kind not in ("step", "boss"):
+    for g in plan.of_kind("step", "boss"):
+        if only is not None and g.ref not in only:  # #426 finalize: recorded subset
             continue
-        if only is not None and g.feature not in only:  # #426 finalize: recorded subset
-            continue
-        dpd = next((pd for pd in g.dims if pd.param.kind == "diameter"), None)
+        dpd = g.dim(kind="diameter")
         if dpd is None:
             continue
-        dia = dpd.param.value
+        dia = dpd.value
         # An EXTERNAL thread (#859) makes a distinct callout: a threaded ⌀6 ("ø6 M6x1") and a
         # plain ⌀6 are NOT the same label, so the bucket keys on (⌀, thread) — this never drops a
         # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
         # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
         # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
-        thr = getattr(g.feature, "thread", None)
+        thr = g.facts.get("thread")
         # A coincident plain ⌀ already drawn (a bore, another step) dedups only an UNTHREADED ⌀;
         # a threaded ⌀ is a distinct callout, so a bare ⌀8 mention must not suppress ø8 M8x1.25.
         if thr is None and any(abs(dia - m) <= tol for m in mentioned):
             continue
-        bucket = {"x": row_buckets, "y": end_buckets, "z": col_buckets}.get(g.feature.frame.axis)
+        bucket = {"x": row_buckets, "y": end_buckets, "z": col_buckets}.get(g.facts.frame.axis)
         if bucket is None:
             continue
-        dtol = dpd.param.tolerance
+        dtol = dpd.tolerance
         dkey = (round(dia, 2), thr)
-        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr])
-        entry[2].add(g.feature)
+        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr, []])
+        entry[2].add(g.ref)
+        entry[5].append(g)
         if entry[3] is None:
             entry[3] = dtol
 
     def _items(buckets):
         return [
-            (_diameter_step_anchor(a, fs), d, next(iter(fs)) if len(fs) == 1 else None, t, thr)
-            for a, d, fs, t, thr in buckets.values()
+            (
+                _diameter_step_anchor(a, gs),
+                d,
+                next(iter(refs)) if len(refs) == 1 else None,
+                t,
+                thr,
+            )
+            for a, d, refs, t, thr, gs in buckets.values()
         ]
 
     # The placers name leaders m_dia_{x,z}{start+i} CONTIGUOUSLY from one start. The auto-pass
@@ -1157,26 +1167,25 @@ def render_diameters(dwg, groups, a, tol: float = 0.15, *, ctx, only=None) -> in
         if vb is not None:
             reach = dwg.draft.font_size + 6 * dwg.draft.pad_around_text
             hole_circles = []
-            for g in groups:
-                feature = g.feature
+            for g in plan.of_kind("hole", "pattern"):
+                feature = g.facts
                 if feature.frame.axis != "y":
                     continue
-                if feature.kind == "hole":
-                    diameter = feature.diameter
-                    locations = feature.members or (feature.frame.origin,)
-                elif feature.kind == "pattern":
-                    diameter = feature.member.diameter
-                    locations = feature.members or (feature.frame.origin,)
-                else:
+                bore = g.dim(kind="diameter", role="bore")
+                if bore is None:
                     continue
+                diameter = bore.value
+                locations = feature.members or (feature.frame.origin,)
                 for location in locations:
                     px, py, *_ = dwg.at("front", *location)
                     hole_circles.append((px, py, diameter / 2 * a.SCALE))
             jobs = []
             covered_by_name = {}
-            for i, (_anchor, dia, features, dtol, thr) in enumerate(end_buckets.values()):
-                representative = next(iter(features))
-                owner = representative if len(features) == 1 else None
+            for i, (_anchor, dia, refs, dtol, thr, feature_groups) in enumerate(
+                end_buckets.values()
+            ):
+                representative = feature_groups[0].facts
+                owner = next(iter(refs)) if len(refs) == 1 else None
                 # Materialise now: a generator expression would close over ``owner``
                 # and all jobs would read the final loop iteration's feature when
                 # _leader_callout_pass consumes them (#890).
@@ -1339,25 +1348,6 @@ def _reroute_crossing_diameters(dwg, *, ctx) -> int:
     return rerouted
 
 
-def _env_pd(group, role):
-    """The PlannedDimension for an envelope role (width/depth/height), or None."""
-    return next((pd for pd in group.dims if pd.param.role == role), None)
-
-
-def envelope_group(groups):
-    """The envelope `DimensionGroup` in *groups*, or None."""
-    return next((g for g in groups if g.feature_kind == "envelope"), None)
-
-
-def env_dim_placed(pd) -> bool:
-    """Whether :func:`render_envelope` will actually place an envelope dim for the
-    PlannedDimension *pd* — present, not suppressed by the planner (square footprint /
-    X-turned, #250), and carrying a span. The single source of truth for that
-    decision, shared with the orchestrator's side-below tier reservation so the two
-    can never drift (#316 review)."""
-    return pd is not None and not pd.suppressed and pd.param.span is not None
-
-
 def _chamfer_label(leg, ch) -> str:
     """The chamfer callout string: ``C{leg}`` for an equal-leg 45° chamfer, else
     ``{leg} × {angle}°`` (#560). *leg* is the PLANNED value (``pd.param.value`` —
@@ -1411,7 +1401,7 @@ def _label_lands_clear(ldr, obstacles, silhouette, page, *, geom_clear=False) ->
     )
 
 
-def _corner_candidates(dwg, view, vb, members, reach):
+def _corner_candidates(dwg, view, vb, members, reach, *, provenances=None):
     """Lead candidates for a corner-sitting feature (chamfer/fillet/flat): from each member's
     projected origin, a diagonal from the view centre out through the corner, *reach* beyond
     the tip — a corner clears the silhouette this way. Yields ``(tip, elbow, member)`` in the
@@ -1419,12 +1409,13 @@ def _corner_candidates(dwg, view, vb, members, reach):
     one-element *members*."""
     x0, y0, x1, y1 = vb
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    for m in members:
+    owners = provenances if provenances is not None else members
+    for m, owner in zip(members, owners):
         tip = dwg.at(view, *m.frame.origin)
         dx, dy = tip[0] - cx, tip[1] - cy
         d = math.hypot(dx, dy) or 1.0
         elbow = (tip[0] + dx / d * reach, tip[1] + dy / d * reach, 0)
-        yield (tip, elbow, m)
+        yield (tip, elbow, owner)
 
 
 def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False) -> int:
@@ -1452,7 +1443,10 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
             tried += 1
             ldr = Leader(tip=(tip[0], tip[1], 0), elbow=elbow, label=label, draft=dwg.draft)
             if _label_lands_clear(ldr, obstacles, vb, page, geom_clear=geom_clear):
-                ctx.place(ldr, name, view=view, feature=feature)
+                # Compiled renderers carry opaque FeatureRefs so they cannot recover
+                # measurements from the source feature. Provenance is the one seam
+                # where the registry intentionally needs the source object itself.
+                ctx.place(ldr, name, view=view, feature=resolve_feature(feature))
                 if ev is not None:
                     ev["items"].append(
                         {
@@ -1487,7 +1481,7 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     return n
 
 
-def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
+def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
     """Chamfer callouts (#560): a leader from each recognised chamfer face to its
     ``C{leg}`` / ``{leg}×{angle}°`` label, in the view normal to the chamfered edge (a Z
     edge reads in the plan, an X edge in the side, a Y edge in the front). The leader runs
@@ -1504,22 +1498,22 @@ def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
     ``_END_ON`` matches the pass's old z→plan / x→side / y→front map exactly."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    chamfer_groups = [g for g in groups if g.feature_kind == "chamfer"]
+    chamfer_groups = list(plan.of_kind("chamfer"))
     jobs = []
     for i, g in enumerate(
-        sorted(chamfer_groups, key=lambda g: (g.feature.axis, g.feature.frame.origin))
+        sorted(chamfer_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
-        ch = g.feature
-        if only is not None and ch not in only:
+        ch = g.facts
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — i stays the model index
         # Bind the intended planned dim EXPLICITLY by (role, kind), never dims[0]
         # (#724 review): the pattern the remaining #698 migrations copy must not
         # silently grab the wrong dimension on a multi-parameter kind.
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("chamfer", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("chamfer", "length")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
         view = g.view
         vb = dwg.view_bounds(view)
@@ -1530,8 +1524,8 @@ def render_chamfers(dwg, groups, a, *, ctx, only=None) -> int:
                 f"m_chamfer_{ch.axis}{i}",
                 view,
                 vb,
-                _chamfer_label(pd.param.value, ch) + _tol_suffix(pd.param.tolerance, draft),
-                _corner_candidates(dwg, view, vb, [ch], reach),
+                _chamfer_label(pd.value, ch) + _tol_suffix(pd.tolerance, draft),
+                _corner_candidates(dwg, view, vb, [ch], reach, provenances=[g.ref]),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="chamfer", drop_code="chamfer_dropped", ctx=ctx)
@@ -1544,7 +1538,7 @@ def _fillet_label(radius, count) -> str:
     return f"{count}× {r}" if count > 1 else r
 
 
-def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
+def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
     """Fillet radius callouts (#561): a leader from an external edge fillet to its
     ``R{radius}`` label — the arc analog of :func:`render_chamfers`. Equal-radius fillets on
     the same edge axis share ONE ``n× R`` callout (#561 acceptance), placed in the view
@@ -1565,27 +1559,27 @@ def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     collapse: dict = {}
-    for g in (g for g in groups if g.feature_kind == "fillet"):
+    for g in plan.of_kind("fillet"):
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("fillet", "radius")),
+            (d for d in g.dims if (d.role, d.kind) == ("fillet", "radius")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
-        collapse.setdefault((g.feature.axis, round(pd.param.value, 3)), []).append((g, pd))
+        collapse.setdefault((g.facts.axis, round(pd.value, 3)), []).append((g, pd))
     jobs = []
     for gi, ((axis, _radius), members) in enumerate(sorted(collapse.items())):
         if only is not None:
             # #426 Ph2b subset (finalize): filter members AFTER the collapse is enumerated so
             # gi stays the full-drawing group index — a survivor keeps its m_fillet name even
             # when a sibling group is dropped (Codex #811). The n× count reflects survivors.
-            members = [gp for gp in members if gp[0].feature in only]
+            members = [gp for gp in members if gp[0].ref in only]
             if not members:
                 continue
         # One grouped ``n× R`` callout, but its leader may anchor at ANY of the equal fillets
         # — _corner_candidates tries each corner (nearest-clear first) so the group is not
         # dropped just because its first corner leads into an occupied region.
-        ordered = sorted(members, key=lambda gp: gp[0].feature.frame.origin)
+        ordered = sorted(members, key=lambda gp: gp[0].facts.frame.origin)
         view = ordered[0][0].view
         vb = dwg.view_bounds(view)
         if vb is None:
@@ -1593,16 +1587,21 @@ def render_fillets(dwg, groups, a, *, ctx, only=None) -> int:
         # First-AUTHORED tolerance wins: scan `members` in planner/model order (the
         # render_diameters precedent — Codex review), not the spatially-sorted
         # `ordered`, whose winner would change if the geometry moved.
-        tol = next(
-            (pd.param.tolerance for _, pd in members if pd.param.tolerance is not None), None
-        )
+        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
         jobs.append(
             (
                 f"m_fillet_{axis}{gi}",
                 view,
                 vb,
-                _fillet_label(members[0][1].param.value, len(ordered)) + _tol_suffix(tol, draft),
-                _corner_candidates(dwg, view, vb, [g.feature for g, _ in ordered], reach),
+                _fillet_label(members[0][1].value, len(ordered)) + _tol_suffix(tol, draft),
+                _corner_candidates(
+                    dwg,
+                    view,
+                    vb,
+                    [g.facts for g, _ in ordered],
+                    reach,
+                    provenances=[g.ref for g, _ in ordered],
+                ),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
@@ -1617,7 +1616,7 @@ def _flat_label(across, sfx="") -> str:
     return f"{_fmt(across)}{sfx} A/F"
 
 
-def render_flats(dwg, groups, a, *, ctx, only=None) -> int:
+def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
     """Machined-flat callouts (#148b): a leader from a flat truncating round stock to its
     ``{across} A/F`` label, in the view down the stock axis (a Z-axis bar reads in the plan).
     Flats sharing an axis and across-flats size — the faces of a double-D or hex — share ONE
@@ -1635,39 +1634,44 @@ def render_flats(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     collapse: dict = {}
-    for g in (g for g in groups if g.feature_kind == "flat"):
+    for g in plan.of_kind("flat"):
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("flat", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("flat", "length")),
             None,
         )
-        if pd is None or pd.suppressed:
+        if pd is None:
             continue
-        collapse.setdefault((g.feature.axis, round(pd.param.value, 3)), []).append((g, pd))
+        collapse.setdefault((g.facts.axis, round(pd.value, 3)), []).append((g, pd))
     jobs = []
     for gi, ((axis, _across), members) in enumerate(sorted(collapse.items())):
         if only is not None:
             # #426 Ph2b subset (finalize): filter members AFTER enumerating the collapse so gi
             # stays the full-drawing group index (Codex #811) — see render_fillets.
-            members = [gp for gp in members if gp[0].feature in only]
+            members = [gp for gp in members if gp[0].ref in only]
             if not members:
                 continue
-        ordered = sorted(members, key=lambda gp: gp[0].feature.frame.origin)
+        ordered = sorted(members, key=lambda gp: gp[0].facts.frame.origin)
         view = ordered[0][0].view
         vb = dwg.view_bounds(view)
         if vb is None:
             continue
         # First-AUTHORED tolerance wins (planner/model order, not spatial — see the
         # fillet pass / render_diameters precedent, Codex review).
-        tol = next(
-            (pd.param.tolerance for _, pd in members if pd.param.tolerance is not None), None
-        )
+        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
         jobs.append(
             (
                 f"m_flat_{axis}{gi}",
                 view,
                 vb,
-                _flat_label(members[0][1].param.value, _tol_suffix(tol, draft)),
-                _corner_candidates(dwg, view, vb, [g.feature for g, _ in ordered], reach),
+                _flat_label(members[0][1].value, _tol_suffix(tol, draft)),
+                _corner_candidates(
+                    dwg,
+                    view,
+                    vb,
+                    [g.facts for g, _ in ordered],
+                    reach,
+                    provenances=[g.ref for g, _ in ordered],
+                ),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
@@ -1734,7 +1738,17 @@ _POCKET_LEAD_DIRS = (
 )
 
 
-def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0, directions=_POCKET_LEAD_DIRS):
+def _radial_candidates(
+    dwg,
+    view,
+    vb,
+    feature,
+    reach,
+    *,
+    rim=0.0,
+    directions=_POCKET_LEAD_DIRS,
+    provenance=None,
+):
     """Lead candidates for a mid-face feature (pocket/groove/boss ø): from the feature's
     projected origin, one candidate per *directions* entry (pocket-style diagonals
     first by default) — exit the silhouette along it (:func:`_ray_exit_dist`) then
@@ -1751,7 +1765,7 @@ def _radial_candidates(dwg, view, vb, feature, reach, *, rim=0.0, directions=_PO
         tip = (origin[0] + ux * rim, origin[1] + uy * rim)
         exit_d = _ray_exit_dist(tip[0], tip[1], ux, uy, (x0, y0, x1, y1))
         elbow = (tip[0] + ux * (exit_d + reach), tip[1] + uy * (exit_d + reach), 0)
-        yield (tip, elbow, feature)
+        yield (tip, elbow, provenance if provenance is not None else feature)
 
 
 def _leader_hole_clearance(
@@ -1783,7 +1797,7 @@ def _leader_hole_clearance(
     return min(clearances)
 
 
-def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
+def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
     """Blind-recess callouts (#148a): a leader from each floored slot/pocket to its
     ``W × L × D DEEP`` label, in the view normal to the recess opening (a Z-depth pocket
     reads in the plan, an X-depth in the side, a Y-depth in the front). A pocket sits
@@ -1801,21 +1815,19 @@ def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     view_of = {"z": "plan", "x": "side", "y": "front"}
-    pocket_groups = [g for g in groups if g.feature_kind == "pocket"]
+    pocket_groups = list(plan.of_kind("pocket"))
     jobs = []
     for i, g in enumerate(
-        sorted(pocket_groups, key=lambda g: (g.feature.width_axis, g.feature.frame.origin))
+        sorted(pocket_groups, key=lambda g: (g.facts.width_axis, g.facts.frame.origin))
     ):
-        pk = g.feature
-        if only is not None and pk not in only:
+        pk = g.facts
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — i stays the model index
-        by_key = {(pd.param.role, pd.param.kind): pd for pd in g.dims}
+        by_key = {(pd.role, pd.kind): pd for pd in g.dims}
         wpd = by_key.get(("pocket_width", "length"))
         lpd = by_key.get(("pocket_length", "length"))
         dpd = by_key.get(("pocket_depth", "length"))
         if wpd is None or lpd is None or dpd is None:
-            continue
-        if wpd.suppressed or lpd.suppressed or dpd.suppressed:
             continue
         view = view_of.get(pk.depth_axis)
         if view is None:
@@ -1829,20 +1841,20 @@ def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _pocket_label(
-                    wpd.param.value,
-                    lpd.param.value,
-                    dpd.param.value,
-                    wsfx=_tol_suffix(wpd.param.tolerance, draft),
-                    lsfx=_tol_suffix(lpd.param.tolerance, draft),
-                    dsfx=_tol_suffix(dpd.param.tolerance, draft),
+                    wpd.value,
+                    lpd.value,
+                    dpd.value,
+                    wsfx=_tol_suffix(wpd.tolerance, draft),
+                    lsfx=_tol_suffix(lpd.tolerance, draft),
+                    dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
-                _radial_candidates(dwg, view, vb, pk, reach),
+                _radial_candidates(dwg, view, vb, pk, reach, provenance=g.ref),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="pocket", drop_code="pocket_dropped", ctx=ctx)
 
 
-def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
+def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
     """Turned/circlip-groove callouts (#148c): a leader from each annular groove in round
     stock to its ``{width} WIDE × ø{diameter}`` label. The groove's width is *axial*, so the
     callout lands in the **profile** view (the one showing the stock axis in-plane, where the
@@ -1863,21 +1875,17 @@ def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     view_of = {"z": "front", "x": "front", "y": "side"}
-    groove_groups = [g for g in groups if g.feature_kind == "groove"]
+    groove_groups = list(plan.of_kind("groove"))
     jobs = []
     for gi, g in enumerate(
-        sorted(groove_groups, key=lambda g: (g.feature.axis, g.feature.frame.origin))
+        sorted(groove_groups, key=lambda g: (g.facts.axis, g.facts.frame.origin))
     ):
-        gr = g.feature
-        if only is not None and gr not in only:
+        gr = g.facts
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — gi stays the model index
-        wpd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("groove", "length")), None
-        )
-        dpd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("groove", "diameter")), None
-        )
-        if wpd is None or dpd is None or wpd.suppressed or dpd.suppressed:
+        wpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "length")), None)
+        dpd = next((d for d in g.dims if (d.role, d.kind) == ("groove", "diameter")), None)
+        if wpd is None or dpd is None:
             continue
         view = view_of.get(gr.axis)
         if view is None:
@@ -1891,18 +1899,18 @@ def render_grooves(dwg, groups, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _groove_label(
-                    wpd.param.value,
-                    dpd.param.value,
-                    wsfx=_tol_suffix(wpd.param.tolerance, draft),
-                    dsfx=_tol_suffix(dpd.param.tolerance, draft),
+                    wpd.value,
+                    dpd.value,
+                    wsfx=_tol_suffix(wpd.tolerance, draft),
+                    dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
-                _radial_candidates(dwg, view, vb, gr, reach),
+                _radial_candidates(dwg, view, vb, gr, reach, provenance=g.ref),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="groove", drop_code="groove_dropped", ctx=ctx)
 
 
-def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
+def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
     """ø leaders for a PRISMATIC part's bosses (#629). A boss reads as a circle looking down its
     axis, so its diameter is called out with a leader to that circle in the view normal to the
     axis — a Z boss in the plan, X in the side, Y in the front — free to exit into clear margin
@@ -1926,19 +1934,19 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
         return 0
     draft = dwg.draft
     view_of = {"z": "plan", "x": "side", "y": "front"}  # the view looking down the boss axis
-    boss_groups = [g for g in groups if g.feature_kind == "boss"]
+    boss_groups = list(plan.of_kind("boss"))
     mentioned = _mentioned_diameters(dwg)
     reach = draft.font_size + 6 * draft.pad_around_text
     jobs = []
     for bi, g in enumerate(
-        sorted(boss_groups, key=lambda g: (g.feature.frame.axis, g.feature.frame.origin))
+        sorted(boss_groups, key=lambda g: (g.facts.frame.axis, g.facts.frame.origin))
     ):
-        b = g.feature
-        dpd = next((pd for pd in g.dims if pd.param.kind == "diameter"), None)
+        b = g.facts
+        dpd = next((pd for pd in g.dims if pd.kind == "diameter"), None)
         if dpd is None:
             continue
-        dia = dpd.param.value
-        dtol = dpd.param.tolerance
+        dia = dpd.value
+        dtol = dpd.tolerance
         thr = getattr(b, "thread", None)  # external thread appends to the OD callout (#859)
         # A coincident plain ⌀ dedups only an UNTHREADED boss; a threaded ⌀ is a distinct callout,
         # so a bare ⌀8 mention (a bore, a step) must not suppress ø8 M8x1.25 (#859).
@@ -1957,7 +1965,9 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
                 vb,
                 f"ø{_fmt(dia)}{_tol_suffix(dtol, draft)}" + (f" {thr}" if thr else ""),
                 # arrowhead on the boss circle's rim, not its centre
-                _radial_candidates(dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE),
+                _radial_candidates(
+                    dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE, provenance=g.ref
+                ),
             )
         )
     return _leader_callout_pass(
@@ -1965,7 +1975,7 @@ def render_boss_diameters(dwg, groups, a, *, ctx) -> int:
     )
 
 
-def render_boss_heights(dwg, groups, a, *, ctx) -> int:
+def render_boss_heights(dwg, plan, a, *, ctx) -> int:
     """Queue the axial height of each prismatic boss in a profile-view corridor (#632)."""
     if a.is_rotational or a.prof is not None:
         return 0
@@ -1978,22 +1988,22 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
     n = 0
     for bi, g in enumerate(
         sorted(
-            (g for g in groups if g.feature_kind == "boss"),
-            key=lambda g: (g.feature.frame.axis, g.feature.frame.origin),
+            plan.of_kind("boss"),
+            key=lambda g: (g.facts.frame.axis, g.facts.frame.origin),
         )
     ):
-        b = g.feature
+        b = g.facts
         pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("boss_height", "length")),
+            (d for d in g.dims if (d.role, d.kind) == ("boss_height", "length")),
             None,
         )
-        if pd is None or pd.suppressed or pd.param.span is None:
+        if pd is None or pd.span is None:
             continue
         view, side, strip, stack = specs[b.frame.axis]
-        p1 = dwg.at(view, *pd.param.span[0])
-        p2 = dwg.at(view, *pd.param.span[1])
+        p1 = dwg.at(view, *pd.span[0])
+        p2 = dwg.at(view, *pd.span[1])
         edge = max(p1[0], p2[0]) if side == "right" else max(p1[1], p2[1])
-        label = _fmt(pd.param.value) + _tol_suffix(pd.param.tolerance, dwg.draft)
+        label = _fmt(pd.value) + _tol_suffix(pd.tolerance, dwg.draft)
         name = f"m_bossheight_{b.frame.axis}{bi}"
 
         def build(pos, p1=p1, p2=p2, side=side, edge=edge, label=label):
@@ -2019,7 +2029,7 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
                 # second build-time drop here would double-count the same omission.
                 on_drop=lambda _nm: None,
                 force=True,
-                feature=b,
+                feature=g.ref,
                 footprint=footprint,
             ),
         )
@@ -2027,7 +2037,7 @@ def render_boss_heights(dwg, groups, a, *, ctx) -> int:
     return n
 
 
-def render_plates(dwg, groups, a, *, ctx) -> int:
+def render_plates(dwg, plan, a, *, ctx) -> int:
     """Plate/wall thicknesses (#559): the thin extent of each recognised slab
     (`PlateFeature`), placed in the view where its thin axis is characteristic — a Z
     plate (horizontal slab) as a vertical dim left of the front elevation, a Y plate
@@ -2039,7 +2049,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
 
     Planner-fed (#729 / #698): the thickness VALUE + its tolerance come from the
     planner's ``DimParameter``, bound explicitly by ``(role, kind)`` —
-    ``("thickness", "length")`` — never ``dims[0]``. Formatting ``pl.hi - pl.lo``
+    ``("thickness", "length")`` — never ``dims[0]``. Formatting ``hi - lo``
     directly dropped an authored tolerance (the #629 class). Placement mechanics
     (strips, tier stacking, the allowlisted carve fallthrough) are untouched. The
     pass KEEPS its own axis→view map: ``g.view`` is ``_END_ON`` (z→plan / y→front /
@@ -2047,37 +2057,56 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
     y→side-above, x→front-below)."""
     draft = dwg.draft
     tier = draft.font_size + 2 * draft.pad_around_text
-    plate_groups = [g for g in groups if g.feature_kind == "plate"]
+    # Migrated to the ADR 0016 boundary: approved entries only, and the plate's `lo`/`hi`
+    # come from the thickness dim's SPAN rather than the feature — they are the two ends of
+    # the measurement, so the span is where they belong. `axis` stays a fact because no span
+    # says which way a slab is thin.
     n = 0
     counts: dict = {"x": 0, "y": 0, "z": 0}
-    for g in sorted(plate_groups, key=lambda g: (g.feature.axis, g.feature.lo, g.feature.hi)):
-        pl = g.feature
-        pd = next(
-            (d for d in g.dims if (d.param.role, d.param.kind) == ("thickness", "length")),
-            None,
-        )
-        if pd is None or pd.suppressed:
-            continue
-        val = pd.param.value
-        lbl = _fmt(val) + _tol_suffix(pd.param.tolerance, draft)
-        i = counts[pl.axis]
-        counts[pl.axis] += 1
-        if pl.axis == "z":
+    plate_groups = [
+        (g, pd)
+        for g in plan.of_kind("plate")
+        if (pd := g.dim(role="thickness", kind="length")) is not None and pd.span is not None
+    ]
+
+    # Preserve the pre-boundary stable identity order: axis, then the plate's lower and
+    # upper coordinates ALONG that thin axis. Sorting whole points would compare their
+    # in-plane coordinates first and silently swap dim_plate_{axis}{i} names when two
+    # same-axis plates move sideways (#923 adversarial review).
+    def _plate_order(gp):
+        axis = gp[0].facts.axis
+        idx = "xyz".index(axis)
+        return (axis, gp[1].span[0][idx], gp[1].span[1][idx])
+
+    for g, pd in sorted(plate_groups, key=_plate_order):
+        axis = g.facts.axis
+        # The span's two ends ARE the plate's lo/hi along its thin axis, and its other two
+        # coordinates are the in-plane centroids the witness sits at — `PlateFeature._span`
+        # builds it from exactly those. So the renderer reads points, not a feature.
+        lo_pt, hi_pt = pd.span
+        oi = [j for j in (0, 1, 2) if j != "xyz".index(axis)]
+        lo, hi = lo_pt["xyz".index(axis)], hi_pt["xyz".index(axis)]
+        u, v = lo_pt[oi[0]], lo_pt[oi[1]]
+        val = pd.value
+        lbl = pd.value_text + _tol_suffix(pd.tolerance, draft)
+        i = counts[axis]
+        counts[axis] += 1
+        if axis == "z":
             # Horizontal slab (base plate): vertical dim on the front-elevation left strip.
             # For a Z plate the in-plane centroids are (u=X, v=Y); the front view discards
-            # Y, so the depth arg is inert, but pass the Y-centroid (pl.v) for correctness.
+            # Y, so the depth arg is inert, but pass the Y-centroid (v) for correctness.
             view, strip, stack, side = "front", a.fv_zones.left, "x", "left"
-            p1 = dwg.at(view, a.bb.min.X, pl.v, pl.lo)
-            p2 = dwg.at(view, a.bb.min.X, pl.v, pl.hi)
+            p1 = dwg.at(view, a.bb.min.X, v, lo)
+            p2 = dwg.at(view, a.bb.min.X, v, hi)
             edge = p1[0]
             pa, pb = (edge, p1[1], 0), (edge, p2[1], 0)
             # Right-strip fallthrough anchors (helpers ≥0.14): a tight-span thickness
             # dim's witness hull overlaps the below strip's at the view corner at EVERY
             # position (AABB artifact — the ink never touches), so a full left strip
             # retries on the opposite side before dropping.
-            q1 = dwg.at(view, a.bb.max.X, pl.v, pl.lo)
-            s1 = dwg.at("side", a.bb.min.X, a.bb.max.Y, pl.lo)
-            s2 = dwg.at("side", a.bb.min.X, a.bb.max.Y, pl.hi)
+            q1 = dwg.at(view, a.bb.max.X, v, lo)
+            s1 = dwg.at("side", a.bb.min.X, a.bb.max.Y, lo)
+            s2 = dwg.at("side", a.bb.min.X, a.bb.max.Y, hi)
             alt = [
                 (
                     "front",
@@ -2098,25 +2127,25 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
                     s1[0],
                 ),
             ]
-        elif pl.axis == "y":
+        elif axis == "y":
             # Upright wall: horizontal dim above the side (end) view, which shows the
             # wall edge-on on the L-profile — a different view from the Z base plate.
             # Witness from the view's top edge (like the Z/X plates anchor at their view
             # outline) so the extension lines don't originate mid-view.
             view, strip, stack, side = "side", a.sv_zones.above, "y", "above"
-            p1 = dwg.at(view, a.bb.min.X, pl.lo, a.bb.max.Z)
-            p2 = dwg.at(view, a.bb.min.X, pl.hi, a.bb.max.Z)
+            p1 = dwg.at(view, a.bb.min.X, lo, a.bb.max.Z)
+            p2 = dwg.at(view, a.bb.min.X, hi, a.bb.max.Z)
             edge = p1[1]
             pa, pb = (p1[0], edge, 0), (p2[0], edge, 0)
             alt = None
         else:  # x — thin wall along X → horizontal dim below the front view
             view, strip, stack, side = "front", a.fv_zones.below, "y", "below"
-            p1 = dwg.at(view, pl.lo, pl.u, a.bb.min.Z)
-            p2 = dwg.at(view, pl.hi, pl.u, a.bb.min.Z)
+            p1 = dwg.at(view, lo, u, a.bb.min.Z)
+            p2 = dwg.at(view, hi, u, a.bb.min.Z)
             edge = p1[1]
             pa, pb = (p1[0], edge, 0), (p2[0], edge, 0)
             alt = None
-        name = f"dim_plate_{pl.axis}{i}"
+        name = f"dim_plate_{axis}{i}"
 
         def _build(pos, pa=pa, pb=pb, side=side, edge=edge, lbl=lbl):
             return _dim(pa, pb, side, pos - edge, draft, label=lbl)
@@ -2124,7 +2153,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
         def _foot(pos, pa=pa, pb=pb, side=side, edge=edge, lbl=lbl):
             return dim_footprint(pa, pb, side, pos - edge, draft, lbl)
 
-        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=pl):  # noqa: B008
+        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=g.ref):  # noqa: B008
             # Opposite-strip fallthrough (mirrors the GD&T #481 pattern), DEFERRED to
             # ctx.post_drain so it runs after EVERY corridor has drained (#684 review):
             # a mid-drain carve could occupy a corner a later sibling's force candidate
@@ -2188,7 +2217,7 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
                 on_place=lambda nm: None,
                 on_drop=_drop,
                 force=True,
-                feature=pl,
+                feature=g.ref,  # opaque provenance handle
                 footprint=_foot,  # analytical measure — no probe build (#602)
             ),
         )
@@ -2196,15 +2225,15 @@ def render_plates(dwg, groups, a, *, ctx) -> int:
     return n
 
 
-def render_envelope(dwg, groups, a, *, ctx) -> int:
+def render_envelope(dwg, plan, a, *, ctx) -> int:
     """Overall width (plan, below) + depth (side, below) envelope dims via the IR,
     registered into the same below-strip corridor as feature/location/GD&T/PMI candidates.
     The overall dims use the last ladder subchain so they stack outermost by construction,
     while their mandatory priority prevents best-effort below-strip occupants from starving
     principal dimensions. The **planner** decides suppression (square footprint / X-turned;
-    #250); this renderer just skips suppressed dims and queues the rest. Returns the count
-    queued."""
-    env = envelope_group(groups)
+    #250); suppressed entries never arrive. Returns the count queued."""
+    envs = plan.of_kind("envelope")
+    env = envs[0] if envs else None
     if env is None:
         return 0
     n = 0
@@ -2229,9 +2258,9 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             ),
         )
 
-    width = _env_pd(env, "width")
-    if env_dim_placed(width):
-        (x0, y0, z0), (x1, _, _) = width.param.span
+    width = env.dim(role="width")
+    if width is not None and width.span is not None:
+        (x0, y0, z0), (x1, _, _) = width.span
         p1, p2 = dwg.at("plan", x0, y0, z0), dwg.at("plan", x1, y0, z0)
         witness = p1[1] - _WITNESS_LIFT_MM
         _queue(
@@ -2240,7 +2269,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             "plan",
             _SLOT_DIM_WIDTH,
             abs(x1 - x0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.param.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -2248,14 +2277,14 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
                 dwg.draft,
                 label=_fmt(_v),
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.param.value: dim_footprint(
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
             ),
         )
         n += 1
-    depth = _env_pd(env, "depth")
-    if env_dim_placed(depth):
-        (x0, y0, z0), (_, y1, _) = depth.param.span
+    depth = env.dim(role="depth")
+    if depth is not None and depth.span is not None:
+        (x0, y0, z0), (_, y1, _) = depth.span
         p1, p2 = dwg.at("side", x0, y0, z0), dwg.at("side", x0, y1, z0)
         witness = p1[1] - _WITNESS_LIFT_MM
         _queue(
@@ -2264,7 +2293,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
             "side",
             _SLOT_DIM_DEPTH,
             abs(y1 - y0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.param.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -2272,7 +2301,7 @@ def render_envelope(dwg, groups, a, *, ctx) -> int:
                 dwg.draft,
                 label=_fmt(_v),
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.param.value: dim_footprint(
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
             ),
         )
@@ -2445,7 +2474,7 @@ def _next_steplen_start(ctx, prefix: str = "m_steplen") -> int:
     return max(idxs) + 1 if idxs else 0
 
 
-def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
+def render_step_lengths(dwg, plan, *, ctx, only=None) -> int:
     """Unified turned step-length chain (ADR 0008 #223): each `StepFeature`'s length
     span projects into the profile view and joins the chain that tiles the turning
     axis so every shoulder is located. X-turned → horizontal chain above the front
@@ -2460,31 +2489,24 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
     interior shoulders — never worse than the prior skip. Returns the count placed."""
     rows = []  # (axis, a_world, b_world, value, tolerance) in axis order
     step_origins = []
-    step_radii = []
-    for g in groups:
-        if g.feature_kind != "step":
+    for g in plan.of_kind("step"):
+        if g.facts.frame.axis not in ("x", "y", "z"):
             continue
-        if g.feature.frame.axis not in ("x", "y", "z"):
+        if only is not None and g.ref not in only:  # #426 finalize: recorded subset
             continue
-        if only is not None and g.feature not in only:  # #426 finalize: recorded subset
-            continue
-        length = next(
-            (pd.param for pd in g.dims if pd.param.kind == "length" and pd.param.span is not None),
-            None,
-        )
+        length = g.dim(kind="length")
         if length is None or length.span is None:
             continue
         rows.append(
             (
-                g.feature.frame.axis,
+                g.facts.frame.axis,
                 length.span[0],
                 length.span[1],
                 length.value,
                 length.tolerance,
             )
         )
-        step_origins.append(g.feature.frame.origin)
-        step_radii.append(g.feature.diameter / 2)
+        step_origins.append(g.facts.frame.origin)
     if not rows:
         return 0
     draft = dwg.draft
@@ -2607,17 +2629,19 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
             axis_z = sum(axis_zs) / len(axis_zs)
 
             # Choose the same standard scale family as the detail renderer, then
-            # crop a geometry-relative strip: at most half the smallest radius and
-            # at most 12 page-mm tall. This stays useful from tiny pins to large
-            # flanges without a magic world-space ±2 mm band.
+            # crop a geometry-relative strip: at most one quarter of the side-view
+            # silhouette and at most 12 page-mm tall. The view rectangle is layout
+            # geometry; unlike the old `StepFeature.diameter` read it cannot recover a
+            # withheld printable diameter from the source feature.
             detail_target = dwg.scale * 10
             for factor in (2, 5, 10):
                 candidate = dwg.scale * factor
                 if candidate >= scale_needed:
                     detail_target = candidate
                     break
-            min_radius = min(step_radii)
-            cross_half = max(0.1, min(min_radius / 2, 6.0 / detail_target))
+            _sx0, sy0, _sx1, sy1 = dwg.view_bounds("side")
+            silhouette_quarter = abs(sy1 - sy0) / (4 * dwg.scale)
+            cross_half = max(0.1, min(silhouette_quarter, 6.0 / detail_target))
 
             def _redraw_y(dwg, detail_view, coords, detail_scale, _rows=bare_rows):
                 def _at(x, y, z):
@@ -2802,81 +2826,84 @@ def render_step_lengths(dwg, groups, *, ctx, only=None) -> int:
     return _draw_step_chain(dwg, view, fsegs, "m_steplen", ctx=ctx, start=start)
 
 
-def _detect_step_repeat(step_zs, bb_min_z, bb_max_z, tol_frac=0.10):
-    """Return (n, rise) if *step_zs* form a uniform staircase, else None.
+def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) -> int:
+    """Front-view right ladder: prismatic step heights stacked inner→outer, then the overall
+    height outermost — registered as :class:`CorridorCandidate`s in the shared
+    ``(front, right)`` corridor (#636). The leapfrog witness cursor (#237) survives as a
+    *build-time chain*: candidates share a ``solved`` position map, and each dim's witness
+    anchors on its nearest already-built predecessor's line (the view edge for the first).
 
-    A uniform staircase has all inter-step rises (including from bb_min_z to the
-    first step) within *tol_frac* of their mean. Requires >=3 detected interior
-    steps to avoid false positives. *n* is len(step_zs) + 1 when the top gap
-    (bb_max_z - last step) also matches the mean, otherwise len(step_zs).
-    """
-    if len(step_zs) < 3:
-        return None
-    sorted_zs = sorted(step_zs)
-    rises = [sorted_zs[0] - bb_min_z] + [
-        sorted_zs[i + 1] - sorted_zs[i] for i in range(len(sorted_zs) - 1)
-    ]
-    mean_rise = sum(rises) / len(rises)
-    if mean_rise <= 0:
-        return None
-    if not all(abs(r - mean_rise) / mean_rise <= tol_frac for r in rises):
-        return None
-    top_gap = bb_max_z - sorted_zs[-1]
-    n = len(rises) + (1 if abs(top_gap - mean_rise) / mean_rise <= tol_frac else 0)
-    return n, mean_rise
+    **The first renderer migrated to the ADR 0016 boundary.** It takes the compiled
+    :class:`RenderableDimensionPlan` and a :class:`LayoutFrame`, not the `PartModel` and the
+    `Analysis`. Everything it used to decide about WHAT to draw — which rungs exist, their
+    values and labels, whether a uniform staircase collapses to one ``n×`` mark, whether the
+    overall height is drawn at all and what its value is — now arrives already decided. It
+    could previously reach `StepLevelFeature.levels` and `a.bb` and rebuild all of it, and
+    for four review rounds it did exactly that in defiance of the plan.
 
-
-def render_height_ladder(
-    dwg, model, a, *, ctx, include_overall: bool = True, detail_view: bool = False
-) -> int:
-    """Front-view right ladder: prismatic step heights (from `StepLevelFeature`)
-    stacked inner→outer, then the overall height outermost — registered as
-    :class:`CorridorCandidate`s in the shared ``(front, right)`` corridor (#636;
-    formerly the last solver-invisible `carve_free_position` auto-pass). The leapfrog
-    witness cursor (#237) survives as a *build-time chain*: candidates share a
-    ``solved`` position map, and each dim's witness anchors on its nearest already-
-    built predecessor's line (the view edge for the first) — build order follows the
-    candidate order, so the chain is deterministic. Prediction uses an analytical
-    footprint with the witness modelled from the view edge (a conservative
-    over-cover along the stack axis; the accept-time real-box validation trims any
-    drift). A turned part has no `StepLevelFeature`; a Z-turned part suppresses the
-    overall height (the chain tiles it, ISO 129). Returns the count REGISTERED."""
+    What stays here is placement, and it is a real job: legibility at this scale, the
+    leapfrog chain, corridor registration, the left-strip escape for short rises, and the
+    lint code when the strip is physically full. Note the two kinds of "not drawn" that meet
+    here and must not be confused — the compiler's omission (never arrives; reported through
+    the plan's diagnostics) and this pass's drop (arrived, did not fit; reported as
+    ``placement_unsatisfiable``). Returns the count REGISTERED."""
     draft = dwg.draft
-    FX, FZ = a.proj.front_x, a.proj.front_z
-    edge2 = FX(a.bb.max.X) + 2
-    zmin = FZ(a.bb.min.Z)
+    _left, right, _bottom, _top = frame.edges("front")
+    edge2 = right + 2
     tier = draft.font_size + 2 * draft.pad_around_text
-    step = next((f for f in model.features if f.kind == "step_level"), None)
-    levels = list(step.levels) if step is not None else []
-    step_shoulders = tuple(step.shoulders) if step is not None else ()
-    short_levels: list[float] = []
-    rep = _detect_step_repeat(levels, a.bb.min.Z, a.bb.max.Z) if levels else None
+
+    def _zspan(entry):
+        """An entry's witness ends, projected from ITS OWN span.
+
+        Anchoring every rung at the view's bottom edge instead was wrong the moment the
+        compiler started measuring from `StepLevelFeature.base`: a declared base above the
+        part's bottom made the drawn line span the full part while the label read the
+        shorter distance, so the dimension said one thing and measured another (#923
+        review). The span is the compiler's statement of what is being measured; projecting
+        both ends of it is what keeps line and label the same claim."""
+        return (
+            frame.project("front", entry.span[0])[1],
+            frame.project("front", entry.span[1])[1],
+        )
+
+    strip = frame.fv_zones.right
+
+    rung_set = plan.ladder("step_height")
+    rungs = list(rung_set.rungs) if rung_set is not None else []
+    # An OPAQUE handle, passed straight through to the corridor candidate and the
+    # escalation. This pass never resolves it: the feature behind it carries the levels
+    # and the base, which is the content the compiler already ruled on (#923 review).
+    step = rung_set.ref if rung_set is not None else None
+    has_shoulders = plan.ladder("step_position") is not None
+    short_rungs: list = []
 
     # The chain, inner→outer: (name, page-z top, label, tier size, drop message).
     chain: list = []
-    if rep is not None:
-        n_rep, rise = rep
-        first = sorted(levels)[0]
+    if rung_set is not None and rung_set.representative:
+        (rep,) = rungs
         chain.append(
             (
                 "dim_step_typ",
-                FZ(first),
-                f"{n_rep}× {_fmt(rise)}",
+                *_zspan(rep),
+                rep.final_label,
                 _SLOT_DIM_STEP,
                 "representative step-height dimension dropped (front-view right strip full)",
             )
         )
-    elif levels:
-        # Recover a short *structural* rise with external arrows (#565).
-        # A tiny level with no recognised transition is incidental geometry
-        # (plate/pocket floor) and remains outside the height ladder.
-        kept, n_close = _legible_steps(
-            levels, a.bb.min.Z, a.SCALE, allow_short=bool(step_shoulders)
+    elif rungs:
+        # Legibility is a PLACEMENT decision — whether two rungs are too close to dimension
+        # depends on the page, not the model — so it stays here while the rung set itself
+        # comes from the compiler. Both bounds come off the approved span, not the bbox.
+        kept_z, n_close = _legible_steps(
+            [r.span[1][2] for r in rungs],
+            rungs[0].span[0][2],
+            frame.scale,
+            allow_short=has_shoulders,
         )
         if n_close:
-            # With the explicit detail opt-in the enlarged view owns the omitted
-            # rungs. Report the source-view drop only when no recovery was
-            # requested; a failed detail records ``detail_unplaceable`` instead.
+            # With the explicit detail opt-in the enlarged view owns the omitted rungs.
+            # Report the source-view drop only when no recovery was requested; a failed
+            # detail records ``detail_unplaceable`` instead.
             if not detail_view:
                 ctx.record_issue(
                     "warning",
@@ -2884,35 +2911,37 @@ def render_height_ladder(
                     f"{n_close} step height(s) too closely spaced to dimension at this scale "
                     "(use a detail view)",
                 )
-            # First-class escalation alongside the lint code (ADR 0009 Amdt 1, #351
-            # PR-4b) — `_request_prismatic_detail` (sections.py) consumes this instead
-            # of recomputing the legibility gate.
+            # First-class escalation alongside the lint code (ADR 0009 Amdt 1, #351 PR-4b) —
+            # `_request_prismatic_detail` (sections.py) consumes this instead of recomputing
+            # the legibility gate.
             ctx.escalations.append(
                 Escalation(kind="step", view="front", feature=step, reason="illegible")
             )
-        for col, z in enumerate(kept):
-            if step_shoulders and (z - a.bb.min.Z) * a.SCALE < _MIN_STEP_DIM_MM:
-                short_levels.append(z)
+        kept = [r for r in rungs if r.span[1][2] in set(kept_z)]
+        for col, rung in enumerate(kept):
+            # A short structural rise needs external arrows, whose ink would swamp the usual
+            # right-hand ladder; it goes to the left strip below (#565).
+            if has_shoulders and rung.value * frame.scale < _MIN_STEP_DIM_MM:
+                short_rungs.append(rung)
                 continue
             chain.append(
                 (
                     f"dim_step_{col}",
-                    FZ(z),
-                    _fmt(z - a.bb.min.Z),
+                    *_zspan(rung),
+                    rung.final_label,
                     _SLOT_DIM_STEP,
                     "step-height dimension dropped (front-view right strip full)",
                 )
             )
 
-    rot = next((f for f in model.features if f.kind == "rotational"), None)
-    od_is_height = rot is not None and rot.frame.axis in ("x", "y")
-    suppress_height = (not include_overall) or model.orientation == "z" or od_is_height
-    if not suppress_height:
+    overall = plan.ladder("overall_height")
+    if overall is not None:
+        (height,) = overall.rungs
         chain.append(
             (
                 "dim_height",
-                FZ(a.bb.max.Z),
-                _fmt(a.z_size),
+                *_zspan(height),
+                height.final_label,
                 _SLOT_DIM_HEIGHT,
                 "overall height dimension dropped (front-view right strip full)",
             )
@@ -2920,23 +2949,21 @@ def render_height_ladder(
 
     names = [c[0] for c in chain]
     solved: dict[str, float] = {}
-    for k, (name, ztop, label, _tsize, drop_msg) in enumerate(chain):
+    for k, (name, zbase, ztop, label, _tsize, drop_msg) in enumerate(chain):
 
-        def _build(pos, name=name, ztop=ztop, label=label, k=k):
+        def _build(pos, name=name, zbase=zbase, ztop=ztop, label=label, k=k):
             base = edge2
             for pn in reversed(names[:k]):  # nearest already-built predecessor's line
                 if pn in solved:
                     base = solved[pn]
                     break
             solved[name] = pos
-            return _dim((base, zmin, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
+            return _dim((base, zbase, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
 
-        def _foot(pos, ztop=ztop, label=label, k=k):
-            # Predecessor-aware prediction (#689 review): the conservative
-            # edge-anchored witness can falsely exhaust the strip when an inner
-            # obstacle sits in the already-traversed region. Use the same solved
-            # map the build chain uses — empty on the first evaluation (edge-based,
-            # the prior behaviour), tight on later-segment retries.
+        def _foot(pos, zbase=zbase, ztop=ztop, label=label, k=k):
+            # Predecessor-aware prediction (#689 review): the conservative edge-anchored
+            # witness can falsely exhaust the strip when an inner obstacle sits in the
+            # already-traversed region. Use the same solved map the build chain uses.
             base = edge2
             for pn in reversed(names[:k]):
                 if pn in solved:
@@ -2945,20 +2972,20 @@ def render_height_ladder(
             if pos - base < 0.5:  # degenerate guard: never model a zero-length offset
                 base = edge2
             return dim_footprint(
-                (base, zmin, 0), (base, ztop, 0), "right", pos - base, draft, label
+                (base, zbase, 0), (base, ztop, 0), "right", pos - base, draft, label
             )
 
         def _drop(nm, drop_msg=drop_msg, name=name):
             solved.pop(name, None)
-            # Name what filled the strip (#736): the #733 diagnosis ("which occupants
-            # exhausted the front-right strip?") becomes a glance at the lint message.
-            msg = full_strip_message(drop_msg, dwg, a.fv_zones.right, "front", "x")
+            # Name what filled the strip (#736): the #733 diagnosis becomes a glance at the
+            # lint message.
+            msg = full_strip_message(drop_msg, dwg, strip, "front", "x")
             ctx.record_issue("error", "placement_unsatisfiable", msg)
 
         register_corridor(
             ctx,
             ("front", "right"),
-            a.fv_zones.right,
+            strip,
             "front",
             "x",
             tier,
@@ -2966,8 +2993,8 @@ def render_height_ladder(
                 name=name,
                 build=_build,
                 # Steps stack inner→outer in chain order; the overall height rides the
-                # OVERALL subchain so it lands outermost by construction (as the
-                # envelope dims do), replacing the old carve's outermost=True.
+                # OVERALL subchain so it lands outermost by construction (as the envelope
+                # dims do), replacing the old carve's outermost=True.
                 order=(
                     (_OVERALL_SUBCHAIN, 0, name)
                     if name == "dim_height"
@@ -2983,18 +3010,18 @@ def render_height_ladder(
                 footprint=_foot,
             ),
         )
-    # A short rise needs external arrows, whose ink occupies most of the usual
-    # right-hand height ladder. Solve these exceptional rungs in the equivalent
-    # left strip so they do not make the mandatory overall height infeasible.
-    left_edge = FX(a.bb.min.X) - 2
-    for i, z in enumerate(short_levels):
+    # A short rise needs external arrows, whose ink occupies most of the usual right-hand
+    # height ladder. Solve these exceptional rungs in the equivalent left strip so they do
+    # not make the mandatory overall height infeasible.
+    left_edge = _left - 2
+    for i, rung in enumerate(short_rungs):
         name = f"dim_step_{i}"
-        ztop = FZ(z)
-        label = _fmt(z - a.bb.min.Z)
+        zbase, ztop = _zspan(rung)
+        label = rung.final_label
 
-        def _build_left(pos, ztop=ztop, label=label):
+        def _build_left(pos, zbase=zbase, ztop=ztop, label=label):
             return _dim(
-                (left_edge, zmin, 0),
+                (left_edge, zbase, 0),
                 (left_edge, ztop, 0),
                 "left",
                 left_edge - pos,
@@ -3006,7 +3033,7 @@ def render_height_ladder(
             msg = full_strip_message(
                 "short step-height dimension dropped (front-view left strip full)",
                 dwg,
-                a.fv_zones.left,
+                frame.fv_zones.left,
                 "front",
                 "x",
             )
@@ -3015,7 +3042,7 @@ def render_height_ladder(
         register_corridor(
             ctx,
             ("front", "left"),
-            a.fv_zones.left,
+            frame.fv_zones.left,
             "front",
             "x",
             tier,
@@ -3027,8 +3054,8 @@ def render_height_ladder(
                 on_drop=_drop_left,
                 force=True,
                 feature=step,
-                footprint=lambda pos, ztop=ztop, label=label: dim_footprint(
-                    (left_edge, zmin, 0),
+                footprint=lambda pos, zbase=zbase, ztop=ztop, label=label: dim_footprint(
+                    (left_edge, zbase, 0),
                     (left_edge, ztop, 0),
                     "left",
                     left_edge - pos,
@@ -3037,10 +3064,10 @@ def render_height_ladder(
                 ),
             ),
         )
-    return len(chain) + len(short_levels)
+    return len(chain) + len(short_rungs)
 
 
-def render_step_positions(dwg, model, a, *, ctx) -> int:
+def render_step_positions(dwg, plan, frame, *, ctx) -> int:
     """Prismatic step POSITIONS (#555): where each shoulder sits along its axis,
     dimensioned from the part datum so a stepped block is fully constrained (the step
     heights alone leave the shoulder location implicit — two geometries draw the same
@@ -3048,61 +3075,81 @@ def render_step_positions(dwg, model, a, *, ctx) -> int:
     horizontally, where the step profile reads); an X shoulder is above the plan view —
     the same axis→view mapping the hole-location ladder uses. Mixed-axis transitions use
     the side-below strip so they do not collide with the isometric furniture above.
-    A shoulder whose strip is full drops with a lint code, not silently. Returns the
-    count placed."""
-    step = next((f for f in model.features if f.kind == "step_level"), None)
-    if step is None or not step.shoulders:
+    A shoulder whose strip is full drops with a lint code, not silently.
+
+    Migrated to the ADR 0016 boundary: the shoulder chain arrives as the compiled plan's
+    ``step_position`` :class:`ApprovedLadder`, and each rung's span carries the datum and
+    the station it runs between, so this pass never reaches for `step.shoulders` or the
+    bounding box. Returns the count placed."""
+    ladder = plan.ladder("step_position")
+    rungs = list(ladder.rungs) if ladder is not None else []
+    if not rungs:
         return 0
     draft = dwg.draft
-    axes = {axis for axis, _ in step.shoulders}
+
+    def _axis_of(rung):
+        """The compiler-owned shoulder direction.
+
+        A span normally reveals its varying coordinate, but a shoulder on its own datum
+        has a degenerate span and reveals no direction at all. Axis is therefore explicit
+        structural content on the approved rung, not inferred placement policy."""
+        if rung.axis not in ("x", "y"):
+            raise AssertionError(f"step-position rung has no X/Y axis: {rung.axis!r}")
+        return rung.axis
+
+    axes = {_axis_of(r) for r in rungs}
     mixed_axes = len(axes) > 1
     # Dense transition ladders need only one text tier: arrowhead clearance is
     # along the measured axis, not between outward ladder tiers (#897). Retain
     # the established spacing for ordinary single-axis stepped profiles.
     tier = draft.font_size + (
-        draft.pad_around_text if len(step.shoulders) > 2 else 2 * draft.pad_around_text
+        draft.pad_around_text if len(rungs) > 2 else 2 * draft.pad_around_text
     )
     n = 0
     counts: dict = {"x": 0, "y": 0}
-    for axis, pos in sorted(step.shoulders):
-        di = {"x": 0, "y": 1}[axis]
-        datum = step.datum[di]
-        val = abs(pos - datum)
+    # Page-space view edges: the ladder anchors on the view silhouette, which is layout,
+    # while the STATIONS come from the approved spans, which is content.
+    _sl, _sr, side_bottom, side_top = frame.edges("side")
+    _pl, _pr, _pb, plan_top = frame.edges("plan")
+    for rung in rungs:
+        axis = _axis_of(rung)
+        lo, hi = rung.span
+        val = rung.value
         i = counts[axis]
         counts[axis] += 1
         if axis == "y" and mixed_axes:
             # Keep mixed-axis Y-profile stations below the side view. The iso
             # caption lives above it and is emitted after the corridor drain,
             # so an above ladder could not see/avoid that furniture (#897).
-            view, strip, direction = "side", a.sv_zones.below, "below"
-            p1 = dwg.at(view, a.bb.min.X, datum, a.bb.min.Z)
-            p2 = dwg.at(view, a.bb.min.X, pos, a.bb.min.Z)
+            view, strip, direction = "side", frame.sv_zones.below, "below"
+            p1 = (frame.project(view, lo)[0], side_bottom)
+            p2 = (frame.project(view, hi)[0], side_bottom)
         elif axis == "y":
-            view, strip, direction = "side", a.sv_zones.above, "above"
-            p1 = dwg.at(view, a.bb.min.X, datum, a.bb.max.Z)
-            p2 = dwg.at(view, a.bb.min.X, pos, a.bb.max.Z)
+            view, strip, direction = "side", frame.sv_zones.above, "above"
+            p1 = (frame.project(view, lo)[0], side_top)
+            p2 = (frame.project(view, hi)[0], side_top)
         else:  # x — shoulder along X → above the plan view
-            view, strip, direction = "plan", a.pv_zones.above, "above"
-            p1 = dwg.at(view, datum, a.bb.max.Y, a.bb.min.Z)
-            p2 = dwg.at(view, pos, a.bb.max.Y, a.bb.min.Z)
+            view, strip, direction = "plan", frame.pv_zones.above, "above"
+            p1 = (frame.project(view, lo)[0], plan_top)
+            p2 = (frame.project(view, hi)[0], plan_top)
         edge = p1[1]
         name = f"dim_shoulder_{axis}{i}"
 
-        def _build(pos, p1=p1, p2=p2, edge=edge, val=val, direction=direction):
+        def _build(pos, p1=p1, p2=p2, edge=edge, label=rung.final_label, direction=direction):
             return _dim(
                 (p1[0], edge, 0),
                 (p2[0], edge, 0),
                 direction,
                 pos - edge if direction == "above" else edge - pos,
                 draft,
-                label=_fmt(val),
+                label=label,
             )
 
-        def _drop(nm, val=val, view=view, direction=direction):
+        def _drop(nm, label=rung.final_label, view=view, direction=direction):
             ctx.record_issue(
                 "warning",
                 "step_position_dropped",
-                f"step position {_fmt(val)} not dimensioned ({view} {direction}-strip full)",
+                f"step position {label} not dimensioned ({view} {direction}-strip full)",
             )
 
         # ADR 0009 corridor candidate (#636): a shoulder position is a datum-referenced
@@ -3127,69 +3174,56 @@ def render_step_positions(dwg, model, a, *, ctx) -> int:
                 on_place=lambda nm: None,
                 on_drop=_drop,
                 force=True,
-                feature=step,
+                # The opaque provenance handle, passed straight through.
+                feature=ladder.ref,
             ),
         )
         n += 1
     return n
 
 
-def render_rotational(dwg, groups, a, *, ctx) -> int:
+def render_rotational(dwg, plan, a, *, ctx) -> int:
     """Rotational furniture from the IR `RotationalFeature` (#237): the OD dim (above
     the front view), the rotation-axis centrelines (front + side), and the concentric
     bore leaders stacked to the left of the front view. Returns the count placed.
 
-    The OD/bore dimension LABELS consume the feature's planned `DimensionGroup`
-    (#754): the value and any authored tolerance/fit folded on by `plan_dimensions`
-    now reach the label via `_tol_suffix`, closing the raw-field bypass ADR 0015
-    tracked. The centrelines and the bore-stack layout/drop bookkeeping stay
-    model-routed furniture, and geometry keeps using the raw `rot.od`/`rot.bores`
-    (equal to the planned value), so X/Y/Z placement is unchanged."""
-    g = next((g for g in groups if g.feature_kind == "rotational"), None)
+    The OD/bore dimensions consume only approved compiled entries. Suppressed entries
+    therefore cannot reach either a label or the geometry used to place that label.
+    Axis centrelines are furniture and remain even when every diameter is omitted."""
+    g = next(iter(plan.of_kind("rotational")), None)
     if g is None:
         return 0
-    rot = g.feature
     draft = dwg.draft
     FX, FZ = a.proj.front_x, a.proj.front_z
     SX, SZ = a.proj.side_x, a.proj.side_z
     PX, PY = a.proj.plan_x, a.proj.plan_y
     n = 0
-    od = rot.od
-    axis = rot.frame.axis
-    od_pd = next((pd for pd in g.dims if pd.param.role == "od"), None)
-    bore_pds = [pd for pd in g.dims if pd.param.role == "bore"]
-    # Contract: RotationalFeature.parameters() emits exactly one OD dim and one per
-    # bore in bores order, and plan_dimensions preserves that. Fail LOUD on a mismatch
-    # (#806 review) rather than silently rendering a raw, untoleranced label — or, for a
-    # missing MIDDLE bore, shifting every later bore_pds[i] onto the wrong physical bore.
-    if od_pd is None or len(bore_pds) != len(rot.bores):
-        raise AssertionError(
-            f"rotational plan mismatch: od_present={od_pd is not None}, "
-            f"planned bores={len(bore_pds)} vs {len(rot.bores)}"
-        )
+    axis = g.facts.frame.axis
+    od_dim = g.dim(kind="diameter", role="od")
+    bore_dims = [d for d in g.dims if d.kind == "diameter" and d.role == "bore"]
 
-    def _dia_label(pd):
+    def _dia_label(dim):
         # Planner-fed value + authored tolerance/fit suffix (#754).
-        return f"ø{_fmt(pd.param.value)}{_tol_suffix(pd.param.tolerance, draft)}"
-
-    od_label = _dia_label(od_pd)
+        return f"ø{_fmt(dim.value)}{_tol_suffix(dim.tolerance, draft)}"
 
     if axis == "z":
         # Vertical turning axis (the common case): OD across the top of the front
         # (profile) view; axis centrelines vertical on front + side.
-        ctx.place(
-            _dim(
-                (FX(a.cx - od / 2), FZ(a.bb.max.Z) + 2, 0),
-                (FX(a.cx + od / 2), FZ(a.bb.max.Z) + 2, 0),
-                "above",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="front",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (FX(a.cx - od / 2), FZ(a.bb.max.Z) + 2, 0),
+                    (FX(a.cx + od / 2), FZ(a.bb.max.Z) + 2, 0),
+                    "above",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="front",
+            )
+            n += 1
         ctx.place(
             Centerline((FX(a.cx), FZ(a.bb.min.Z) - 5, 0), (FX(a.cx), FZ(a.bb.max.Z) + 5, 0)),
             "centerline_front",
@@ -3202,7 +3236,7 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
         )
 
         # Concentric bore leaders to the left of the front view, centred on the axis.
-        if rot.bores:
+        if bore_dims:
             left_edge = FX(a.bb.min.X)
             if left_edge - a.margin >= a.DIM_PAD:
                 elbow_x = left_edge - a.DIM_PAD * 0.6
@@ -3213,7 +3247,7 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                 # leader keeps that same symmetric natural, so plan_strip reproduces the old
                 # positions exactly when there is room (zero displacement) and only compresses /
                 # drops (larger bore outranks smaller, priority=d) when the band is over capacity.
-                nb = len(rot.bores)
+                nb = len(bore_dims)
                 z_lo, z_hi = a.FV_Y - a.fv_hh, a.FV_Y + a.fv_hh
                 cands = [
                     StripCandidate(
@@ -3222,10 +3256,12 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                         size=(draft.font_size * 3, pitch),
                         priority=d,
                     )
-                    for i, d in enumerate(rot.bores)
+                    for i, dim in enumerate(bore_dims)
+                    for d in (dim.value,)
                 ]
                 placed = plan_strip(cands, z_lo, z_hi, pitch, axis="y").placed
-                for i, d in enumerate(rot.bores):
+                for i, dim in enumerate(bore_dims):
+                    d = dim.value
                     tip_z = placed.get(f"{i:03d}")
                     if tip_z is None:
                         continue  # over the front-view capacity — dropped (ranked), logged below
@@ -3233,14 +3269,16 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
                         Leader(
                             tip=(FX(a.cx - d / 2), tip_z, 0),
                             elbow=(elbow_x, tip_z, 0),
-                            label=_dia_label(bore_pds[i]),
+                            label=_dia_label(dim),
                             draft=draft,
                         ),
                         f"ldr_z{i}",
                         view="front",
                     )
                     n += 1
-                dropped = [d for i, d in enumerate(rot.bores) if placed.get(f"{i:03d}") is None]
+                dropped = [
+                    dim.value for i, dim in enumerate(bore_dims) if placed.get(f"{i:03d}") is None
+                ]
                 for d in dropped:
                     ctx.coverage.drop_diam(
                         d
@@ -3255,25 +3293,27 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
             else:
                 _log.info(
                     "Additional diameters %s not annotated (insufficient left margin)",
-                    list(rot.bores),
+                    [dim.value for dim in bore_dims],
                 )
     elif axis == "x":
         # Horizontal turning axis along X (#222): the OD is the Z extent — a vertical
         # ø dim left of the front (profile) view; axis centrelines run horizontally
         # through z=cz on front and y=cy on plan.
-        ctx.place(
-            _dim(
-                (FX(a.bb.min.X) - 2, FZ(a.cz - od / 2), 0),
-                (FX(a.bb.min.X) - 2, FZ(a.cz + od / 2), 0),
-                "left",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="front",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (FX(a.bb.min.X) - 2, FZ(a.cz - od / 2), 0),
+                    (FX(a.bb.min.X) - 2, FZ(a.cz + od / 2), 0),
+                    "left",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="front",
+            )
+            n += 1
         ctx.place(
             Centerline((FX(a.bb.min.X) - 5, FZ(a.cz), 0), (FX(a.bb.max.X) + 5, FZ(a.cz), 0)),
             "centerline_front",
@@ -3288,19 +3328,21 @@ def render_rotational(dwg, groups, a, *, ctx) -> int:
         # Horizontal turning axis along Y (#222): the OD is the Z extent — a vertical
         # ø dim left of the side (profile) view; axis centrelines run horizontally
         # through z=cz on side and vertically through x=cx on plan.
-        ctx.place(
-            _dim(
-                (SX(a.bb.min.Y) - 2, SZ(a.cz - od / 2), 0),
-                (SX(a.bb.min.Y) - 2, SZ(a.cz + od / 2), 0),
-                "left",
-                8,
-                draft,
-                label=od_label,
-            ),
-            "dim_od",
-            view="side",
-        )
-        n += 1
+        if od_dim is not None:
+            od = od_dim.value
+            ctx.place(
+                _dim(
+                    (SX(a.bb.min.Y) - 2, SZ(a.cz - od / 2), 0),
+                    (SX(a.bb.min.Y) - 2, SZ(a.cz + od / 2), 0),
+                    "left",
+                    8,
+                    draft,
+                    label=_dia_label(od_dim),
+                ),
+                "dim_od",
+                view="side",
+            )
+            n += 1
         ctx.place(
             Centerline((SX(a.bb.min.Y) - 5, SZ(a.cz), 0), (SX(a.bb.max.Y) + 5, SZ(a.cz), 0)),
             "centerline_side",

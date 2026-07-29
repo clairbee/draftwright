@@ -5727,21 +5727,89 @@ class TestDetailView:
 
         from draftwright.annotations._common import Escalation, PlacementContext
         from draftwright.annotations.sections import _request_prismatic_detail
+        from draftwright.model.compiled import (
+            ApprovedDimension,
+            ApprovedLadder,
+            RenderableDimensionPlan,
+        )
 
         a = SimpleNamespace(
             step_zs=[1.0, 1.1, 1.2, 1.3],  # tightly spaced — "illegible" if recomputed raw
             bb=SimpleNamespace(min=SimpleNamespace(Z=0.0), max=SimpleNamespace(Z=2.0)),
             SCALE=1.0,
         )
+        # The rungs now arrive from the compiled plan (ADR 0016 Amdt 1 / #923): the detail
+        # redraw used to re-derive them from `dwg.model()` and `a.step_zs`, which let it
+        # draw a rung the compiler had withheld. `a.step_zs` is no longer consulted at all —
+        # what this test still pins is the GATE: the escalation, not raw legibility.
+        plan = RenderableDimensionPlan(
+            ladders=(
+                ApprovedLadder(
+                    "step_height",
+                    tuple(
+                        ApprovedDimension(
+                            id=None,
+                            value_text=str(z),
+                            value=z,
+                            span=((0.0, 0.0, 0.0), (0.0, 0.0, z)),
+                            rendered_label=str(z),
+                        )
+                        for z in (1.0, 1.1, 1.2, 1.3)
+                    ),
+                ),
+            )
+        )
         no_escalation = PlacementContext()
-        _request_prismatic_detail(None, a, ctx=no_escalation)
+        _request_prismatic_detail(None, a, ctx=no_escalation, plan=plan)
         assert no_escalation.detail_requests == []
 
         with_escalation = PlacementContext(
             escalations=[Escalation(kind="step", view="front", feature=None, reason="illegible")],
         )
-        _request_prismatic_detail(None, a, ctx=with_escalation)
+        _request_prismatic_detail(None, a, ctx=with_escalation, plan=plan)
         assert len(with_escalation.detail_requests) == 1
+
+    def test_declared_step_base_does_not_replace_physical_detail_crop_base(self):
+        """Measurement datum and visible crop geometry are intentionally different."""
+        from types import SimpleNamespace
+
+        from draftwright.annotations._common import Escalation, PlacementContext
+        from draftwright.annotations.sections import _request_prismatic_detail
+        from draftwright.model.compiled import (
+            ApprovedDimension,
+            ApprovedLadder,
+            RenderableDimensionPlan,
+        )
+
+        bbox_base = -15.0
+        declared_base = 5.0
+        rungs = tuple(
+            ApprovedDimension(
+                id=None,
+                value_text=str(z - declared_base),
+                value=z - declared_base,
+                span=((0.0, 0.0, declared_base), (0.0, 0.0, z)),
+                rendered_label=str(z - declared_base),
+            )
+            for z in (8.0, 9.0, 10.0)
+        )
+        plan = RenderableDimensionPlan(ladders=(ApprovedLadder("step_height", rungs),))
+        analysis = SimpleNamespace(
+            bb=SimpleNamespace(
+                min=SimpleNamespace(Z=bbox_base),
+                max=SimpleNamespace(Z=20.0),
+            ),
+            SCALE=1.0,
+        )
+        ctx = PlacementContext(
+            escalations=[Escalation(kind="step", view="front", feature=None, reason="illegible")]
+        )
+
+        _request_prismatic_detail(None, analysis, ctx=ctx, plan=plan)
+
+        assert len(ctx.detail_requests) == 1
+        assert ctx.detail_requests[0].crop_lo == bbox_base
+        assert ctx.detail_requests[0].crop_lo != declared_base
 
     def test_unplaceable_detail_is_reported_not_silently_dropped(self):
         # #630: on a shelled cover the crowded step band is full-width (stacked face
@@ -8716,6 +8784,7 @@ class TestPrismaticBossDiameter:
         from draftwright.annotations._common import PlacementContext, drain_corridors
         from draftwright.annotations.from_model import render_boss_heights
         from draftwright.model import plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         dwg = build_drawing(self._box_boss(), auto_dims=False)
         analysis = dwg._analysis
@@ -8726,7 +8795,10 @@ class TestPrismaticBossDiameter:
             }
         )
         ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-        render_boss_heights(dwg, plan_dimensions(dwg.model()), constrained, ctx=ctx)
+        groups = plan_dimensions(dwg.model())
+        render_boss_heights(
+            dwg, compile_dimensions(dwg.model(), groups=groups), constrained, ctx=ctx
+        )
         drain_corridors(ctx, dwg)
 
         boss_issues = [i for i in dwg.lint() if i.code.startswith("boss_height_")]
@@ -9301,12 +9373,25 @@ class TestDiameterStepAnchor:
         # (axial mid 30, radial y=20), not a hybrid that takes the axial from the
         # long step and the radial from the bucket's first (short) step — which
         # would land the arrow off the selected step's silhouette.
+        from types import SimpleNamespace
+
         from draftwright.annotations.from_model import _diameter_step_anchor
+        from draftwright.model.compiled import compile_dimensions
+        from draftwright.model.ir import PartModel
+        from draftwright.model.planner import plan_dimensions
 
         short = self._step("x", (0.0, 0.0, 0.0), -2.5, 2.5)  # len 5, centre x=0
         long = self._step("x", (30.0, 20.0, 0.0), 20.0, 40.0)  # len 20, centre x=30, y=20
+        bbox = SimpleNamespace(
+            size=SimpleNamespace(Z=20.0),
+            max=SimpleNamespace(X=40.0, Z=20.0),
+            min=SimpleNamespace(Y=0.0, Z=0.0),
+        )
+        model = PartModel(bbox=bbox, orientation="x", features=[short, long])
+        groups = plan_dimensions(model)
+        plan = compile_dimensions(model, groups=groups)
         # `anchor` is the FIRST-bucketed feature's origin (the short step, y=0).
-        got = _diameter_step_anchor(short.frame.origin, {short, long})
+        got = _diameter_step_anchor(short.frame.origin, plan.of_kind("step"))
         assert got == (30.0, 20.0, 0.0), f"hybrid/wrong anchor: {got}"
 
     def test_no_step_in_the_group_falls_back_to_the_given_anchor(self):

@@ -21,6 +21,113 @@
 > therefore be substantially less blocked than this ADR assumed. The constraint below is
 > flagged in step.
 
+## Amendment 1 — the compiled-plan boundary (2026-07-29)
+
+**Renderers may emit dimensional content only from the compiled plan.**
+
+A dimensional renderer receives approved entries and decides *where* and *how* to draw
+them. It does not decide *what*, and it is not given the feature inventory or the bounding
+box it would need to decide otherwise. The corollary is the part worth stating outright:
+**suppression is not a flag renderers check, it is content they never receive.**
+
+### Why this is a rule and not a review note
+
+Everything above this amendment says the planner decides suppression. It did — and the
+decision was routinely ignored, because `PlannedDimension.suppressed` was advisory. A
+renderer got the planned groups *and* the `PartModel` *and* the `Analysis`, so honouring the
+plan was a convention it had to opt into, and reconstructing a suppressed dimension from
+`feature.levels` or `a.bb` stayed one attribute access away.
+
+Eight adversarial review rounds on #921 found eight renderers that had not opted in: the
+height ladder and step positions rebuilding their marks from the feature and the bounding
+box; `render_diameters`, `render_boss_diameters`, `render_step_lengths` and
+`render_rotational` selecting parameters with no suppression check at all; the compound
+callout, the deferred-edit path, the script emitter, and `from_part` each needing separate
+enforcement. Every one was a real omission reaching a real drawing.
+
+Fixing them individually produced four mechanisms for saying the same thing — `pd.suppressed`
+reads, `env_dim_placed`, `set_dim_placed`, and a `_CALLOUT_PARAM_KINDS` policy table — and
+no reason to think the ninth renderer would be different. That is the signature of a missing
+boundary, not of missing tests.
+
+### The shape
+
+```
+PartModel
+  → compile_dimensions()            # one place: rules, requests, authored sets
+      → RenderableDimensionPlan     # APPROVED entries only
+      → diagnostics                 # what was omitted, and why
+  → renderers consume approved entries (diagnostics: see below — no consumer yet)
+```
+
+- `ApprovedDimension` has **no `suppressed` field**. There is nothing to forget.
+- Withheld measurements leave through `diagnostics`. **Nothing consumes them yet** — the
+  consumer is `linting/coverage.py` and it arrives with #921, whose authored sets are the
+  first omissions coverage must tell apart from a measurement simply missed. Until then
+  every omission is a planner rule the lint layer already knows by other means.
+- The feature a dimension came from travels as an **opaque `FeatureRef`**: identity and
+  category, no measurement. Carrying the `Feature` itself would have left the bypass one
+  attribute access away — `.feature.levels` rebuilds exactly what the compiler withheld.
+  The two seams that legitimately need the object (ADR 0010 provenance tagging, escalation
+  grouping) resolve it explicitly; a dimensional renderer doing so is a violation the
+  boundary guard catches.
+- Correlated sets (a step-height ladder, a shoulder chain) arrive as explicit
+  `ApprovedLadder` groups, so a renderer never rebuilds one from a feature. This preserves
+  the tier-3 identity rule — the set is approved or omitted whole, never half a staircase.
+- Spans travel in **part space**; the renderer projects them. That is the split in one line:
+  the compiler says "this measurement, this value, between these two points"; the renderer
+  says which view, which strip, which side, and what happens when it does not fit.
+- Dimensional renderers take a `LayoutFrame` — projectors, view rectangles in page space,
+  strips, scale — rather than the `Analysis`. View *edges* are page-space rectangles rather
+  than projected bbox extents, so "just right of the front view" needs no part geometry.
+- **Omission is not a drop.** The compiler's omission never arrives and is reported through
+  diagnostics; the placer's drop arrived and did not fit, and is reported as
+  `placement_unsatisfiable`. Conflating them is how a deliberate suppression came to look
+  like a layout failure.
+
+### What the compiler may do that renderers may not
+
+Read the bounding box. A model with no `EnvelopeFeature` — a round body, or a `Sheet` that
+never called `.envelope()` — has no parameter naming its overall height, and the value falls
+back to the bbox. That fallback is legitimate and now lives in exactly one place, instead of
+being a thing the height-ladder renderer did while claiming to be doing layout.
+
+### Scope, stated so the exceptions cannot be mistaken for completeness
+
+**The rule is the destination. The migration is substantially advanced but not complete;
+the inventory below is the honest state of it.**
+
+Sixteen renderers have crossed: `render_height_ladder`, `render_step_positions`,
+`render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`,
+`render_boss_diameters`, `render_boss_heights`, `render_envelope`, and `render_pockets`,
+`render_pocket_patterns`, `render_slot_patterns`, `render_diameters`, and
+`render_rotational`, and `render_step_lengths`, plus the prismatic detail redraw.
+Everything else still takes either the legacy `DimensionGroup` surface — where
+`suppressed` remains an advisory boolean a renderer may ignore, which is exactly what eight
+#921 rounds found happening — or the raw model.
+
+Two earlier versions of this section understated that, each time because the guard behind
+it measured the wrong thing (#923 reviews). Counting renderers that take `model` reported
+the migration nearly complete while sixteen sat on the advisory surface; not naming a
+parameter `model` is not the same as having crossed the boundary.
+`tests/test_compiled_plan_boundary.py` now classifies by **contract** and pins all three
+lists, so this inventory cannot drift from the code:
+
+| Contract | Meaning | Renderers |
+|---|---|---|
+| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope`, `render_pockets`, `render_pocket_patterns`, `render_slot_patterns`, `render_diameters`, `render_rotational`, `render_step_lengths` (+ the detail redraw) |
+| `groups` | advisory `suppressed` — **pending** | `render_slots` |
+| `model` | raw inventory — **pending**, except PMI | `render_locations` (#883), `render_gdt`, `render_pmi` (permitted) |
+
+Pattern pitch dimensions (`_add_furniture` → `_place_pitch_dim`) are pending too: they are
+grouped with furniture in the code but print a VALUE, which is what makes something
+dimensional under this rule. The grouping is the bug.
+
+- **Furniture is not dimensional content.** Centrelines, centre marks and section arrows
+  print no value; they are sized off the geometry they mark and stay outside this rule.
+  `render_centermarks` therefore takes explicitly named `furniture_groups`: it is not a
+  dimensional renderer pretending to have crossed the compiled-plan boundary.
+
 ## Context
 
 A user reading a generated `Sheet` script today sees the part's **features** — one

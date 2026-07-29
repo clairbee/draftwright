@@ -31,6 +31,7 @@ from draftwright._core import (
     _log,
     _tag_sequence,
     _wrap_rows,  # noqa: F401 — re-exported via the annotate facade (#700: one copy, in _core)
+    layout_frame,
 )
 from draftwright.analysis import _sizing_bores
 from draftwright.annotations._common import PlacementContext
@@ -80,6 +81,7 @@ from draftwright.model import (
     plan_dimensions,
     plan_sections,
 )
+from draftwright.model.compiled import compile_dimensions
 from draftwright.repair import reconcile_witness_labels
 
 # ── the ONE auto-pass stage sequence (#699 slice b) ──────────────────────────
@@ -304,6 +306,11 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     # Plan the dimensions ONCE and thread the groups to every renderer that reads them
     # (was recomputed per renderer, #275). One rule set over DimParameters, literally.
     _groups = plan_dimensions(_model)
+    # ONE compiled plan, shared by every migrated consumer (#923 review round 4).
+    # Compiling per stage ran the compiler three times and, worse, let the direct
+    # ladder, the shoulders and the detail escalation each hold a separately
+    # derived decision — three chances to disagree about one drawing.
+    _compiled = compile_dimensions(_model, groups=_groups)
 
     # Hole callouts, location dims, and the section view fire on *feature
     # presence*, independent of the turned/prismatic class (#10): the
@@ -339,7 +346,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_rotational():
         # Rotational furniture — OD dim + axis centrelines + concentric bore leaders — IR
         # renderer (#237), placed early like the engine's inline block it replaces.
-        render_rotational(dwg, _groups, a, ctx=ctx)
+        render_rotational(dwg, _compiled, a, ctx=ctx)
         # A stepped round stack on an otherwise non-rotational flange still needs
         # its local axis shown before centered-bore offsets can be suppressed (#881).
         render_local_turned_centerlines(dwg, a, ctx=ctx)
@@ -381,53 +388,64 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # through fv_zones.right preserving the leapfrog cursor (#237). Replaces the inline
         # dim_step_* + dim_height; the turned step-length chain (render_step_lengths) handles
         # turned parts, and a Z-turned overall height is suppressed there (ISO 129).
-        render_height_ladder(dwg, _model, a, ctx=ctx, detail_view=detail_view)
+        # The ADR 0016 boundary: compile WHAT is drawn, hand the renderer that plus the
+        # page geometry it needs to decide WHERE. It no longer sees `_model` or `a`.
+        render_height_ladder(
+            dwg,
+            # `groups=` so the planner runs ONCE per build: the orchestrator already
+            # planned, and a compiler re-planning behind it would create a second
+            # product that can drift while the migration is partial (#923 review).
+            _compiled,
+            layout_frame(a),
+            ctx=ctx,
+            detail_view=detail_view,
+        )
 
     def _s_plates():
         # Plate/wall thicknesses on a multi-plate prismatic (#559): the thin extent of each
         # recognised slab, placed in the view where its thin axis is visible. A single flat
         # plate has none (its thickness IS the envelope height).
         # Planner-fed (#729): consumes the DimensionGroups so an authored tolerance renders.
-        render_plates(dwg, _groups, a, ctx=ctx)
+        render_plates(dwg, _compiled, a, ctx=ctx)
 
     def _s_step_positions():
         # Prismatic step POSITIONS (#555): where each shoulder sits along its axis, so a
         # stepped block is fully constrained (the heights alone leave the shoulder implicit).
-        render_step_positions(dwg, _model, a, ctx=ctx)
+        render_step_positions(dwg, _compiled, layout_frame(a), ctx=ctx)
 
     def _s_chamfers():
         # Chamfer callouts (#560): C{leg} / {leg}×{angle}° via a leader off each chamfer face.
         # Planner-fed (#724): consumes the DimensionGroups so an authored tolerance renders.
-        render_chamfers(dwg, _groups, a, ctx=ctx)
+        render_chamfers(dwg, _compiled, a, ctx=ctx)
 
     def _s_fillets():
         # Fillet callouts (#561): R{radius} (grouped n× R) via a leader off each rounded edge.
         # Planner-fed (#725): consumes the DimensionGroups so an authored tolerance renders.
-        render_fillets(dwg, _groups, a, ctx=ctx)
+        render_fillets(dwg, _compiled, a, ctx=ctx)
 
     def _s_flats():
         # Machined-flat callouts (#148b): {across} A/F via a leader off each flat on round stock.
         # Planner-fed (#726): consumes the DimensionGroups so an authored tolerance renders.
-        render_flats(dwg, _groups, a, ctx=ctx)
+        render_flats(dwg, _compiled, a, ctx=ctx)
 
     def _s_pockets():
         # Blind-recess callouts (#148a): W × L × D DEEP via a leader off each floored pocket.
         # Planner-fed (#728): consumes the DimensionGroups so authored tolerances render.
-        render_pockets(dwg, _groups, a, ctx=ctx)
+        render_pockets(dwg, _compiled, a, ctx=ctx)
 
     def _s_pocket_patterns():
         # Grouped blind-pocket-array callouts (#841): ONE count× W × L × D DEEP leader + the
         # (n-1)× pitch dim(s), instead of N competing per-pocket size dims. Placed after
         # "pockets" (same leader mechanism); its member pockets are composed into the pattern,
         # so render_pockets never double-renders them.
-        render_pocket_patterns(dwg, _groups, a, ctx=ctx)
+        render_pocket_patterns(dwg, _compiled, a, ctx=ctx)
 
     def _s_slot_patterns():
         # Grouped through-slot-array callouts (#841): ONE count× SLOT W × L leader + the (n-1)×
         # pitch dim(s), instead of N competing per-slot size dims (some of which drop, #841
         # behaviour 1). Member slots are composed into the pattern, so render_slots never
         # double-renders them.
-        render_slot_patterns(dwg, _groups, a, ctx=ctx)
+        render_slot_patterns(dwg, _compiled, a, ctx=ctx)
 
     def _s_off_axis_across():
         # Side-drilled holes' in-plane (side-below) locations share the below corridor with
@@ -441,23 +459,23 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # Overall width (plan, below) + depth (side, below) envelope dims — IR renderer,
         # queued into the shared corridor instead of claiming a post-hoc carve tier.
         # Suppression (square footprint / X-turned width) is the planner's decision (#250).
-        render_envelope(dwg, _groups, a, ctx=ctx)
+        render_envelope(dwg, _compiled, a, ctx=ctx)
 
     def _s_detail_request():
         # Prismatic step-height detail: queue it (only when build_drawing(detail_view=True))
         # — resolved with every other detail request in the "details" stage (#307).
         if detail_view:
-            _request_prismatic_detail(dwg, a, ctx=ctx)
+            _request_prismatic_detail(dwg, a, ctx=ctx, plan=_compiled)
 
     def _s_boss_diameters():
         # Prismatic bosses get a plan-view ø leader BEFORE the turned row/column solve,
         # which then sees the ø as 'mentioned' and skips it (#629 — the column-left strip
         # strands a boss ø when tight, even on a half-empty sheet). No-op on turned parts
         # (they keep the OD stack).
-        render_boss_diameters(dwg, _groups, a, ctx=ctx)
+        render_boss_diameters(dwg, _compiled, a, ctx=ctx)
 
     def _s_boss_heights():
-        render_boss_heights(dwg, _groups, a, ctx=ctx)
+        render_boss_heights(dwg, _compiled, a, ctx=ctx)
 
     def _s_diameters():
         # Turned-part dimensions via the IR (ADR 0008 convergence). The model is built
@@ -465,7 +483,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # below (X) / end-on radial leaders (Y) / column left (Z), one path by
         # frame axis. Replaces
         # _annotate_turned_diameters.
-        render_diameters(dwg, _groups, a, ctx=ctx)
+        render_diameters(dwg, _compiled, a, ctx=ctx)
 
     def _s_step_lengths():
         # The chain that locates every shoulder, X/Y/Z from one path (#223). A crowded
@@ -473,7 +491,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # cramming; the envelope dim along the turning axis was suppressed so the chain
         # does not double-dimension the length.
         if a.prof is not None:
-            render_step_lengths(dwg, _groups, ctx=ctx)
+            render_step_lengths(dwg, _compiled, ctx=ctx)
 
     def _s_off_axis_along():
         # Side-drilled (X/Y-axis) hole HEIGHT locations — queued after the mandatory
@@ -520,7 +538,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # furniture (else its room check can't see the not-yet-drained length dims and
         # collides, #148c crowded-shaft).
         # Planner-fed (#727): consumes the DimensionGroups so authored tolerances render.
-        render_grooves(dwg, _groups, a, ctx=ctx)
+        render_grooves(dwg, _compiled, a, ctx=ctx)
 
     def _s_section():
         # The section view renders after the corridor-drained furniture exists, so

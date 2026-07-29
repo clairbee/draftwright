@@ -1120,7 +1120,6 @@ class Drawing:
                 render_grooves,
                 render_pockets,
             )
-            from draftwright.model import plan_dimensions
 
             renderers = {
                 "chamfer": render_chamfers,
@@ -1136,8 +1135,16 @@ class Drawing:
             # as the placed name (Codex #811 r3). A drop (no clear room) changes nothing and
             # returns "" — the same empty-string drop signal the step/boss diameter branch gives.
             before = {n: id(o) for n, o in self.iter_annotations()}
+            # Migrated renderers consume the compiled plan and select by opaque reference.
+            from draftwright.model.compiled import FeatureRef as _FR
+            from draftwright.model.compiled import compile_dimensions as _cd3
+
             renderers[kind](
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                _cd3(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={_FR(feature)},
             )
             changed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return changed[0] if len(changed) == 1 else ""
@@ -1152,11 +1159,15 @@ class Drawing:
                     "add it to a drawing built by build_drawing(), not a bare Drawing"
                 )
             from draftwright.annotations.holes import render_pocket_patterns
-            from draftwright.model import plan_dimensions
+            from draftwright.model.compiled import FeatureRef, compile_dimensions
 
             before = {n: id(o) for n, o in self.iter_annotations()}
             render_pocket_patterns(
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                compile_dimensions(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={FeatureRef(feature)},
             )
             placed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return next((n for n in placed if n.startswith("m_pocketpat")), "")
@@ -1171,11 +1182,15 @@ class Drawing:
                     "add it to a drawing built by build_drawing(), not a bare Drawing"
                 )
             from draftwright.annotations.holes import render_slot_patterns
-            from draftwright.model import plan_dimensions
+            from draftwright.model.compiled import FeatureRef, compile_dimensions
 
             before = {n: id(o) for n, o in self.iter_annotations()}
             render_slot_patterns(
-                self, plan_dimensions(self._part_model), self._analysis, ctx=ctx, only={feature}
+                self,
+                compile_dimensions(self._part_model),
+                self._analysis,
+                ctx=ctx,
+                only={FeatureRef(feature)},
             )
             placed = [n for n, o in self.iter_annotations() if before.get(n) != id(o)]
             return next((n for n in placed if n.startswith("m_slotpat")), "")
@@ -1226,10 +1241,10 @@ class Drawing:
             return []
         from draftwright.annotations._common import PlacementContext
         from draftwright.annotations.from_model import render_rotational
-        from draftwright.model import plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         ctx = PlacementContext(registry=self._registry, coverage=self._coverage, items=self.items)
-        render_rotational(self, plan_dimensions(self._part_model), self._analysis, ctx=ctx)
+        render_rotational(self, compile_dimensions(self._part_model), self._analysis, ctx=ctx)
         return []
 
     def section(self) -> list[str]:
@@ -1721,6 +1736,7 @@ class Drawing:
             feature_hole_keys,
         )
         from draftwright.model import PartModel, plan_dimensions
+        from draftwright.model.compiled import compile_dimensions
 
         routable = model is not None and a is not None
         queued_dim_ids: set = set()
@@ -1734,7 +1750,7 @@ class Drawing:
             # pass, so the reconstruction matches (== not ⊇, unlike the #424 diameter case).
             if r.rotational_ids:
                 assert a is not None and isinstance(model, PartModel)
-                render_rotational(self, plan_dimensions(model), a, ctx=ctx)
+                render_rotational(self, compile_dimensions(model), a, ctx=ctx)
             # Generated/deferred reconstruction starts with auto_dims=False, so
             # add a non-rotational stepped stack's local axis here before the
             # location stages suppress a centered bore as axis-located (#881).
@@ -1830,12 +1846,17 @@ class Drawing:
             # leaves them recorded so a retry rebuilds the batch (#639).
             if r.height_ladder_ids:
                 assert a is not None and isinstance(model, PartModel)
+                from draftwright._core import layout_frame
+                from draftwright.model.compiled import compile_dimensions
+
                 render_height_ladder(
                     self,
-                    model,
-                    a,
+                    # `include_overall` is drawing state, so it is an input to the COMPILE
+                    # (whether the overall height is in the set) rather than something the
+                    # renderer decides after the fact.
+                    compile_dimensions(model, include_overall=not r.explicit_envelope_height),
+                    layout_frame(a),
                     ctx=ctx,
-                    include_overall=not r.explicit_envelope_height,
                     detail_view=self._build.detail_view,
                 )
 
@@ -1844,7 +1865,10 @@ class Drawing:
             # ladder above; placed and dropped at the drain (#639).
             if r.step_position_ids:
                 assert a is not None and isinstance(model, PartModel)
-                render_step_positions(self, model, a, ctx=ctx)
+                from draftwright._core import layout_frame as _lf
+                from draftwright.model.compiled import compile_dimensions as _cd2
+
+                render_step_positions(self, _cd2(model), _lf(a), ctx=ctx)
 
         def _s_detail_request():
             # Prismatic step-height detail (#661): queue it exactly as the auto pass
@@ -1854,7 +1878,9 @@ class Drawing:
             # (_request_prismatic_detail's own check). Resolved in the "details" stage.
             if self._build.detail_view and routable:
                 assert a is not None
-                _request_prismatic_detail(self, a, ctx=ctx)
+                from draftwright.model.compiled import compile_dimensions as _cd
+
+                _request_prismatic_detail(self, a, ctx=ctx, plan=_cd(model))
 
         def _s_diameters():
             # Step/boss ø diameters through render_diameters' set-solve (row-below /
@@ -1863,7 +1889,20 @@ class Drawing:
             # deferred path different obstacle visibility).
             if r.only_dia:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_diameters(self, plan_dimensions(model), a, ctx=ctx, only=r.only_dia)
+                from typing import cast as _cast_dia
+
+                from draftwright.model.compiled import FeatureRef as _DiaRef
+                from draftwright.model.compiled import compile_dimensions as _compile_dia
+                from draftwright.model.ir import Feature as _DiaFeature
+
+                assert all(isinstance(f, _DiaFeature) for f in r.only_dia)
+                render_diameters(
+                    self,
+                    _compile_dia(model),
+                    a,
+                    ctx=ctx,
+                    only={_DiaRef(_cast_dia(_DiaFeature, f)) for f in r.only_dia},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.dia_ids]
 
         def _s_step_lengths():
@@ -1871,7 +1910,19 @@ class Drawing:
             # staggered tiers) — after diameters, as in the auto-pass.
             if r.only_len:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_step_lengths(self, plan_dimensions(model), ctx=ctx, only=r.only_len)
+                from typing import cast as _cast_len
+
+                from draftwright.model.compiled import FeatureRef as _LenRef
+                from draftwright.model.compiled import compile_dimensions as _compile_len
+                from draftwright.model.ir import Feature as _LenFeature
+
+                assert all(isinstance(f, _LenFeature) for f in r.only_len)
+                render_step_lengths(
+                    self,
+                    _compile_len(model),
+                    ctx=ctx,
+                    only={_LenRef(_cast_len(_LenFeature, f)) for f in r.only_len},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.len_ids]
 
         def _s_slots():
@@ -1894,7 +1945,20 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from typing import cast as _cast
+
+                from draftwright.model.compiled import FeatureRef as _FR2
+                from draftwright.model.compiled import compile_dimensions as _cd4
+                from draftwright.model.ir import Feature as _Feature
+
+                assert all(isinstance(f, _Feature) for f in feats)
+                render(
+                    self,
+                    _cd4(model),
+                    a,
+                    ctx=ctx,
+                    only={_FR2(_cast(_Feature, f)) for f in feats},
+                )
             self._intents = [it for it in self._intents if id(it) not in ids]
 
         def _s_chamfers():
@@ -1920,7 +1984,20 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in r.pocket_pattern_ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_pocket_patterns(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from typing import cast as _cast_pp
+
+                from draftwright.model.compiled import FeatureRef as _PPRef
+                from draftwright.model.compiled import compile_dimensions as _compile_pp
+                from draftwright.model.ir import Feature as _PPFeature
+
+                assert all(isinstance(f, _PPFeature) for f in feats)
+                render_pocket_patterns(
+                    self,
+                    _compile_pp(model),
+                    a,
+                    ctx=ctx,
+                    only={_PPRef(_cast_pp(_PPFeature, f)) for f in feats},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.pocket_pattern_ids]
 
         def _s_slot_patterns():
@@ -1930,7 +2007,20 @@ class Drawing:
             feats = {it.feature for it in self._intents if id(it) in r.slot_pattern_ids}
             if feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_slot_patterns(self, plan_dimensions(model), a, ctx=ctx, only=feats)
+                from typing import cast as _cast_sp
+
+                from draftwright.model.compiled import FeatureRef as _SPRef
+                from draftwright.model.compiled import compile_dimensions as _compile_sp
+                from draftwright.model.ir import Feature as _SPFeature
+
+                assert all(isinstance(f, _SPFeature) for f in feats)
+                render_slot_patterns(
+                    self,
+                    _compile_sp(model),
+                    a,
+                    ctx=ctx,
+                    only={_SPRef(_cast_sp(_SPFeature, f)) for f in feats},
+                )
             self._intents = [it for it in self._intents if id(it) not in r.slot_pattern_ids]
 
         def _s_user_dims():
