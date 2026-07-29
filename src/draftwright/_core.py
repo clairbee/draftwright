@@ -757,8 +757,13 @@ class LayoutFrame:
         raise ValueError(f"unknown view {view!r}")
 
     def edges(self, view: str) -> tuple[float, float, float, float]:
-        """*view*'s page-space ``(left, right, bottom, top)``."""
-        return {"front": self.front, "plan": self.plan, "side": self.side}[view]
+        """*view*'s ordered page-space ``(left, right, bottom, top)``.
+
+        The stored endpoints come from projected world minima/maxima, whose handedness
+        need not match page left/right. Normalise here so callers can rely on the names
+        this API exposes rather than knowing projector orientation."""
+        x0, x1, y0, y1 = {"front": self.front, "plan": self.plan, "side": self.side}[view]
+        return min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
 
     def zones(self, view: str) -> ViewZones:
         return {"front": self.fv_zones, "plan": self.pv_zones, "side": self.sv_zones}[view]

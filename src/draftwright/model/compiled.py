@@ -636,7 +636,15 @@ def compile_dimensions(
     plan-once invariant holds through the migration instead of the compiler quietly
     re-planning behind it (#923 review).
     """
-    planned = groups if groups is not None else plan_dimensions(model)
+    planned = tuple(groups) if groups is not None else tuple(plan_dimensions(model))
+    if groups is not None:
+        model_feature_ids = {id(feature) for feature in model.features}
+        foreign = [g.feature for g in planned if id(g.feature) not in model_feature_ids]
+        if foreign:
+            raise ValueError(
+                "compile_dimensions(groups=...): every planned group must come from "
+                "this exact PartModel; refusing a mismatched model/groups pair"
+            )
     marked = _suppressed_dims(model, planned)
     ladders, omissions = _compile_step_ladders(model, marked)
     overall, height_omissions = _compile_overall_height(

@@ -275,6 +275,33 @@ class TestTheRendererCannotSeeContent:
             "the compiler, which is the only place allowed to turn it into a dimension"
         )
 
+    def test_layout_frame_edges_guarantee_page_order_under_reversed_projection(self):
+        from types import SimpleNamespace
+
+        from draftwright._core import LayoutFrame
+
+        frame = LayoutFrame(
+            proj=SimpleNamespace(),
+            scale=1.0,
+            front=(40.0, 10.0, 30.0, 5.0),
+            plan=(0.0, 1.0, 2.0, 3.0),
+            side=(0.0, 1.0, 2.0, 3.0),
+            fv_zones=SimpleNamespace(),
+            pv_zones=SimpleNamespace(),
+            sv_zones=SimpleNamespace(),
+        )
+        assert frame.edges("front") == (10.0, 40.0, 5.0, 30.0)
+
+    def test_compiler_rejects_groups_planned_from_an_equal_but_different_model(self):
+        """Suppression must fail closed rather than miss an identity-keyed lookup."""
+        first = detect_part_model(_staircase())
+        second = detect_part_model(_staircase())
+        assert first is not second
+        from draftwright.model.planner import plan_dimensions
+
+        with pytest.raises(ValueError, match="exact PartModel"):
+            compile_dimensions(first, groups=plan_dimensions(second))
+
 
 class TestOmissionIsNotADrop:
     """Two different "not drawn" meet in this renderer and must stay distinguishable: the
