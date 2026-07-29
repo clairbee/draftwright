@@ -2824,10 +2824,24 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     the plan's diagnostics) and this pass's drop (arrived, did not fit; reported as
     ``placement_unsatisfiable``). Returns the count REGISTERED."""
     draft = dwg.draft
-    _left, right, bottom, _top = frame.edges("front")
+    _left, right, _bottom, _top = frame.edges("front")
     edge2 = right + 2
-    zmin = bottom
     tier = draft.font_size + 2 * draft.pad_around_text
+
+    def _zspan(entry):
+        """An entry's witness ends, projected from ITS OWN span.
+
+        Anchoring every rung at the view's bottom edge instead was wrong the moment the
+        compiler started measuring from `StepLevelFeature.base`: a declared base above the
+        part's bottom made the drawn line span the full part while the label read the
+        shorter distance, so the dimension said one thing and measured another (#923
+        review). The span is the compiler's statement of what is being measured; projecting
+        both ends of it is what keeps line and label the same claim."""
+        return (
+            frame.project("front", entry.span[0])[1],
+            frame.project("front", entry.span[1])[1],
+        )
+
     strip = frame.fv_zones.right
 
     rung_set = plan.ladder("step_height")
@@ -2846,7 +2860,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
         chain.append(
             (
                 "dim_step_typ",
-                frame.project("front", rep.span[1])[1],
+                *_zspan(rep),
                 rep.label,
                 _SLOT_DIM_STEP,
                 "representative step-height dimension dropped (front-view right strip full)",
@@ -2889,7 +2903,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
             chain.append(
                 (
                     f"dim_step_{col}",
-                    frame.project("front", rung.span[1])[1],
+                    *_zspan(rung),
                     rung.label,
                     _SLOT_DIM_STEP,
                     "step-height dimension dropped (front-view right strip full)",
@@ -2902,7 +2916,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
         chain.append(
             (
                 "dim_height",
-                frame.project("front", height.span[1])[1],
+                *_zspan(height),
                 height.label,
                 _SLOT_DIM_HEIGHT,
                 "overall height dimension dropped (front-view right strip full)",
@@ -2911,18 +2925,18 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
 
     names = [c[0] for c in chain]
     solved: dict[str, float] = {}
-    for k, (name, ztop, label, _tsize, drop_msg) in enumerate(chain):
+    for k, (name, zbase, ztop, label, _tsize, drop_msg) in enumerate(chain):
 
-        def _build(pos, name=name, ztop=ztop, label=label, k=k):
+        def _build(pos, name=name, zbase=zbase, ztop=ztop, label=label, k=k):
             base = edge2
             for pn in reversed(names[:k]):  # nearest already-built predecessor's line
                 if pn in solved:
                     base = solved[pn]
                     break
             solved[name] = pos
-            return _dim((base, zmin, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
+            return _dim((base, zbase, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
 
-        def _foot(pos, ztop=ztop, label=label, k=k):
+        def _foot(pos, zbase=zbase, ztop=ztop, label=label, k=k):
             # Predecessor-aware prediction (#689 review): the conservative edge-anchored
             # witness can falsely exhaust the strip when an inner obstacle sits in the
             # already-traversed region. Use the same solved map the build chain uses.
@@ -2934,7 +2948,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
             if pos - base < 0.5:  # degenerate guard: never model a zero-length offset
                 base = edge2
             return dim_footprint(
-                (base, zmin, 0), (base, ztop, 0), "right", pos - base, draft, label
+                (base, zbase, 0), (base, ztop, 0), "right", pos - base, draft, label
             )
 
         def _drop(nm, drop_msg=drop_msg, name=name):
@@ -2978,12 +2992,12 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     left_edge = _left - 2
     for i, rung in enumerate(short_rungs):
         name = f"dim_step_{i}"
-        ztop = frame.project("front", rung.span[1])[1]
+        zbase, ztop = _zspan(rung)
         label = rung.label
 
-        def _build_left(pos, ztop=ztop, label=label):
+        def _build_left(pos, zbase=zbase, ztop=ztop, label=label):
             return _dim(
-                (left_edge, zmin, 0),
+                (left_edge, zbase, 0),
                 (left_edge, ztop, 0),
                 "left",
                 left_edge - pos,
@@ -3016,8 +3030,8 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 on_drop=_drop_left,
                 force=True,
                 feature=step,
-                footprint=lambda pos, ztop=ztop, label=label: dim_footprint(
-                    (left_edge, zmin, 0),
+                footprint=lambda pos, zbase=zbase, ztop=ztop, label=label: dim_footprint(
+                    (left_edge, zbase, 0),
                     (left_edge, ztop, 0),
                     "left",
                     left_edge - pos,

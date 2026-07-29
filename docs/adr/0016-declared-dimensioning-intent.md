@@ -94,11 +94,25 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 
 ### Scope, stated so the exceptions cannot be mistaken for completeness
 
+**The rule is the destination, and the migration is partial. Two paths do not yet obey it,
+and both are scheduled rather than excused — an unstated exception is how a rule like this
+rots.**
+
 - **Location dimensions are inside this rule.** They are dimensions, and letting
   `render_locations` rebuild them from the model preserves the same bypass class.
   `plan_locations` returns a flat, cross-feature, ref-deduped list that never enters a
   `DimensionGroup`, so they are sequenced later in the migration rather than carved out
   (#883). The boundary is not complete until they are inside it.
+- **The prismatic detail redraw is inside this rule, and currently bypasses it.**
+  `_request_prismatic_detail` (`annotations/sections.py`) re-derives the step feature from
+  `dwg.model()` and rebuilds the ladder from `step.levels` against `a.bb.min.Z`, so a rung
+  the compiler withheld can still reach the detail view — demonstrated with an approved
+  ladder holding three of five rungs while the detail drew all five (#923 review). The
+  direct renderer is restricted; its escalation is not. The fix is for the escalation to
+  carry the approved rungs (or a placement-only detail request derived from them) rather
+  than rediscovering levels. Until it lands, this rule holds for the direct render path
+  only, and `tests/test_compiled_plan_boundary.py` pins the gap so closing it is
+  detectable.
 - **Raw AP242 PMI is a documented exception.** `PmiFeature.parameters()` is empty by design
   and the record renders verbatim, so there is no compiled content for it to come from. It
   is an explicit provenance-preserving escape hatch, not an oversight.

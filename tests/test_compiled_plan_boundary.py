@@ -63,6 +63,46 @@ class TestTheCompilerOwnsContent:
         assert rungs is not None and rungs.representative
         assert len(rungs.rungs) == 1 and "×" in rungs.rungs[0].label
 
+    @pytest.mark.parametrize(
+        "make_part", [_staircase, _uniform_staircase], ids=["stepped", "uniform"]
+    )
+    def test_a_label_always_measures_its_own_span(self, make_part):
+        """The invariant that keeps a dimension honest: the number printed IS the distance
+        between the two points the line runs between.
+
+        It broke the moment the compiler started measuring from `StepLevelFeature.base`
+        while the renderer still anchored every witness at the view's bottom edge — a
+        declared base above the part's bottom made the line span the whole part and read
+        the shorter figure, so the dimension said one thing and measured another (#923
+        review). Checking it here, at the source, catches the disagreement for every
+        renderer rather than one fixture at a time."""
+        plan = compile_dimensions(detect_part_model(make_part()))
+        for ladder in plan.ladders:
+            for rung in ladder.rungs:
+                if rung.span is None or ladder.representative:
+                    continue  # a representative mark reports the RISE, not its own span
+                measured = rung.span[1][2] - rung.span[0][2]
+                assert measured == pytest.approx(rung.value), (
+                    f"{ladder.kind} {rung.label!r} spans {measured} but claims {rung.value}"
+                )
+
+    def test_a_declared_base_is_measured_from_that_base(self):
+        """`StepLevelFeature.base` is the IR's own statement of what the rungs measure from.
+        The planner always used it; the renderer used the bounding-box minimum, so for a
+        declared base the plan and the drawing disagreed about the number. One source now."""
+        from draftwright.model.ir import Frame, PartModel, StepLevelFeature
+
+        step = StepLevelFeature(Frame((0, 0, 5), "z"), base=5.0, levels=(10.0, 20.0))
+        model = PartModel(
+            bbox=Box(90, 60, 30).bounding_box(),
+            orientation="prismatic",
+            features=[step],
+            datums=[],
+        )
+        rungs = compile_dimensions(model).ladder("step_height")
+        assert [r.value for r in rungs.rungs] == [5.0, 15.0], "measured from base=5, not bbox"
+        assert all(r.span[0][2] == 5.0 for r in rungs.rungs), "and the LINE starts there too"
+
     def test_the_overall_height_is_an_approved_entry_not_a_bbox_read(self):
         plan = compile_dimensions(detect_part_model(Box(90, 60, 20)))
         overall = plan.ladder("overall_height")
@@ -202,6 +242,32 @@ class TestTheBoundaryIsLoadBearing:
         assert not leaked, (
             f"{leaked} reached the page from an EMPTY compiled plan — the renderer is "
             "rebuilding dimensions from somewhere other than the plan"
+        )
+
+    def test_the_detail_redraw_bypass_is_pinned_until_it_is_closed(self):
+        """A KNOWN GAP, pinned so it cannot be forgotten and so closing it is detectable.
+
+        `_request_prismatic_detail` re-derives the step from `dwg.model()` and rebuilds the
+        ladder from `step.levels` against `a.bb.min.Z`, so a rung the compiler withheld can
+        still reach the detail view (#923 review — an approved ladder of three rungs drew
+        five). The direct render path obeys the boundary; its escalation does not.
+
+        This asserts the bypass STILL EXISTS. When the escalation is migrated to carry
+        approved rungs, this test fails — which is the point: it is a reminder with a
+        deadline, not documentation of an accepted exception."""
+        src = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "src"
+            / "draftwright"
+            / "annotations"
+            / "sections.py"
+        ).read_text(encoding="utf-8")
+        assert (
+            'getattr(f, "kind", None) == "step_level"' in src and 'getattr(step, "levels"' in src
+        ), (
+            "the detail redraw no longer rediscovers levels from the model — if it now "
+            "consumes the approved ladder, delete this test and the ADR's scheduled "
+            "exception for it"
         )
 
     def test_the_migration_has_not_silently_stalled(self):
