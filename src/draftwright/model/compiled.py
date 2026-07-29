@@ -300,12 +300,26 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
         omissions += [Omission(step, pid, v, why) for pid, v, why in height_marks]
 
     _di = {"x": 0, "y": 1, "z": 2}
+
+    def _shoulder_span(axis: str, pos: float):
+        """A shoulder's span, from its datum to its position along its own axis.
+
+        Carried rather than left ``None`` so consumers never go back to the feature for the
+        station: the detail crop needs the X positions to frame the crowded band, and
+        `render_step_positions` will need both ends when it migrates. The varying
+        coordinate also tells a consumer which axis it runs along, without a second field
+        to keep in step."""
+        lo = list(step.datum)
+        hi = list(step.datum)
+        hi[_di[axis]] = pos
+        return (tuple(lo), tuple(hi))
+
     shoulders = [
         ApprovedDimension(
             id=_dim_id(step, "step_position.length"),
             label=_fmt(abs(pos - step.datum[_di[axis]])),
             value=abs(pos - step.datum[_di[axis]]),
-            span=None,
+            span=_shoulder_span(axis, pos),
             ref=step_ref,
         )
         for axis, pos in sorted(step.shoulders)

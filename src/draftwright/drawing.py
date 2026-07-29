@@ -1859,7 +1859,9 @@ class Drawing:
             # (_request_prismatic_detail's own check). Resolved in the "details" stage.
             if self._build.detail_view and routable:
                 assert a is not None
-                _request_prismatic_detail(self, a, ctx=ctx)
+                from draftwright.model.compiled import compile_dimensions as _cd
+
+                _request_prismatic_detail(self, a, ctx=ctx, plan=_cd(model))
 
         def _s_diameters():
             # Step/boss ø diameters through render_diameters' set-solve (row-below /

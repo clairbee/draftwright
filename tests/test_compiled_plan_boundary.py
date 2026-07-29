@@ -24,18 +24,36 @@ from __future__ import annotations
 import ast
 import inspect
 import pathlib
+from dataclasses import replace
 
 import pytest
 from build123d import Box, Cylinder, Pos
 
 from draftwright import Sheet
 from draftwright.annotations.from_model import render_height_ladder
-from draftwright.builder import detect_part_model
+from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.compiled import RenderableDimensionPlan, compile_dimensions
 
 
 def _staircase():
     return Box(120, 60, 15) + Pos(-20, 0, 15) * Box(80, 60, 15) + Pos(-40, 0, 30) * Box(40, 60, 15)
+
+
+def _crowded_staircase():
+    """A tall narrow stacked-tier block whose shoulders sit 3 mm apart in Z.
+
+    At the auto sheet scale the legibility gate drops at least one rung, which is the
+    trigger for the enlarged detail view — the only way to exercise the detail redraw at
+    all. Narrow in X/Y so the detail footprint actually fits the sheet; a fixture whose
+    detail is `detail_unplaceable` draws nothing and would make this test vacuous.
+    (Mirrors `_crowded_shoulder_part` in tests/test_make_drawing.py.)
+    """
+    part = Pos(0, 0, 3) * Box(20, 16, 6)
+    z = 6.0
+    for w in (16, 13, 10, 7, 5):
+        part = part + Pos(0, 0, z + 1.5) * Box(w, 12, 3)
+        z += 3
+    return part
 
 
 def _uniform_staircase():
@@ -73,18 +91,29 @@ class TestTheCompilerOwnsContent:
         It broke the moment the compiler started measuring from `StepLevelFeature.base`
         while the renderer still anchored every witness at the view's bottom edge — a
         declared base above the part's bottom made the line span the whole part and read
-        the shorter figure, so the dimension said one thing and measured another (#923
-        review). Checking it here, at the source, catches the disagreement for every
-        renderer rather than one fixture at a time."""
+        the shorter figure (#923 review). Checking it at the source catches the
+        disagreement for every renderer rather than one fixture at a time.
+
+        Distance along the span's OWN varying axis, not the Z delta: a height rung runs
+        along Z and a shoulder along X, and a Z-only check silently passes every shoulder
+        while claiming to be general (#923 review round 2). A representative rung is
+        included rather than exempted — it measures one rise, so it obeys the same rule;
+        what differs is only that its LABEL reports that rise n times.
+        """
         plan = compile_dimensions(detect_part_model(make_part()))
         for ladder in plan.ladders:
             for rung in ladder.rungs:
-                if rung.span is None or ladder.representative:
-                    continue  # a representative mark reports the RISE, not its own span
-                measured = rung.span[1][2] - rung.span[0][2]
-                assert measured == pytest.approx(rung.value), (
+                if rung.span is None:
+                    continue
+                lo, hi = rung.span
+                measured = max(abs(b - a) for a, b in zip(lo, hi))
+                assert measured == pytest.approx(rung.value, rel=0.1), (
                     f"{ladder.kind} {rung.label!r} spans {measured} but claims {rung.value}"
                 )
+                if ladder.representative:
+                    # The one deliberate difference, asserted rather than skipped: the span
+                    # is a single rise and the label multiplies it.
+                    assert "×" in rung.label, "a representative mark must say how many"
 
     def test_a_declared_base_is_measured_from_that_base(self):
         """`StepLevelFeature.base` is the IR's own statement of what the rungs measure from.
@@ -244,30 +273,52 @@ class TestTheBoundaryIsLoadBearing:
             "rebuilding dimensions from somewhere other than the plan"
         )
 
-    def test_the_detail_redraw_bypass_is_pinned_until_it_is_closed(self):
-        """A KNOWN GAP, pinned so it cannot be forgotten and so closing it is detectable.
+    def test_the_detail_view_emits_exactly_the_approved_rungs(self):
+        """The detail escalation obeys the boundary too — the last dimensional bypass.
 
-        `_request_prismatic_detail` re-derives the step from `dwg.model()` and rebuilds the
-        ladder from `step.levels` against `a.bb.min.Z`, so a rung the compiler withheld can
-        still reach the detail view (#923 review — an approved ladder of three rungs drew
-        five). The direct render path obeys the boundary; its escalation does not.
+        `_request_prismatic_detail` used to re-derive the step from `dwg.model()` and
+        rebuild the ladder from `step.levels`, so a rung the compiler withheld still
+        reached the detail view: an approved three-rung plan drew five (#923 review).
+        Restricting the direct renderer while its escalation reconstructed the same content
+        left the rule true only of the path anyone happened to look at.
 
-        This asserts the bypass STILL EXISTS. When the escalation is migrated to carry
-        approved rungs, this test fails — which is the point: it is a reminder with a
-        deadline, not documentation of an accepted exception."""
-        src = (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "src"
-            / "draftwright"
-            / "annotations"
-            / "sections.py"
-        ).read_text(encoding="utf-8")
-        assert (
-            'getattr(f, "kind", None) == "step_level"' in src and 'getattr(step, "levels"' in src
-        ), (
-            "the detail redraw no longer rediscovers levels from the model — if it now "
-            "consumes the approved ladder, delete this test and the ADR's scheduled "
-            "exception for it"
+        This replaces a test that asserted the *source text* of the defect — which passed
+        only while the bug existed, required it, and said nothing about behaviour. Here a
+        deliberately PARTIAL plan goes through a real build and the detail view must carry
+        those rungs and no others."""
+        part = _crowded_staircase()
+        model = detect_part_model(part)
+        full = compile_dimensions(model).ladder("step_height")
+        assert full is not None and not full.representative and len(full.rungs) >= 3, (
+            f"the fixture must have individual rungs to withhold (got {full})"
+        )
+
+        # Three of five: enough rungs left that the legibility gate still drops one and the
+        # escalation still fires. Withholding more suppresses the detail request itself, and
+        # the test then passes by drawing nothing — which is how its first version was
+        # vacuous against the very bug it targets.
+        keep = full.rungs[:3]
+        partial = RenderableDimensionPlan(ladders=(replace(full, rungs=tuple(keep)),))
+
+        def _partial(*_a, **_kw):
+            return partial
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("draftwright.annotations.orchestrator.compile_dimensions", _partial)
+            dwg = build_drawing(part, title="T", number="N", detail_view=True)
+
+        detail = {
+            n: getattr(o, "label", None) for n, o in dwg.iter_annotations() if "dim_detail" in n
+        }
+        assert detail, "the fixture must actually place a detail view, or this proves nothing"
+        assert len(detail) <= len(keep), (
+            f"the detail view drew {len(detail)} step dims from a plan approving "
+            f"{len(keep)} — it is rebuilding the ladder from the model: {sorted(detail)}"
+        )
+        approved_labels = {r.label for r in keep}
+        assert set(detail.values()) <= approved_labels, (
+            f"the detail view drew {sorted(set(detail.values()) - approved_labels)}, which "
+            "the compiler did not approve"
         )
 
     def test_the_migration_has_not_silently_stalled(self):

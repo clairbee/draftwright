@@ -707,7 +707,7 @@ def _overall_height_name(dwg, a: Analysis) -> str | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
+def _request_prismatic_detail(dwg, a: Analysis, *, ctx, plan) -> None:
     """Queue a detail of a prismatic part's crowded step-height band (#42), routed
     through the unified pipeline (#307).
 
@@ -730,20 +730,28 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
     `render_step_lengths`, already has.
 
     The redraw re-draws the step-height ladder in the detail view at the
-    enlarged scale."""
-    step = (
-        next(
-            (f for f in dwg.model().features if getattr(f, "kind", None) == "step_level"),
-            None,
-        )
-        if dwg is not None
-        else None
-    )
-    levels = list(getattr(step, "levels", ())) or list(a.step_zs)
-    if len(levels) < 2:
+    enlarged scale — from the **compiled plan**, like the source-view ladder.
+
+    That was the last dimensional bypass of ADR 0016's boundary (#923 review). This
+    function used to re-derive the step feature from ``dwg.model()`` and rebuild the ladder
+    out of ``step.levels`` against ``a.bb.min.Z``, so a rung the compiler withheld still
+    reached the detail view: an approved three-rung plan drew five. Restricting the direct
+    renderer while its escalation reconstructed the same content left the rule true only of
+    the path anyone happened to look at."""
+    rung_set = plan.ladder("step_height")
+    rungs = list(rung_set.rungs) if rung_set is not None else []
+    if len(rungs) < 2:
         return
     if not any(e.kind == "step" and e.reason == "illegible" for e in ctx.escalations):
         return
+    # Both ends off the approved span, never the bounding box: the span is the compiler's
+    # statement of what each rung measures, and the detail must measure the same thing the
+    # source view would have.
+    levels = [r.span[1][2] for r in rungs]
+    datum_z = rungs[0].span[0][2]
+    label_of = {r.span[1][2]: r.label for r in rungs}
+    shoulder_set = plan.ladder("step_position")
+    has_shoulders = shoulder_set is not None
     z0, z1 = min(levels), max(levels)
     pad = 0.08 * (z1 - z0) + 1.0
     band_lo, band_hi = max(a.bb.min.Z, z0 - pad), min(a.bb.max.Z, z1 + pad)
@@ -759,7 +767,14 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
     step_pad = (
         dwg.draft.font_size + dwg.draft.pad_around_text if dwg is not None else _MIN_STEP_SEP_MM
     )
-    x_stations = sorted(pos for axis, pos in getattr(step, "shoulders", ()) if axis == "x")
+    # X stations frame the crowded band — view geometry, but read off the approved
+    # shoulder spans rather than the feature, so nothing here needs the model either. A
+    # shoulder's span varies along its own axis, which is how an X station is recognised.
+    x_stations = sorted(
+        r.span[1][0]
+        for r in (shoulder_set.rungs if shoulder_set is not None else ())
+        if r.span is not None and r.span[0][0] != r.span[1][0]
+    )
     xpad = 0.08 * (x_stations[-1] - x_stations[0]) + 1.0 if len(x_stations) >= 2 else 0.0
 
     def pads(detail_scale):  # one ladder rung per step legible at this scale, + overall
@@ -767,9 +782,9 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
             len(
                 _legible_steps(
                     levels,
-                    a.bb.min.Z,
+                    datum_z,
                     detail_scale,
-                    allow_short=bool(getattr(step, "shoulders", ())),
+                    allow_short=has_shoulders,
                 )[0]
             )
             * step_pad
@@ -784,11 +799,13 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
             px, py = coords.pp(x, y, z)
             return (px, py, 0.0)
 
+        # Legibility at the ENLARGED scale is a placement decision and stays here; what it
+        # filters is the approved set, so it can only ever remove rungs, never add one.
         det_kept, _ = _legible_steps(
             levels,
-            a.bb.min.Z,
+            datum_z,
             detail_scale,
-            allow_short=bool(getattr(step, "shoulders", ())),
+            allow_short=has_shoulders,
         )
         # Projection handedness can put world max-X on the page-left. Anchor
         # the ladder to the actual page-right silhouette, not an assumed world
@@ -803,14 +820,14 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
         )
         anchor_x = max(
             detail_xs,
-            key=lambda x: _at(x, a.cy, a.bb.min.Z)[0],
+            key=lambda x: _at(x, a.cy, datum_z)[0],
         )
-        ladder = _at(anchor_x, a.cy, a.bb.min.Z)[0] + 2
+        ladder = _at(anchor_x, a.cy, datum_z)[0] + 2
         placed = 0
         for i, z in enumerate(det_kept):
-            label = _fmt(z - a.bb.min.Z)
+            label = label_of[z]  # the compiler's label, not a second derivation
             try:
-                p_lo = _at(anchor_x, a.cy, a.bb.min.Z)
+                p_lo = _at(anchor_x, a.cy, datum_z)
                 p_hi = _at(anchor_x, a.cy, z)
                 det_dim = _dim(
                     (ladder, p_lo[1], 0),
@@ -842,7 +859,7 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx) -> None:
             # rise dimensions. Keep that datum in the projected crop so every
             # witness point belongs to visible detail geometry, while ``lo``
             # remains the crowded band marked on the source view.
-            crop_lo=a.bb.min.Z,
+            crop_lo=datum_z,
             cross_axis="x" if len(x_stations) >= 2 else None,
             cross_lo=max(a.bb.min.X, x_stations[0] - xpad) if len(x_stations) >= 2 else None,
             cross_hi=min(a.bb.max.X, x_stations[-1] + xpad) if len(x_stations) >= 2 else None,

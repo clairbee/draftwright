@@ -460,7 +460,9 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # Prismatic step-height detail: queue it (only when build_drawing(detail_view=True))
         # — resolved with every other detail request in the "details" stage (#307).
         if detail_view:
-            _request_prismatic_detail(dwg, a, ctx=ctx)
+            _request_prismatic_detail(
+                dwg, a, ctx=ctx, plan=compile_dimensions(_model, groups=_groups)
+            )
 
     def _s_boss_diameters():
         # Prismatic bosses get a plan-view ø leader BEFORE the turned row/column solve,

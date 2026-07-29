@@ -5727,20 +5727,45 @@ class TestDetailView:
 
         from draftwright.annotations._common import Escalation, PlacementContext
         from draftwright.annotations.sections import _request_prismatic_detail
+        from draftwright.model.compiled import (
+            ApprovedDimension,
+            ApprovedLadder,
+            RenderableDimensionPlan,
+        )
 
         a = SimpleNamespace(
             step_zs=[1.0, 1.1, 1.2, 1.3],  # tightly spaced — "illegible" if recomputed raw
             bb=SimpleNamespace(min=SimpleNamespace(Z=0.0), max=SimpleNamespace(Z=2.0)),
             SCALE=1.0,
         )
+        # The rungs now arrive from the compiled plan (ADR 0016 Amdt 1 / #923): the detail
+        # redraw used to re-derive them from `dwg.model()` and `a.step_zs`, which let it
+        # draw a rung the compiler had withheld. `a.step_zs` is no longer consulted at all —
+        # what this test still pins is the GATE: the escalation, not raw legibility.
+        plan = RenderableDimensionPlan(
+            ladders=(
+                ApprovedLadder(
+                    "step_height",
+                    tuple(
+                        ApprovedDimension(
+                            id=None,
+                            label=str(z),
+                            value=z,
+                            span=((0.0, 0.0, 0.0), (0.0, 0.0, z)),
+                        )
+                        for z in (1.0, 1.1, 1.2, 1.3)
+                    ),
+                ),
+            )
+        )
         no_escalation = PlacementContext()
-        _request_prismatic_detail(None, a, ctx=no_escalation)
+        _request_prismatic_detail(None, a, ctx=no_escalation, plan=plan)
         assert no_escalation.detail_requests == []
 
         with_escalation = PlacementContext(
             escalations=[Escalation(kind="step", view="front", feature=None, reason="illegible")],
         )
-        _request_prismatic_detail(None, a, ctx=with_escalation)
+        _request_prismatic_detail(None, a, ctx=with_escalation, plan=plan)
         assert len(with_escalation.detail_requests) == 1
 
     def test_unplaceable_detail_is_reported_not_silently_dropped(self):
