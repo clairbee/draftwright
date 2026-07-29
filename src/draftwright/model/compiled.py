@@ -217,6 +217,9 @@ _FACTS: dict[str, tuple[str, ...]] = {
     "flat": ("frame", "axis"),
     "groove": ("frame", "axis"),
     "plate": ("frame", "axis"),
+    # Raw AP242 PMI is the documented non-generated exception: its source-authored label
+    # is rendered verbatim rather than planned or suppressible. It is intentionally the
+    # sole printed value in this structural allowlist (ADR 0016, "Scope").
     "pmi": ("frame", "pmi_kind", "dominant_axis", "ref_bbox", "ref_pts", "label"),
     "authored_dimension": ("frame", "dimension_kind", "dominant_axis", "ref_pts", "ref_bbox"),
 }
@@ -589,8 +592,10 @@ def _compile_groups(planned) -> list[ApprovedGroup]:
         approved = tuple(
             ApprovedDimension(
                 id=DimensionId(g.feature, pd.param.parameter_id),
-                label=_fmt(pd.param.value) if pd.param.value is not None else "",
-                value=pd.param.value,
+                # DimParameter.value is a required float. Keep that invariant explicit at
+                # the boundary instead of implying a nullable state renderers cannot handle.
+                label=_fmt(pd.param.value),
+                value=float(pd.param.value),
                 span=pd.param.span,
                 ref=FeatureRef(g.feature),
                 kind=pd.param.kind,

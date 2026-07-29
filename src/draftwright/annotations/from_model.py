@@ -2068,9 +2068,17 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
         for g in plan.of_kind("plate")
         if (pd := g.dim(role="thickness", kind="length")) is not None and pd.span is not None
     ]
-    for g, pd in sorted(
-        plate_groups, key=lambda gp: (gp[0].facts.axis, gp[1].span[0], gp[1].span[1])
-    ):
+
+    # Preserve the pre-boundary stable identity order: axis, then the plate's lower and
+    # upper coordinates ALONG that thin axis. Sorting whole points would compare their
+    # in-plane coordinates first and silently swap dim_plate_{axis}{i} names when two
+    # same-axis plates move sideways (#923 adversarial review).
+    def _plate_order(gp):
+        axis = gp[0].facts.axis
+        idx = "xyz".index(axis)
+        return (axis, gp[1].span[0][idx], gp[1].span[1][idx])
+
+    for g, pd in sorted(plate_groups, key=_plate_order):
         axis = g.facts.axis
         # The span's two ends ARE the plate's lo/hi along its thin axis, and its other two
         # coordinates are the in-plane centroids the witness sits at — `PlateFeature._span`

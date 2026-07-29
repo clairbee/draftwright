@@ -1056,6 +1056,26 @@ class TestPlate:
         assert sorted(plate_dims.values()) == ["8", "8"]  # each 8 thick
         assert [i for i in dwg.lint() if i.severity != "info"] == []
 
+    def test_same_axis_plate_names_follow_thickness_axis_not_in_plane_position(self):
+        """Stable annotation identity follows the old axis/lo/hi order.
+
+        The compiled renderer briefly sorted whole span points, so X/Y coordinates
+        outranked the Z thickness coordinate and moving a plate sideways could swap
+        ``dim_plate_z0`` with ``dim_plate_z1``. A pin/drop would then target its neighbour.
+        """
+        part = Box(200, 60, 40)
+        model = [
+            plate(axis="z", lo=5, hi=9, u=-60, v=0),  # lower in X, but higher in Z
+            plate(axis="z", lo=1, hi=4, u=60, v=0),
+        ]
+        dwg = build_drawing(part, model=model, number="X")
+        labels = {
+            name: dwg.get_annotation(name).label
+            for name in dwg.annotations()
+            if name.startswith("dim_plate_z")
+        }
+        assert labels == {"dim_plate_z0": "3", "dim_plate_z1": "4"}
+
     def test_needs_object_or_explicit(self):
         with pytest.raises(ValueError):
             plate(axis="z", lo=0)  # missing hi / u / v
