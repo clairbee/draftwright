@@ -97,10 +97,10 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 **The rule is the destination. The migration is at its FIRST SLICE, and the inventory
 below is the honest state of it.**
 
-Ten renderers have crossed: `render_height_ladder`, `render_step_positions`,
+Eleven renderers have crossed: `render_height_ladder`, `render_step_positions`,
 `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`,
-`render_boss_diameters`, `render_boss_heights`, and `render_envelope`, plus the prismatic
-detail redraw.
+`render_boss_diameters`, `render_boss_heights`, `render_envelope`, and `render_pockets`,
+plus the prismatic detail redraw.
 Everything else still takes either the legacy `DimensionGroup` surface — where
 `suppressed` remains an advisory boolean a renderer may ignore, which is exactly what eight
 #921 rounds found happening — or the raw model.
@@ -114,8 +114,8 @@ lists, so this inventory cannot drift from the code:
 
 | Contract | Meaning | Renderers |
 |---|---|---|
-| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope` (+ the detail redraw) |
-| `groups` | advisory `suppressed` — **pending** | `render_slots`, `render_diameters`, `render_pockets`, `render_step_lengths`, `render_rotational`, `render_pocket_patterns`, `render_slot_patterns` |
+| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope`, `render_pockets` (+ the detail redraw) |
+| `groups` | advisory `suppressed` — **pending** | `render_slots`, `render_diameters`, `render_step_lengths`, `render_rotational`, `render_pocket_patterns`, `render_slot_patterns` |
 | `model` | raw inventory — **pending**, except PMI | `render_locations` (#883), `render_gdt`, `render_pmi` (permitted) |
 
 Pattern pitch dimensions (`_add_furniture` → `_place_pitch_dim`) are pending too: they are

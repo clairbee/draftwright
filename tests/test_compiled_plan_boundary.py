@@ -410,13 +410,13 @@ class TestTheBoundaryIsLoadBearing:
             "render_grooves",
             "render_height_ladder",
             "render_plates",
+            "render_pockets",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
         assert sorted(by_contract["groups"]) == [
             "render_diameters",
             "render_pocket_patterns",
-            "render_pockets",
             "render_rotational",
             "render_slot_patterns",
             "render_slots",
@@ -443,7 +443,7 @@ class TestTheBoundaryIsLoadBearing:
             / "adr"
             / "0016-declared-dimensioning-intent.md"
         ).read_text(encoding="utf-8")
-        assert "render_rotational" in adr and "render_pockets" in adr, (
+        assert "render_rotational" in adr and "render_step_lengths" in adr, (
             "the ADR's pending inventory stopped naming the advisory-surface renderers — "
             "it must list what has NOT crossed the boundary, not just what has"
         )

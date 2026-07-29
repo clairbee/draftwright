@@ -739,7 +739,7 @@ class TestPocketTolerance:
             ),
         )
         ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-        assert render_pockets(dwg, [g2], dwg._analysis, ctx=ctx) == 1
+        assert render_pockets(dwg, _plan_of(g2), dwg._analysis, ctx=ctx) == 1
         labels = [
             dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_pocket")
         ]

@@ -180,7 +180,7 @@ class ApprovedDimension:
 _FACTS: dict[str, tuple[str, ...]] = {
     "hole": ("frame", "through", "count", "members", "thread"),
     "pattern": ("frame", "pattern", "count", "member", "members", "direction", "rows", "cols"),
-    "pocket": ("frame", "width_axis", "long_axis", "edge_anchored"),
+    "pocket": ("frame", "width_axis", "long_axis", "depth_axis", "edge_anchored"),
     "pocket_pattern": (
         "frame",
         "pattern",

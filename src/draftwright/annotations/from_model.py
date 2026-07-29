@@ -1760,7 +1760,7 @@ def _leader_hole_clearance(
     return min(clearances)
 
 
-def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
+def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
     """Blind-recess callouts (#148a): a leader from each floored slot/pocket to its
     ``W × L × D DEEP`` label, in the view normal to the recess opening (a Z-depth pocket
     reads in the plan, an X-depth in the side, a Y-depth in the front). A pocket sits
@@ -1778,21 +1778,19 @@ def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
     view_of = {"z": "plan", "x": "side", "y": "front"}
-    pocket_groups = [g for g in groups if g.feature_kind == "pocket"]
+    pocket_groups = list(plan.of_kind("pocket"))
     jobs = []
     for i, g in enumerate(
-        sorted(pocket_groups, key=lambda g: (g.feature.width_axis, g.feature.frame.origin))
+        sorted(pocket_groups, key=lambda g: (g.facts.width_axis, g.facts.frame.origin))
     ):
-        pk = g.feature
-        if only is not None and pk not in only:
+        pk = g.facts
+        if only is not None and g.ref not in only:
             continue  # #426 Ph2b subset (finalize): skip in place — i stays the model index
-        by_key = {(pd.param.role, pd.param.kind): pd for pd in g.dims}
+        by_key = {(pd.role, pd.kind): pd for pd in g.dims}
         wpd = by_key.get(("pocket_width", "length"))
         lpd = by_key.get(("pocket_length", "length"))
         dpd = by_key.get(("pocket_depth", "length"))
         if wpd is None or lpd is None or dpd is None:
-            continue
-        if wpd.suppressed or lpd.suppressed or dpd.suppressed:
             continue
         view = view_of.get(pk.depth_axis)
         if view is None:
@@ -1806,12 +1804,12 @@ def render_pockets(dwg, groups, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _pocket_label(
-                    wpd.param.value,
-                    lpd.param.value,
-                    dpd.param.value,
-                    wsfx=_tol_suffix(wpd.param.tolerance, draft),
-                    lsfx=_tol_suffix(lpd.param.tolerance, draft),
-                    dsfx=_tol_suffix(dpd.param.tolerance, draft),
+                    wpd.value,
+                    lpd.value,
+                    dpd.value,
+                    wsfx=_tol_suffix(wpd.tolerance, draft),
+                    lsfx=_tol_suffix(lpd.tolerance, draft),
+                    dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
                 _radial_candidates(dwg, view, vb, pk, reach),
             )

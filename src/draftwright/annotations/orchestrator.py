@@ -431,7 +431,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_pockets():
         # Blind-recess callouts (#148a): W × L × D DEEP via a leader off each floored pocket.
         # Planner-fed (#728): consumes the DimensionGroups so authored tolerances render.
-        render_pockets(dwg, _groups, a, ctx=ctx)
+        render_pockets(dwg, _compiled, a, ctx=ctx)
 
     def _s_pocket_patterns():
         # Grouped blind-pocket-array callouts (#841): ONE count× W × L × D DEEP leader + the
