@@ -253,9 +253,11 @@ construction.)
 
 ### Coverage honesty (accepted)
 
-Kinds with no declarative verb yet (`step_level`, `rotational`, `pmi`) are **flagged inline** as
-auto-dimensioned, never silently dropped — matching the fail-loud discipline of the constructors
-(#452). Growing verbs for them is follow-up, not a blocker.
+Kinds with no declarative verb yet are **flagged inline** as auto-dimensioned, never silently
+dropped — matching the fail-loud discipline of the constructors (#452). Growing verbs for them is
+follow-up, not a blocker. *(As written this listed `step_level`, `rotational` and `pmi`; all three
+have verbs now — `rotational` last, in #945, which closed the geometric round trip. The rule
+stands for whatever kind arrives next.)*
 
 Tracked by **#461** (the emitter), **#462** (object-reading aspects → number-free 3b), **#463**
 (`sheet.of(feature)` → decorate a generated feature). Sequenced **before** the P2b GD&T work: the

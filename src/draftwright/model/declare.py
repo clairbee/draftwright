@@ -8,7 +8,8 @@ geometry, unreliable (cf. #298). These constructors turn a known build123d objec
 can hand a ``model=[...]`` to :func:`draftwright.build_drawing` (or a
 :class:`draftwright.Sheet`) and skip detection.
 
-Every constructor has two flavours:
+Every constructor has two flavours (with one deliberate exception, :func:`rotational`, which is
+explicit-only — see its docstring and #950):
 
 - **reference an object** — ``hole(tool_cylinder)`` reads the geometry (⌀ from the
   cylindrical *face*, axis + location from the bounding box); or
@@ -621,6 +622,7 @@ def rotational(*, od, bores=(), at=None, axis=None) -> RotationalFeature:
     centred leader. ``at`` is a point on the rotation axis (default the origin).
     """
     _positive("rotational() od=", od)
+    bores = tuple(bores)  # materialise once: a generator would validate empty and store empty
     for b in bores:
         _positive("rotational() bores=", b)
     axis = _norm_axis(axis if axis is not None else "z")

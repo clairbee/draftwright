@@ -1796,6 +1796,18 @@ class TestRotationalDeclaration:
         with pytest.raises(ValueError, match="no 'depth.length' measurement"):
             sheet.dimension(handle, "depth.length")
 
+    def test_bores_may_be_any_iterable(self):
+        """A one-shot iterable validated in one pass and stored in another stores nothing:
+        `bores=iter([16, 8])` produced `()` — the exact silent-bore-loss this verb exists to
+        prevent, arriving by a different route (#949 review). `step_level` materialises its
+        `levels` first for the same reason."""
+        from draftwright.model import rotational
+
+        assert rotational(od=30, bores=iter([16, 8])).bores == (16.0, 8.0)
+        assert rotational(od=30, bores=(b for b in (16, 8))).bores == (16.0, 8.0)
+        with pytest.raises(ValueError):
+            rotational(od=30, bores=iter([16, -8]))
+
     def test_bad_values_raise(self):
         from draftwright.model import rotational
 

@@ -221,8 +221,9 @@ class TestPlannerDecorations:
     def test_rotational_role_keyed_od_vs_bore_tolerance(self):
         # #746/#754: a rotational's OD and bores all share kind "diameter"; a role-keyed
         # decoration tolerances the OD (role "od") independently of the bores (role
-        # "bore"). RotationalFeature is detection-only, so this is authored via the raw
-        # decorations map (no Sheet handle) — the engine-level unlock behind #754.
+        # "bore"). Authored here via the raw decorations map — the engine-level unlock behind
+        # #754. (Since #945 there is also a `sheet.rotational(...)` handle; this test stays on
+        # the raw map because the engine-level fold is what it is checking.)
         from draftwright.model.ir import Frame, RotationalFeature
 
         rot = RotationalFeature(frame=Frame((0.0, 0.0, 0.0), "z"), od=30.0, bores=(8.0, 5.0))
