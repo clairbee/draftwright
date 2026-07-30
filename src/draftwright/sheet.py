@@ -68,6 +68,7 @@ from draftwright.model import pattern as _pattern
 from draftwright.model import plate as _plate
 from draftwright.model import pocket as _pocket
 from draftwright.model import pocket_pattern as _pocket_pattern
+from draftwright.model import rotational as _rotational
 from draftwright.model import slot as _slot
 from draftwright.model import slot_pattern as _slot_pattern
 from draftwright.model import step as _step
@@ -1028,6 +1029,19 @@ class Sheet:
         lo=0, hi=4, u=10, v=5)``. Only a *multi-plate* part dimensions plates (a single slab is
         the envelope)."""
         self._features.append(_plate(obj, **kw))
+        return _Params(self, len(self._features) - 1)
+
+    def rotational(self, **kw) -> _Params:
+        """Declare a turned body's axial furniture — OD, rotation axis, concentric bores
+        (#945): ``sheet.rotational(od=30, bores=(16,), axis="z")``.
+
+        The last recognised kind without a declarative surface, which is why a generated
+        script for a turned part could not declare its dimensions at all (#938).
+
+        Keyword-only, unlike its object-capable siblings — see
+        :func:`draftwright.model.rotational` for why an object form would disagree with
+        detection (#950)."""
+        self._features.append(_rotational(**kw))
         return _Params(self, len(self._features) - 1)
 
     def step_level(self, obj=None, **kw) -> _Params:

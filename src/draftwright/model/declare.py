@@ -8,7 +8,8 @@ geometry, unreliable (cf. #298). These constructors turn a known build123d objec
 can hand a ``model=[...]`` to :func:`draftwright.build_drawing` (or a
 :class:`draftwright.Sheet`) and skip detection.
 
-Every constructor has two flavours:
+Every constructor has two flavours (with one deliberate exception, :func:`rotational`, which is
+explicit-only — see its docstring and #950):
 
 - **reference an object** — ``hole(tool_cylinder)`` reads the geometry (⌀ from the
   cylindrical *face*, axis + location from the bounding box); or
@@ -49,6 +50,7 @@ from draftwright.model.ir import (
     PocketFeature,
     PocketPatternFeature,
     Point,
+    RotationalFeature,
     SlotFeature,
     SlotPatternFeature,
     StepFeature,
@@ -591,6 +593,50 @@ def _read_plate(obj) -> tuple[str, float, float, float, float]:
         round(span[i][1], 4),
         round(c[oi[0]], 4),
         round(c[oi[1]], 4),
+    )
+
+
+def rotational(*, od, bores=(), at=None, axis=None) -> RotationalFeature:
+    """A turned body's axial furniture — its outer diameter, rotation axis and concentric
+    bores (#945). **Explicit values only:** ``rotational(od=30, bores=(16,), axis="z")``.
+
+    The last recognised kind with no declarative surface, which made it the last ADR 0011
+    round-trip gap (epic #574). Its absence was load-bearing rather than cosmetic: a
+    `RotationalFeature` carries planned dimensions (`od`, each `bore`), so a generated script
+    could not name them, and the dimension mirror fell back to `auto_dimensions()` for the
+    whole part — one unsupported feature turning every other declaration in that script from
+    explicit back to implicit (#938).
+
+    **There is deliberately no object form**, unlike every sibling verb — the signature is
+    keyword-only so `rotational(shaft)` is rejected by Python rather than accepted and then
+    guessed at. An object form would have to re-derive the OD, the axis AND the concentric
+    bores from geometry, and detection does not read those off the solid: they come from the
+    part CLASSIFICATION (`analysis._classify_geometry` / `_sizing_bores`), which also decides
+    which concentric bores are sizing bores. A declare-side reimplementation would be a second
+    inference path for one fact, and the first cut proved the point — it silently dropped
+    every bore and picked the wrong axis for a cylinder as long as it is wide (#949 review).
+    A convenient object form that quietly changes the drawing is worse than an explicit one.
+    Restoring it needs the classification factored into something both sides call — #950.
+
+    ``bores`` are concentric bore diameters in display order, each placed as a centred leader,
+    and are **Z-axis only** — a rule :class:`~draftwright.model.ir.RotationalFeature` owns and
+    states, since every route into the IR needs it. ``at`` is a point on the rotation axis
+    (default the origin); it is carried for round-trip identity and does not itself position
+    the furniture, which the renderer places from the part's projected centre (#952).
+    """
+    _positive("rotational() od=", od)
+    bores = tuple(bores)  # materialise once: a generator would validate empty and store empty
+    for b in bores:
+        _positive("rotational() bores=", b)
+    axis = _norm_axis(axis if axis is not None else "z")
+    # Bores-are-Z-only is NOT restated here: `RotationalFeature.__post_init__` owns it, so the
+    # raw-IR route through `Sheet.add`/`build_drawing(model=…)` gets the same answer (#949 r5).
+    origin = (0.0, 0.0, 0.0) if at is None else at
+    _require_point("at", origin)
+    return RotationalFeature(
+        frame=Frame(origin=(float(origin[0]), float(origin[1]), float(origin[2])), axis=axis),
+        od=float(od),
+        bores=tuple(float(b) for b in bores),
     )
 
 

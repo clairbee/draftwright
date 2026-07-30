@@ -1738,3 +1738,128 @@ class TestAuthoredDimension:
             ).dominant_axis
             == "?"
         )
+
+
+class TestRotationalDeclaration:
+    """`rotational()` — the last recognised kind to gain a declarative surface (#945).
+
+    Tested through the PUBLIC verb, which is where #949's review found both defects: the
+    corpus tests exercised detected-IR → emitted-numeric-line → rebuilt-IR, a path that
+    faithfully copies existing fields and therefore could not see either. 170 tests passed
+    while `rotational(part)` dropped every bore and picked the wrong axis.
+    """
+
+    def test_the_explicit_form_round_trips_every_field(self):
+        from draftwright.model import rotational
+
+        feature = rotational(od=30, bores=(16.0, 8.0), at=(0, 0, 5), axis="z")
+        assert feature.od == 30.0
+        assert feature.bores == (16.0, 8.0), "bore ORDER is display order, not a set"
+        assert feature.frame.axis == "z"
+        assert feature.frame.origin == (0.0, 0.0, 5.0)
+        assert rotational(od=30, axis="X").frame.axis == "x", "the axis is normalised"
+        assert [p.parameter_id for p in feature.parameters()] == [
+            "od.diameter",
+            "bore.diameter",
+            "bore.diameter",
+        ]
+
+    def test_neither_surface_accepts_an_object(self):
+        """Keyword-only on purpose. The verb cannot derive the OD, axis or sizing bores from
+        geometry — detection reads none of them off the solid, they come from the part
+        classification — and the first cut proved that guessing is silent, not loud: it
+        dropped every bore and picked the wrong axis (#949 review). So the signature refuses
+        the call rather than the body refusing the object, and BOTH surfaces refuse: `Sheet`
+        is where a user reaching for `sheet.hole(obj)`'s shape would try it."""
+        from build123d import Box, Cylinder
+
+        from draftwright import Sheet
+        from draftwright.model import rotational
+
+        with pytest.raises(TypeError):
+            rotational(Cylinder(15, 40))
+        with pytest.raises(TypeError):
+            Sheet(Box(80, 60, 20)).rotational(Cylinder(15, 40))
+
+    def test_the_sheet_verb_declares_a_dimensionable_feature(self):
+        """The point of #945: a turned part's OD and bores become *nameable*, so a generated
+        script can author them instead of falling back to `auto_dimensions()` (#938). Asserted
+        as role RESOLUTION through the public verb rather than as what got stored — the roles
+        a declared feature answers to are the contract, the storage is not."""
+        from build123d import Box
+
+        from draftwright import Sheet
+
+        sheet = Sheet(Box(80, 60, 20))
+        handle = sheet.rotational(od=30, bores=(16,), axis="z")
+        sheet.dimension(handle, "od.diameter")
+        sheet.dimension(handle, "bore.diameter")
+        with pytest.raises(ValueError, match="no 'depth.length' measurement"):
+            sheet.dimension(handle, "depth.length")
+
+    def test_bores_may_be_any_iterable(self):
+        """A one-shot iterable validated in one pass and stored in another stores nothing:
+        `bores=iter([16, 8])` produced `()` — the exact silent-bore-loss this verb exists to
+        prevent, arriving by a different route (#949 review). `step_level` materialises its
+        `levels` first for the same reason."""
+        from draftwright.model import rotational
+
+        assert rotational(od=30, bores=iter([16, 8])).bores == (16.0, 8.0)
+        assert rotational(od=30, bores=(b for b in (16, 8))).bores == (16.0, 8.0)
+        with pytest.raises(ValueError):
+            rotational(od=30, bores=iter([16, -8]))
+
+    def test_bores_are_refused_on_a_non_z_axis_by_every_route(self):
+        """Accept-and-drop had a second door: a `RotationalFeature` carries bores only when
+        turned about Z, so `bores=` with axis="x" planned `bore.diameter` dimensions that
+        mirrored into a generated script and then drew NOTHING, lint clean (#949 r4). On a
+        cross-axis part the hole pass dimensions the bore instead.
+
+        Asserted through all three routes because the first fix guarded only the constructor,
+        which left the sanctioned ADR 0011 raw-IR route open AND let the emitter write a line
+        `declare` would reject (#949 r5). The rule lives on the IR type, so there is one
+        answer rather than one per entrance."""
+        from build123d import Box
+
+        from draftwright import Sheet
+        from draftwright.model import rotational
+        from draftwright.model.ir import Frame, RotationalFeature
+
+        for axis in ("x", "y"):
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                rotational(od=30, bores=(10,), axis=axis)  # the declare verb
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                RotationalFeature(Frame((0, 0, 0), axis), od=30.0, bores=(10.0,))  # raw IR
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                Sheet(Box(80, 60, 20)).rotational(od=30, bores=(10,), axis=axis)
+        rotational(od=30, bores=(), axis="x")  # a bore-less cross-axis rotational is fine
+
+    def test_the_rule_is_stated_once(self):
+        """ADR 0016's deletion discipline: two places that DECIDE one fact is the defect. The
+        declare verb must not restate the Z-only rule the IR type owns — a second copy is how
+        the two drift apart under a case neither author tried."""
+        import ast
+        import inspect
+        import textwrap
+
+        from draftwright.model import declare
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(declare.rotational)))
+        raises = [
+            ast.unparse(n)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Raise) and "bore" in ast.unparse(n)
+        ]
+        assert not raises, (
+            f"declare.rotational restates a bore rule the IR type owns: {raises}. Asserted as "
+            "'no raise about bores' rather than as a docstring phrase — the verb may DESCRIBE "
+            "the restriction, it just may not be a second place that DECIDES it."
+        )
+
+    def test_bad_values_raise(self):
+        from draftwright.model import rotational
+
+        with pytest.raises(ValueError):
+            rotational(od=-1)
+        with pytest.raises(ValueError):
+            rotational(od=30, bores=(0,))

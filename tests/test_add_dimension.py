@@ -1185,6 +1185,7 @@ class TestEveryFeatureVerbIsNameable:
         "groove": dict(axis="z", width=3, diameter=16, at=(0, 0, 0)),
         "plate": dict(axis="z", lo=0, hi=4, u=10, v=5),
         "step_level": dict(base=0, levels=(4.0,), at=(0, 0, 0)),
+        "rotational": dict(od=30, bores=(16,), at=(0, 0, 0), axis="z"),
         "measured_dimension": dict(
             kind="linear", value=5, label="5", dominant_axis="X", ref_pts=((0, 0, 0), (5, 0, 0))
         ),

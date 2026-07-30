@@ -219,6 +219,7 @@ _SAME_PATH_AS_ENVELOPE = {
     "pattern",
     "pocket_pattern",
     "slot_pattern",
+    "rotational",  # #945 — same two lines; keyword-only, but identity handling is unaffected
 }
 
 

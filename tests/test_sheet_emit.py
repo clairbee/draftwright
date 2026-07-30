@@ -1625,22 +1625,43 @@ class TestAuthoredSetRoundTrips:
             assert "sheet.authored_dimensions()" in src
 
     def test_an_authored_dimension_on_an_unnameable_feature_refuses_the_script(self):
-        """Narrowed, not removed. A kind with no declarative verb emits a COMMENT, so it
-        binds no name and the declaration has nothing to reference. Emitting the rest would
-        produce a script that draws a different set — exactly what the blanket refusal
-        prevented, so the refusal survives for that case alone."""
+        """Narrowed, not removed. A kind with no declarative verb emits a COMMENT, so it binds
+        no name and the declaration has nothing to reference. Emitting the rest would produce
+        a script that draws a different set — exactly what the blanket refusal prevented.
+
+        Driven SYNTHETICALLY since #945. This used `rotational`, which was then the one kind
+        carrying planned dimensions without a declarative verb; giving it that verb left no
+        real model able to reach the branch — the remaining comment-only kinds are aspects
+        (`control_frame`, `datum_ref`, `finish`, `note`), which carry no `DimParameter`, so
+        `_check_authored_targets` rejects an authored dimension on them first.
+
+        The branch is kept and tested rather than deleted: it is defensive against a FUTURE
+        kind arriving with parameters and no verb, which is exactly how `rotational` looked
+        until this release. Constructing the situation directly is the honest way to keep
+        proving it, instead of waiting for a fixture that no longer qualifies.
+        """
         import dataclasses
 
-        from build123d import Cylinder
+        from build123d import Box
 
+        from draftwright import sheet_emit
         from draftwright.model.ir import RequestedDimension
 
-        model = detect_part_model(Cylinder(15, 40))
-        rot = next((f for f in model.features if f.kind == "rotational"), None)
-        assert rot is not None, "the fixture must produce a verb-less kind"
-        model = dataclasses.replace(model, authored_dimensions=(RequestedDimension(rot, "od"),))
-        with pytest.raises(ValueError, match="has no declarative verb"):
-            emit_sheet_script(model, "part", "bracket", title="T", number="N")
+        model = detect_part_model(Box(80, 50, 8))
+        env = next(f for f in model.features if f.kind == "envelope")
+        model = dataclasses.replace(
+            model, authored_dimensions=(RequestedDimension(env, "width.length"),)
+        )
+        # Make the envelope unnameable the way a verb-less kind is: its line becomes a comment.
+        real = sheet_emit._feature_line
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                sheet_emit,
+                "_feature_line",
+                lambda f: "# envelope — no declarative verb" if f is env else real(f),
+            )
+            with pytest.raises(ValueError, match="has no declarative verb"):
+                emit_sheet_script(model, "part", "bracket", title="T", number="N")
 
 
 class TestTheDimensionMirror:
@@ -1687,6 +1708,11 @@ class TestTheDimensionMirror:
             # now makes that failure loud instead of invisible.
             "side-drilled": Box(12, 40, 30) - Pos(0, 8, 6) * Rot(0, 90, 0) * Cylinder(3, 12),
             "boss": Box(80, 60, 12) + Pos(0, 0, 12) * Cylinder(10, 8),
+            # Turned parts joined the corpus with #945: `rotational` gained a declarative
+            # verb, so they mirror their dimensions instead of falling back. Contiguous on
+            # purpose — a disconnected profile is a separate, unrelated defect (#943).
+            "turned shaft": Cylinder(15, 20) + Pos(0, 0, 17.5) * Cylinder(10, 15),
+            "bored flange": Cylinder(40, 8) - Cylinder(8, 20),
         }
 
     @staticmethod
@@ -1710,6 +1736,8 @@ class TestTheDimensionMirror:
         "bare block": {"envelope"},
         "side-drilled": {"hole"},
         "boss": {"boss"},
+        "turned shaft": {"rotational", "step"},
+        "bored flange": {"rotational"},
     }
 
     @pytest.mark.parametrize("name", sorted(_corpus()))
@@ -1799,42 +1827,27 @@ class TestTheDimensionMirror:
         src = emit_sheet_script(detect_part_model(part), "part", "s", title="T", number="N")
         assert src.count("step_height") == 1
 
-    def test_a_model_with_an_unnameable_feature_keeps_the_planner_source(self):
-        """A feature with no declarative verb binds no name, so its dimensions cannot be
-        mirrored — and declaring only the OTHERS would emit a set claiming a completeness it
-        does not have.
+    def test_a_model_the_emitter_cannot_fully_name_keeps_the_planner_source(self):
+        """The fallback still exists, and is still reachable — just not by `rotational`.
 
-        **This pins UNFINISHED work, not a settled limitation.** `RotationalFeature` is
-        recognised and rendered but cannot be declared or emitted — the missing ADR 0011
-        round-trip leg, tracked as #945. Until it lands, a turned part gets none of #938's
-        benefit: one unsupported dimension turns every other declaration in that script from
-        explicit back to implicit (#944 review). The test asserts the fallback SAYS so, and
-        names the issue, so a reader meets the gap rather than inferring a decision.
+        This asserted a turned part fell back, which #945 fixed by giving `rotational` a
+        declarative verb. The PROPERTY is unchanged and still worth guarding: a model with any
+        dimension no line can name keeps `auto_dimensions()`, because declaring only the
+        others would claim a completeness it does not have. Driven synthetically now, since
+        no detected part currently reaches it — which is itself the point, and why the message
+        no longer blames #945 unconditionally.
         """
-        from build123d import Cylinder
+        from build123d import Box
 
-        part = Cylinder(40, 8) - Cylinder(8, 20)
-        model = detect_part_model(part)
-        assert any(f.kind == "rotational" for f in model.features), "fixture must hit the gap"
-        src = emit_sheet_script(model, "part", "s", title="T", number="N")
+        from draftwright import sheet_emit
+
+        model = detect_part_model(Box(80, 50, 8))
+        # Starve the request builder: every compiled dimension becomes unmirrorable.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sheet_emit, "_mirrored_requests", lambda *_a, **_kw: [])
+            src = emit_sheet_script(model, "part", "s", title="T", number="N")
         assert "sheet.auto_dimensions()" in src
-        assert "rotational has no" in src, "the fallback must NAME the unnameable kind"
-        assert "draftwright#945" in src, "and point at the work that removes it"
-
-    def test_the_fallback_names_the_gap_the_tracker_still_carries(self):
-        """A pointer to a closed issue reads as a settled decision. If #945 lands, the
-        fallback and this test go with it — this fails first if the reference goes stale
-        without the code changing."""
-        from build123d import Cylinder
-
-        src = emit_sheet_script(
-            detect_part_model(Cylinder(40, 8) - Cylinder(8, 20)),
-            "part",
-            "s",
-            title="T",
-            number="N",
-        )
-        assert "sheet.auto_dimensions()" in src and "draftwright#945" in src
+        assert "the emitter has no line for" in src, "the fallback must NAME what escaped"
 
     def test_the_synthesised_envelope_names_only_its_height(self):
         """A part with no `EnvelopeFeature` gets one declared, because an authored set must
@@ -1866,6 +1879,7 @@ class TestTheDimensionMirror:
 #: name in front of them.
 _SCRIPT_FURNITURE = {
     "m_cm": "centre marks — sized off the hole they mark, not a printed value (#875)",
+    "centerline_front": "shows where the front view's axis is; no measurement",
     "centerline_plan": "shows where the plan view's axis is; no measurement",
     "centerline_side": "shows where the side view's axis is; no measurement",
     "bc_": "a bolt circle's centreline — geometry, like a centre mark",
@@ -1930,7 +1944,7 @@ _KIND_MIRROR_COVERAGE = {
     "pocket": "corpus",
     "pad": "corpus",
     "envelope": "corpus",
-    "rotational": "unnameable — no declarative verb (#945)",
+    "rotational": "corpus",
     "pmi": "unnameable — raw AP242, emitted as sheet.add(PmiFeature(...)) (ADR 0016)",
     "chamfer": "untested — no corpus fixture detects one (#948)",
     "fillet": "untested — no corpus fixture detects one (#948)",
