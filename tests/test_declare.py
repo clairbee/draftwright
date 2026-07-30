@@ -1738,3 +1738,68 @@ class TestAuthoredDimension:
             ).dominant_axis
             == "?"
         )
+
+
+class TestRotationalDeclaration:
+    """`rotational()` — the last recognised kind to gain a declarative surface (#945).
+
+    Tested through the PUBLIC verb, which is where #949's review found both defects: the
+    corpus tests exercised detected-IR → emitted-numeric-line → rebuilt-IR, a path that
+    faithfully copies existing fields and therefore could not see either. 170 tests passed
+    while `rotational(part)` dropped every bore and picked the wrong axis.
+    """
+
+    def test_the_explicit_form_round_trips_every_field(self):
+        from draftwright.model import rotational
+
+        feature = rotational(od=30, bores=(16.0, 8.0), at=(0, 0, 5), axis="x")
+        assert feature.od == 30.0
+        assert feature.bores == (16.0, 8.0), "bore ORDER is display order, not a set"
+        assert feature.frame.axis == "x"
+        assert feature.frame.origin == (0.0, 0.0, 5.0)
+        assert [p.parameter_id for p in feature.parameters()] == [
+            "od.diameter",
+            "bore.diameter",
+            "bore.diameter",
+        ]
+
+    def test_the_object_form_refuses_rather_than_guessing(self):
+        """It would have to re-derive the OD, axis and sizing bores from geometry, and
+        detection reads none of those off the solid — they come from the part
+        classification. The first cut guessed and was wrong twice, silently (#949 review)."""
+        from build123d import Cylinder
+
+        from draftwright.model import rotational
+
+        with pytest.raises(ValueError, match="takes explicit values, not an object"):
+            rotational(Cylinder(15, 40))
+
+    def test_the_refusal_names_the_work_that_would_lift_it(self):
+        """A refusal with no route out reads as a permanent limitation. This one is a
+        deferral, and #950 is where the shared classification lands."""
+        from build123d import Cylinder
+
+        from draftwright.model import rotational
+
+        with pytest.raises(ValueError, match="#950"):
+            rotational(Cylinder(15, 40))
+
+    def test_the_sheet_verb_declares_and_names_the_feature(self):
+        from build123d import Box
+
+        from draftwright import Sheet
+
+        sheet = Sheet(Box(80, 60, 20))
+        handle = sheet.rotational(od=30, bores=(16,), axis="z")
+        assert handle is not sheet, "every declaration verb hands back a reference (#931)"
+        declared = sheet.features[handle._i]
+        assert declared.kind == "rotational" and declared.bores == (16.0,)
+        sheet.dimension(handle, "od.diameter")  # nameable — the point of #945
+
+    def test_bad_values_raise(self):
+        from draftwright.model import rotational
+
+        with pytest.raises(ValueError):
+            rotational(od=-1)
+        with pytest.raises(ValueError):
+            rotational(od=30, bores=(0,))

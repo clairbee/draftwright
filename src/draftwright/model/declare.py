@@ -597,26 +597,37 @@ def _read_plate(obj) -> tuple[str, float, float, float, float]:
 
 def rotational(obj=None, *, od=None, bores=(), at=None, axis=None) -> RotationalFeature:
     """A turned body's axial furniture — its outer diameter, rotation axis and concentric
-    bores (#945). Either ``rotational(shaft)`` — the OD and axis read off the object — or
-    explicit ``rotational(od=30, bores=(16,), axis="z")``.
+    bores (#945). **Explicit values only:** ``rotational(od=30, bores=(16,), axis="z")``.
 
     The last recognised kind with no declarative surface, which made it the last ADR 0011
     round-trip gap (epic #574). Its absence was load-bearing rather than cosmetic: a
     `RotationalFeature` carries planned dimensions (`od`, each `bore`), so a generated script
-    could not name them, and the dimension mirror had to fall back to `auto_dimensions()` for
-    the whole part — one unsupported feature turning every other declaration in that script
-    from explicit back to implicit (#938).
+    could not name them, and the dimension mirror fell back to `auto_dimensions()` for the
+    whole part — one unsupported feature turning every other declaration in that script from
+    explicit back to implicit (#938).
+
+    **There is deliberately no object form**, unlike every sibling verb. `rotational(shaft)`
+    would have to re-derive the OD, the axis AND the concentric bores from geometry, and
+    detection does not read those off the solid — they come from the part CLASSIFICATION,
+    which also decides which bores are sizing bores. A declare-side reimplementation would be
+    a second inference path for one fact, and the first cut proved the point: it silently
+    dropped every bore and picked the wrong axis for a cylinder as long as it is wide (#949
+    review). A convenient object form that quietly changes the drawing is worse than an
+    explicit one. Restoring it needs the classification factored into something both sides
+    call — tracked as #950.
 
     ``bores`` are concentric bore diameters in display order; the renderer places each as a
     centred leader. ``at`` is a point on the rotation axis (default the origin).
     """
     if obj is not None:
-        r_axis, r_od, r_center = _read_cylinder(obj)
-        axis = r_axis if axis is None else axis
-        od = r_od if od is None else od
-        at = r_center if at is None else at
+        raise ValueError(
+            "rotational() takes explicit values, not an object: the OD, axis and concentric "
+            "bores come from the part classification rather than from the solid, so reading "
+            "them here would disagree with detection (it dropped bores and mis-picked the "
+            "axis). Pass od=, bores=, axis= and at= — see #950."
+        )
     if od is None:
-        raise ValueError("rotational() needs a turned object, or an explicit od=")
+        raise ValueError("rotational() needs an explicit od=")
     _positive("rotational() od=", od)
     for b in bores:
         _positive("rotational() bores=", b)
