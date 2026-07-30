@@ -192,6 +192,9 @@ class _IntentRouting:
     len_ids: set
     slot_ids: set
     height_ladder_ids: set
+    #: `Drawing.overall_height()` intents — the bbox-fallback overall height, which has no
+    #: feature to hang a `dimension(...)` intent on (#889).
+    overall_height_ids: set
     step_position_ids: set
     explicit_envelope_height: bool
     user_dim_ids: set
@@ -1212,6 +1215,68 @@ class Drawing:
             self, feature, self._part_model, self._analysis, view=view, name=name, ctx=ctx
         )
 
+    def overall_height(self) -> list[str]:
+        """Add the part's **overall height** — the one dimension with no feature to name.
+
+        Every other add verb takes a feature, because every other dimension belongs to one.
+        The overall height usually does too: a model with an `EnvelopeFeature` carries a
+        `height` parameter, and `dimension(env, "length", role="height")` is the verb for it.
+
+        A model WITHOUT one still gets an overall height — the compiler falls back to the
+        bounding box, which is a decision only the compiler may make (`_compile_overall_height`).
+        There is then no feature to record an intent against, so an intent-level script had no
+        way to say "and the 46 mm overall height", and a generated script replayed without it,
+        silently and lint-clean (#889).
+
+        This verb is that line. It is deliberately NOT "draw it whenever the compiler approves
+        one": `auto_dims=False` means the verbs are the whole drawing, so a dimension nobody
+        recorded must not appear — record-then-finalize has to equal placing live.
+
+        Returns the placed names (empty when the compiler withholds the height — a Z-turned
+        part whose step chain already tiles it, or an X/Y rotational OD that conveys it).
+        """
+        model, a = self._part_model, self._analysis
+        # BEFORE the deferred/live split, so both routes refuse identically — the shape #925
+        # settled for `callout()`: a check on one side of that split makes the answer depend
+        # on whether you are inside `deferred()`.
+        if model is not None and any(f.kind == "envelope" for f in model.features):
+            # This verb exists ONLY for the featureless fallback. On an enveloped model the
+            # measurement already has a feature to name, and supporting both spellings gave
+            # two: live, `overall_height()` then `dimension(env, …, role="height")` drew the
+            # 30 mm height TWICE, while the reverse order and the deferred route drew it once
+            # (`explicit_envelope_height` removes the overall ladder from the compile). Order-
+            # dependent live and live ≠ deferred, from composing two public spellings of one
+            # measurement — the "three spellings of pin" problem (#906) in miniature (#934
+            # review). One measurement, one verb.
+            raise ValueError(
+                "overall_height(): this model declares an envelope, so its height has a "
+                'feature to name — use dimension(envelope, "length", role="height"). This '
+                "verb is for a model with NO envelope feature, where the height comes from "
+                "the bounding box and there is nothing to name."
+            )
+        if self._defer_intents:  # #426: record, don't place — finalize() drains it
+            self._intents.append(Intent("overall_height", None, {}))
+            return []
+        if model is None or a is None:
+            raise ValueError("overall_height(): no detected model — build the drawing first")
+        from draftwright._core import layout_frame
+        from draftwright.annotations._common import drain_corridors
+        from draftwright.annotations.from_model import ladder_plan_for, render_height_ladder
+        from draftwright.model.compiled import compile_dimensions
+
+        before = set(self.annotations())
+        ctx = PlacementContext(registry=self._registry, coverage=self._coverage, items=self.items)
+        # ONLY the overall height: the renderer also draws the step ladder, which is a
+        # different intent with its own verb. The drain projects the plan with the same
+        # helper, so the two routes cannot disagree about what was asked for (#934 review).
+        plan = ladder_plan_for(compile_dimensions(model), step_height=False, overall=True)
+        if plan.ladder("overall_height") is not None:
+            render_height_ladder(
+                self, plan, layout_frame(a), ctx=ctx, detail_view=self._build.detail_view
+            )
+            drain_corridors(ctx, self)
+        return sorted(set(self.annotations()) - before)
+
     def furniture(self, feature, *, view=None) -> list[str]:
         """Add a hole/pattern's non-dimensional **sheet furniture** (#419) — centre marks
         (every member) plus a pattern's centre-cross (bolt circle) or pitch/grid dims.
@@ -1448,6 +1513,7 @@ class Drawing:
             and it.kwargs.get("param") == "length"
             and it.kwargs.get("role") in (None, "step_height")
         }
+        overall_height_ids = {id(it) for it in self._intents if it.kind == "overall_height"}
         explicit_envelope_height = any(
             routable
             and it.kind == "dimension"
@@ -1529,6 +1595,7 @@ class Drawing:
             len_ids=len_ids,
             slot_ids=slot_ids,
             height_ladder_ids=height_ladder_ids,
+            overall_height_ids=overall_height_ids,
             step_position_ids=step_position_ids,
             explicit_envelope_height=explicit_envelope_height,
             user_dim_ids=user_dim_ids,
@@ -1825,6 +1892,7 @@ class Drawing:
                 | r.len_ids
                 | r.slot_ids
                 | r.height_ladder_ids
+                | r.overall_height_ids  # drained by _s_height_ladder
                 | r.step_position_ids
                 | r.user_dim_ids
                 | r.rotational_ids  # drained by _s_rotational; no _replay_intent branch
@@ -1904,21 +1972,46 @@ class Drawing:
             # only REGISTERS ladder candidates; they place at the drain. Their intents
             # drop there (with step positions), NOT here — a raise before the drain
             # leaves them recorded so a retry rebuilds the batch (#639).
-            if r.height_ladder_ids:
-                assert a is not None and isinstance(model, PartModel)
-                from draftwright._core import layout_frame
-                from draftwright.model.compiled import compile_dimensions
+            # Two things share this renderer, and they are gated separately (#889).
+            #
+            # The step-height LADDER is a `step_level` feature's correlated rungs, so one
+            # recorded intent means "rebuild the whole chain". The OVERALL HEIGHT is envelope
+            # furniture — and on a part with NO `EnvelopeFeature` it comes from the compiler's
+            # bounding-box fallback, so there is no feature to record `dimension(env,
+            # "length", role="height")` against. `Drawing.overall_height()` is the verb for
+            # that case, and `r.overall_height_ids` is its intent.
+            #
+            # Deliberately NOT "draw it whenever the compiler approves one": `auto_dims=False`
+            # means the verbs below add everything, so injecting an automatic dimension nobody
+            # recorded breaks record-then-finalize == place-live, which is the whole contract
+            # of the deferred path (caught by `test_finalize_replay_equals_live_placement`).
+            if not (r.height_ladder_ids or r.overall_height_ids):
+                return
+            assert a is not None and isinstance(model, PartModel)
+            from draftwright._core import layout_frame
+            from draftwright.annotations.from_model import ladder_plan_for
+            from draftwright.model.compiled import compile_dimensions
 
-                render_height_ladder(
-                    self,
-                    # `include_overall` is drawing state, so it is an input to the COMPILE
-                    # (whether the overall height is in the set) rather than something the
-                    # renderer decides after the fact.
+            render_height_ladder(
+                self,
+                # Projected to what was RECORDED. Passing the whole compiled plan once either
+                # intent was present meant `overall_height()` alone also rebuilt the step
+                # rungs — a dimension nobody asked for, and live/deferred divergence in the
+                # one change relying on their equivalence (#934 review).
+                #
+                # `include_overall` is drawing state, so it is an input to the COMPILE
+                # (whether the overall height is in the set) rather than something the
+                # renderer decides after the fact. An explicit `role="height"` intent draws it
+                # through the dimension path instead, so the compile must leave it out.
+                ladder_plan_for(
                     compile_dimensions(model, include_overall=not r.explicit_envelope_height),
-                    layout_frame(a),
-                    ctx=ctx,
-                    detail_view=self._build.detail_view,
-                )
+                    step_height=bool(r.height_ladder_ids),
+                    overall=bool(r.overall_height_ids),
+                ),
+                layout_frame(a),
+                ctx=ctx,
+                detail_view=self._build.detail_view,
+            )
 
         def _s_step_positions():
             # Prismatic step positions (all shoulders) — registration-only, like the
@@ -2106,6 +2199,7 @@ class Drawing:
                 or r.user_dim_ids
                 or r.step_position_ids
                 or r.height_ladder_ids
+                or r.overall_height_ids
             ):
                 assert a is not None and isinstance(model, PartModel)  # either ⟹ routable
                 drain_and_reconcile(ctx, self)
@@ -2120,6 +2214,7 @@ class Drawing:
                     | queued_dim_ids
                     | r.step_position_ids
                     | r.height_ladder_ids
+                    | r.overall_height_ids
                 )
             ]
 

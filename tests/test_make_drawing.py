@@ -6261,9 +6261,19 @@ class TestFeatureEdits:
         with dwg.deferred():
             dwg.dimension(step_level, "length", role="step_height")
 
-        assert "dim_height" in dwg.annotations()
         assert any(n.startswith("dim_step") for n in dwg.annotations())
         assert dwg._intents == []
+        # NOT `dim_height`. This asserted the opposite until #934: the drain handed
+        # `render_height_ladder` the whole compiled plan, so a step-height intent also drew
+        # the overall height. One intent draws one thing — the overall height has its own
+        # verb (`overall_height()`), and the conflation meant commenting either line out of a
+        # generated script need not have removed what it named.
+        #
+        # No replay regression rides on this. A part WITH an `EnvelopeFeature` — like this one
+        # — emits `dimension(f, "length", role="height")`, which sets `explicit_envelope_height`
+        # and takes the overall height out of the compile entirely, so the ladder never
+        # carried it there anyway. A part WITHOUT one now emits `dwg.overall_height()`.
+        assert "dim_height" not in dwg.annotations()
 
     def test_callout_adds_a_hole_leader_and_round_trips(self):
         # #414 / #400 Ph2: the callout add verb — detect-only build, then add the hole's
@@ -9044,6 +9054,229 @@ class TestTurnedDiameters:
             if "steplen" in name:
                 dwg.remove(name)
         assert "axial_length_missing" in {issue.code for issue in dwg.lint()}
+
+    @pytest.mark.parametrize(
+        ("overall", "step", "expect_height", "expect_rungs"),
+        [
+            (False, False, False, False),
+            (True, False, True, False),
+            (False, True, False, True),
+            (True, True, True, True),
+        ],
+        ids=["neither", "overall-only", "step-only", "both"],
+    )
+    def test_each_ladder_intent_draws_only_what_it_recorded(
+        self, overall, step, expect_height, expect_rungs
+    ):
+        """`render_height_ladder` draws TWO independent things, and the drain passed it the
+        whole compiled plan once EITHER intent was present.
+
+        So `overall_height()` alone also rebuilt the step rungs — a dimension nobody recorded,
+        and live/deferred divergence in the change that relies on their equivalence (#934
+        review). The converse held too: a step-height intent carried the overall height along,
+        so commenting out `dwg.overall_height()` in a generated script need not have removed it.
+
+        A model with BOTH approved ladders is required to see this at all. Every earlier
+        fixture exposes one, which is why cross-contamination was invisible: with a single
+        ladder, "pass everything" and "pass what was asked for" are the same plan.
+
+        Asserted on WHICH ladders appear, not how many marks: with both recorded, the strip
+        legitimately drops a rung for room, and pinning counts would make this test fail on
+        placement changes that have nothing to do with the property.
+        """
+        from draftwright.model.ir import Frame, PartModel, StepLevelFeature
+
+        part = Box(80, 60, 30)
+        model = PartModel(
+            bbox=part.bounding_box(),
+            orientation="prismatic",
+            features=[
+                StepLevelFeature(
+                    Frame((0, 0, 0), "z"),
+                    base=-15,
+                    levels=(-5, 5),
+                    shoulders=(("x", 0),),
+                    datum=(-40, -30, -15),
+                )
+            ],
+            datums=[],
+        )
+        dwg = build_drawing(part, model=model, auto_dims=False)
+        feature = dwg.model().features[0]
+        with dwg.deferred():
+            if overall:
+                dwg.overall_height()
+            if step:
+                dwg.dimension(feature, "length", role="step_height")
+
+        drawn = {n for n, _ in dwg.iter_annotations()}
+        assert ("dim_height" in drawn) is expect_height
+        assert any(n.startswith("dim_step") for n in drawn) is expect_rungs
+
+    def test_overall_height_live_and_deferred_agree_with_a_step_ladder_present(self):
+        """The equivalence, on the model that can break it.
+
+        `test_the_overall_height_intent_is_commentable_not_injected` uses a part with no
+        step_level, so its live and deferred results agreed even while the drain was drawing
+        every ladder it could find. The ladder itself is deferred-only by construction (a
+        correlated set, routed at the drain), so the overall height is the half where live and
+        deferred are both reachable — and therefore the half that can disagree."""
+        from draftwright.model.ir import Frame, PartModel, StepLevelFeature
+
+        part = Box(80, 60, 30)
+
+        def _model():
+            return PartModel(
+                bbox=part.bounding_box(),
+                orientation="prismatic",
+                features=[
+                    StepLevelFeature(
+                        Frame((0, 0, 0), "z"),
+                        base=-15,
+                        levels=(-5, 5),
+                        shoulders=(("x", 0),),
+                        datum=(-40, -30, -15),
+                    )
+                ],
+                datums=[],
+            )
+
+        live = build_drawing(part, model=_model(), auto_dims=False)
+        live.overall_height()
+        deferred = build_drawing(part, model=_model(), auto_dims=False)
+        with deferred.deferred():
+            deferred.overall_height()
+        assert deferred.annotations() == live.annotations()
+
+    @pytest.mark.parametrize("deferred", [False, True], ids=["live", "deferred"])
+    def test_overall_height_is_refused_when_the_model_declares_an_envelope(self, deferred):
+        """One measurement, one verb.
+
+        `overall_height()` exists ONLY for the featureless fallback — a model with no
+        `EnvelopeFeature`, whose height comes from the bounding box and has nothing to name.
+        It did not enforce that, so on an enveloped model both public spellings were
+        available and composing them drew the height twice:
+
+            live,  overall_height() then dimension(env, …, role="height")  →  BOTH
+            live,  the reverse order                                       →  one
+            deferred, either order                                         →  one
+
+        Order-dependent live AND live ≠ deferred, from two spellings of one measurement —
+        the "three spellings of pin" problem (#906) in miniature (#934 review).
+
+        Refused before the deferred/live split, so both routes answer identically. That is
+        the shape #925 settled for `callout()`: a check on one side makes the answer depend
+        on whether you are inside `deferred()`.
+        """
+        from draftwright.model.declare import envelope
+
+        part = Box(80, 60, 30)
+        dwg = build_drawing(part, model=[envelope(part)], auto_dims=False)
+        with pytest.raises(ValueError, match="declares an envelope"):
+            if deferred:
+                with dwg.deferred():
+                    dwg.overall_height()
+            else:
+                dwg.overall_height()
+
+    @pytest.mark.parametrize("deferred", [False, True], ids=["live", "deferred"])
+    def test_an_enveloped_height_is_drawn_once_by_its_feature_verb(self, deferred):
+        """The false-positive half: refusing the second spelling must not cost the first.
+
+        The enveloped model's height is still dimensionable — through the feature that owns
+        it — and exactly once, on both routes."""
+        from draftwright.model.declare import envelope
+
+        part = Box(80, 60, 30)
+        dwg = build_drawing(part, model=[envelope(part)], auto_dims=False)
+        feature = dwg.model().features[0]
+        if deferred:
+            with dwg.deferred():
+                dwg.dimension(feature, "length", role="height")
+        else:
+            dwg.dimension(feature, "length", role="height")
+        heights = [
+            a.label
+            for n, a in dwg.iter_annotations()
+            if n.startswith(("dim_height", "dim_length"))
+        ]
+        assert heights == ["30"], f"the height should be drawn once, got {heights}"
+
+    def test_the_overall_height_intent_is_commentable_not_injected(self):
+        """The half that the first fix got wrong, and the reason there is a verb at all.
+
+        Making the drain draw the overall height whenever the compiler approved one restored
+        #889's parity — and broke record-then-finalize == place-live, because `auto_dims=False`
+        means the recorded verbs ARE the drawing and an automatic dimension nobody asked for
+        appeared in the deferred result. `test_finalize_replay_equals_live_placement` caught it.
+
+        So it is an INTENT: absent unless recorded, which also makes it commentable, which is
+        the property the whole intent-level script rests on (ADR 0016, "the script records
+        intent").
+        """
+        # The verb's actual domain: a part with NO `EnvelopeFeature`, so the height comes
+        # from the bounding-box fallback and there is nothing to name. (An enveloped model
+        # refuses this verb and uses its feature instead — see the test above; this fixture
+        # asserted the property on an enveloped plate, which is the overlap itself.)
+        part = self._issue_881_y_step_flange()
+        assert not any(f.kind == "envelope" for f in build_drawing(part).model().features)
+
+        silent = build_drawing(part, auto_dims=False)
+        assert "dim_height" not in silent.annotations(), "not recorded ⇒ not drawn"
+
+        live = build_drawing(part, auto_dims=False)
+        assert live.overall_height() == ["dim_height"]
+
+        deferred = build_drawing(part, auto_dims=False)
+        with deferred.deferred():
+            deferred.overall_height()
+        assert deferred.annotations() == live.annotations(), "record-then-finalize == live"
+
+    def test_overall_height_round_trips_through_generated_script(self, tmp_path):
+        """#889: the replay dropped the automatic overall height, silently and lint-clean.
+
+        Two different things share `render_height_ladder`, and the drain gated BOTH on the
+        step-ladder intent. The step-height LADDER is a `step_level` feature's correlated
+        rungs, so one recorded intent meaning "rebuild the whole chain" is right. The OVERALL
+        HEIGHT is envelope furniture — and on a part with no `EnvelopeFeature` it comes from
+        the compiler's bounding-box fallback, so there is NO feature for a script to record an
+        intent against. It could never be replayed, only lost.
+
+        The Y-axis stepped flange is the case that exposes it: `step` features but no
+        `step_level`, so no ladder intent exists to carry the overall height along.
+
+        Asserted as full annotation-set parity rather than "dim_height is present", because
+        the acceptance is that replay matches the automatic drawing — and the risk on the
+        other side is duplicating the Y-step length chain, which a presence check would miss.
+        """
+        import runpy
+
+        from build123d import export_step
+
+        from draftwright.make_drawing import generate_script
+
+        part = self._issue_881_y_step_flange()
+        assert not any(f.kind == "envelope" for f in build_drawing(part).model().features), (
+            "the fixture must have NO envelope feature — the bbox fallback is the case "
+            "with no intent to record"
+        )
+        step = tmp_path / "flange.step"
+        export_step(part, str(step))
+
+        auto = build_drawing(part)
+        replayed = runpy.run_path(generate_script(str(step), out=str(tmp_path / "gen")))["dwg"]
+
+        automatic = {n for n, _ in auto.iter_annotations()}
+        replay = {n for n, _ in replayed.iter_annotations()}
+        assert "dim_height" in automatic, "the fixture must draw an overall height to lose"
+        assert replay == automatic, (
+            f"replay differs — missing {sorted(automatic - replay)}, "
+            f"extra {sorted(replay - automatic)}"
+        )
+        assert (
+            auto.get_annotation("dim_height").label == replayed.get_annotation("dim_height").label
+        )
+        assert not auto.lint_summary()["by_code"] and not replayed.lint_summary()["by_code"]
 
     @pytest.mark.parametrize(("axis_z", "rotation"), [(0.0, 90), (17.0, 90), (-11.0, -90)])
     def test_issue_892_short_y_step_chain_moves_to_enlarged_side_detail(self, axis_z, rotation):
