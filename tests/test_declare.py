@@ -1809,18 +1809,52 @@ class TestRotationalDeclaration:
         with pytest.raises(ValueError):
             rotational(od=30, bores=iter([16, -8]))
 
-    def test_bores_are_refused_on_a_non_z_axis(self):
-        """Accept-and-drop is the failure mode this whole verb was reshaped to avoid, and it
-        had a second door: a `RotationalFeature` carries bores only when turned about Z, so
-        `bores=` with axis="x" planned `bore.diameter` dimensions that mirrored into a
-        generated script and then drew NOTHING, lint clean (#949 review). On a cross-axis part
-        the hole pass dimensions the bore, so `sheet.hole(...)` is the verb that says it."""
+    def test_bores_are_refused_on_a_non_z_axis_by_every_route(self):
+        """Accept-and-drop had a second door: a `RotationalFeature` carries bores only when
+        turned about Z, so `bores=` with axis="x" planned `bore.diameter` dimensions that
+        mirrored into a generated script and then drew NOTHING, lint clean (#949 r4). On a
+        cross-axis part the hole pass dimensions the bore instead.
+
+        Asserted through all three routes because the first fix guarded only the constructor,
+        which left the sanctioned ADR 0011 raw-IR route open AND let the emitter write a line
+        `declare` would reject (#949 r5). The rule lives on the IR type, so there is one
+        answer rather than one per entrance."""
+        from build123d import Box
+
+        from draftwright import Sheet
         from draftwright.model import rotational
+        from draftwright.model.ir import Frame, RotationalFeature
 
         for axis in ("x", "y"):
-            with pytest.raises(ValueError, match="bores= is Z-axis only"):
-                rotational(od=30, bores=(10,), axis=axis)
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                rotational(od=30, bores=(10,), axis=axis)  # the declare verb
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                RotationalFeature(Frame((0, 0, 0), axis), od=30.0, bores=(10.0,))  # raw IR
+            with pytest.raises(ValueError, match="only when turned about Z"):
+                Sheet(Box(80, 60, 20)).rotational(od=30, bores=(10,), axis=axis)
         rotational(od=30, bores=(), axis="x")  # a bore-less cross-axis rotational is fine
+
+    def test_the_rule_is_stated_once(self):
+        """ADR 0016's deletion discipline: two places that DECIDE one fact is the defect. The
+        declare verb must not restate the Z-only rule the IR type owns — a second copy is how
+        the two drift apart under a case neither author tried."""
+        import ast
+        import inspect
+        import textwrap
+
+        from draftwright.model import declare
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(declare.rotational)))
+        raises = [
+            ast.unparse(n)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Raise) and "bore" in ast.unparse(n)
+        ]
+        assert not raises, (
+            f"declare.rotational restates a bore rule the IR type owns: {raises}. Asserted as "
+            "'no raise about bores' rather than as a docstring phrase — the verb may DESCRIBE "
+            "the restriction, it just may not be a second place that DECIDES it."
+        )
 
     def test_bad_values_raise(self):
         from draftwright.model import rotational

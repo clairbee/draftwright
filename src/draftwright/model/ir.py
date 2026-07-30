@@ -647,6 +647,31 @@ class RotationalFeature:
     bores: tuple[float, ...] = ()  # concentric bore diameters, in display order
     kind: ClassVar[str] = "rotational"
 
+    def __post_init__(self):
+        """Bores are Z-axis only, enforced HERE because the IR is the one waist (ADR 0015).
+
+        The rule is real: detection carries bores only when `od_axis == "z"`, and
+        `render_rotational` leaders them in that branch alone — on a part turned about X or Y
+        the bore is dimensioned by the hole pass instead. A non-Z `bores=` therefore produced
+        `bore.diameter` parameters that planned, mirrored into a generated script, and drew
+        nothing, with lint clean (#949 review r4/r5).
+
+        It started life in `declare.rotational`, which left the sanctioned ADR 0011 route —
+        a hand-built `PartModel` through `Sheet.add` or `build_drawing(model=…)` — wide open,
+        and let the emitter write a `sheet.rotational(bores=…, axis="x")` line that the
+        declare layer would then reject. Guarding the constructor rather than the type is the
+        two-places-to-decide defect ADR 0016 names, so the invalid state is simply not
+        representable and every route inherits one answer. #952 tracks lifting the engine
+        restriction (or recording the hole-pass split in ADR 0015 and keeping this forever).
+        """
+        if self.bores and self.frame.axis != "z":
+            raise ValueError(
+                f"a rotational feature carries concentric bores only when turned about Z "
+                f"(got axis={self.frame.axis!r} with bores={self.bores}): nothing draws them "
+                "on a cross-axis part, so the dimensions would plan and then vanish. Declare "
+                "the bore with sheet.hole(...), which is what dimensions it there — see #952."
+            )
+
     def parameters(self) -> list[DimParameter]:
         return [
             DimParameter("diameter", "od", self.od),
