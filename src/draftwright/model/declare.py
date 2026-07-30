@@ -618,14 +618,30 @@ def rotational(*, od, bores=(), at=None, axis=None) -> RotationalFeature:
     A convenient object form that quietly changes the drawing is worse than an explicit one.
     Restoring it needs the classification factored into something both sides call — #950.
 
-    ``bores`` are concentric bore diameters in display order; the renderer places each as a
-    centred leader. ``at`` is a point on the rotation axis (default the origin).
+    ``bores`` are concentric bore diameters in display order, each placed as a centred leader,
+    and are **Z-axis only** — see the refusal below. ``at`` is a point on the rotation axis
+    (default the origin); it is carried for round-trip identity and does not itself position
+    the furniture, which the renderer places from the part's projected centre (#952).
     """
     _positive("rotational() od=", od)
     bores = tuple(bores)  # materialise once: a generator would validate empty and store empty
     for b in bores:
         _positive("rotational() bores=", b)
     axis = _norm_axis(axis if axis is not None else "z")
+    if bores and axis != "z":
+        # Refuse rather than accept-and-drop. A `RotationalFeature` only ever CARRIES bores on
+        # Z — detection gates them on `od_axis == "z"` and `render_rotational` leaders them in
+        # that branch alone — so a non-Z `bores=` produced a feature whose `bore.diameter`
+        # parameters planned, mirrored into a generated script, and then rendered nothing,
+        # with lint clean (#949 review). On a part turned about X or Y the bore is dimensioned
+        # by the HOLE pass instead, so `sheet.hole(...)` is the verb that says this. #952
+        # tracks lifting the engine restriction.
+        raise ValueError(
+            f"rotational() bores= is Z-axis only (got axis={axis!r}): a rotational feature "
+            "carries concentric bores only when turned about Z, and declaring them on another "
+            "axis would plan dimensions nothing draws. Declare the bore with sheet.hole(...), "
+            "which is what dimensions it on a cross-axis part — see #952."
+        )
     origin = (0.0, 0.0, 0.0) if at is None else at
     _require_point("at", origin)
     return RotationalFeature(

@@ -1752,11 +1752,12 @@ class TestRotationalDeclaration:
     def test_the_explicit_form_round_trips_every_field(self):
         from draftwright.model import rotational
 
-        feature = rotational(od=30, bores=(16.0, 8.0), at=(0, 0, 5), axis="x")
+        feature = rotational(od=30, bores=(16.0, 8.0), at=(0, 0, 5), axis="z")
         assert feature.od == 30.0
         assert feature.bores == (16.0, 8.0), "bore ORDER is display order, not a set"
-        assert feature.frame.axis == "x"
+        assert feature.frame.axis == "z"
         assert feature.frame.origin == (0.0, 0.0, 5.0)
+        assert rotational(od=30, axis="X").frame.axis == "x", "the axis is normalised"
         assert [p.parameter_id for p in feature.parameters()] == [
             "od.diameter",
             "bore.diameter",
@@ -1807,6 +1808,19 @@ class TestRotationalDeclaration:
         assert rotational(od=30, bores=(b for b in (16, 8))).bores == (16.0, 8.0)
         with pytest.raises(ValueError):
             rotational(od=30, bores=iter([16, -8]))
+
+    def test_bores_are_refused_on_a_non_z_axis(self):
+        """Accept-and-drop is the failure mode this whole verb was reshaped to avoid, and it
+        had a second door: a `RotationalFeature` carries bores only when turned about Z, so
+        `bores=` with axis="x" planned `bore.diameter` dimensions that mirrored into a
+        generated script and then drew NOTHING, lint clean (#949 review). On a cross-axis part
+        the hole pass dimensions the bore, so `sheet.hole(...)` is the verb that says it."""
+        from draftwright.model import rotational
+
+        for axis in ("x", "y"):
+            with pytest.raises(ValueError, match="bores= is Z-axis only"):
+                rotational(od=30, bores=(10,), axis=axis)
+        rotational(od=30, bores=(), axis="x")  # a bore-less cross-axis rotational is fine
 
     def test_bad_values_raise(self):
         from draftwright.model import rotational
