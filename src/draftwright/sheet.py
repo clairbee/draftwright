@@ -1031,16 +1031,17 @@ class Sheet:
         self._features.append(_plate(obj, **kw))
         return _Params(self, len(self._features) - 1)
 
-    def rotational(self, obj=None, **kw) -> _Params:
+    def rotational(self, **kw) -> _Params:
         """Declare a turned body's axial furniture — OD, rotation axis, concentric bores
         (#945): ``sheet.rotational(od=30, bores=(16,), axis="z")``.
 
         The last recognised kind without a declarative surface, which is why a generated
         script for a turned part could not declare its dimensions at all (#938).
 
-        Explicit values only — see :func:`draftwright.model.rotational` for why an object
-        form would disagree with detection (#950)."""
-        self._features.append(_rotational(obj, **kw))
+        Keyword-only, unlike its object-capable siblings — see
+        :func:`draftwright.model.rotational` for why an object form would disagree with
+        detection (#950)."""
+        self._features.append(_rotational(**kw))
         return _Params(self, len(self._features) - 1)
 
     def step_level(self, obj=None, **kw) -> _Params:

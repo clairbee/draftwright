@@ -595,7 +595,7 @@ def _read_plate(obj) -> tuple[str, float, float, float, float]:
     )
 
 
-def rotational(obj=None, *, od=None, bores=(), at=None, axis=None) -> RotationalFeature:
+def rotational(*, od, bores=(), at=None, axis=None) -> RotationalFeature:
     """A turned body's axial furniture — its outer diameter, rotation axis and concentric
     bores (#945). **Explicit values only:** ``rotational(od=30, bores=(16,), axis="z")``.
 
@@ -606,28 +606,20 @@ def rotational(obj=None, *, od=None, bores=(), at=None, axis=None) -> Rotational
     whole part — one unsupported feature turning every other declaration in that script from
     explicit back to implicit (#938).
 
-    **There is deliberately no object form**, unlike every sibling verb. `rotational(shaft)`
-    would have to re-derive the OD, the axis AND the concentric bores from geometry, and
-    detection does not read those off the solid — they come from the part CLASSIFICATION,
-    which also decides which bores are sizing bores. A declare-side reimplementation would be
-    a second inference path for one fact, and the first cut proved the point: it silently
-    dropped every bore and picked the wrong axis for a cylinder as long as it is wide (#949
-    review). A convenient object form that quietly changes the drawing is worse than an
-    explicit one. Restoring it needs the classification factored into something both sides
-    call — tracked as #950.
+    **There is deliberately no object form**, unlike every sibling verb — the signature is
+    keyword-only so `rotational(shaft)` is rejected by Python rather than accepted and then
+    guessed at. An object form would have to re-derive the OD, the axis AND the concentric
+    bores from geometry, and detection does not read those off the solid: they come from the
+    part CLASSIFICATION (`analysis._classify_geometry` / `_sizing_bores`), which also decides
+    which concentric bores are sizing bores. A declare-side reimplementation would be a second
+    inference path for one fact, and the first cut proved the point — it silently dropped
+    every bore and picked the wrong axis for a cylinder as long as it is wide (#949 review).
+    A convenient object form that quietly changes the drawing is worse than an explicit one.
+    Restoring it needs the classification factored into something both sides call — #950.
 
     ``bores`` are concentric bore diameters in display order; the renderer places each as a
     centred leader. ``at`` is a point on the rotation axis (default the origin).
     """
-    if obj is not None:
-        raise ValueError(
-            "rotational() takes explicit values, not an object: the OD, axis and concentric "
-            "bores come from the part classification rather than from the solid, so reading "
-            "them here would disagree with detection (it dropped bores and mis-picked the "
-            "axis). Pass od=, bores=, axis= and at= — see #950."
-        )
-    if od is None:
-        raise ValueError("rotational() needs an explicit od=")
     _positive("rotational() od=", od)
     for b in bores:
         _positive("rotational() bores=", b)

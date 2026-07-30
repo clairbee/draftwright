@@ -1763,38 +1763,38 @@ class TestRotationalDeclaration:
             "bore.diameter",
         ]
 
-    def test_the_object_form_refuses_rather_than_guessing(self):
-        """It would have to re-derive the OD, axis and sizing bores from geometry, and
-        detection reads none of those off the solid — they come from the part
-        classification. The first cut guessed and was wrong twice, silently (#949 review)."""
-        from build123d import Cylinder
+    def test_neither_surface_accepts_an_object(self):
+        """Keyword-only on purpose. The verb cannot derive the OD, axis or sizing bores from
+        geometry — detection reads none of them off the solid, they come from the part
+        classification — and the first cut proved that guessing is silent, not loud: it
+        dropped every bore and picked the wrong axis (#949 review). So the signature refuses
+        the call rather than the body refusing the object, and BOTH surfaces refuse: `Sheet`
+        is where a user reaching for `sheet.hole(obj)`'s shape would try it."""
+        from build123d import Box, Cylinder
 
+        from draftwright import Sheet
         from draftwright.model import rotational
 
-        with pytest.raises(ValueError, match="takes explicit values, not an object"):
+        with pytest.raises(TypeError):
             rotational(Cylinder(15, 40))
+        with pytest.raises(TypeError):
+            Sheet(Box(80, 60, 20)).rotational(Cylinder(15, 40))
 
-    def test_the_refusal_names_the_work_that_would_lift_it(self):
-        """A refusal with no route out reads as a permanent limitation. This one is a
-        deferral, and #950 is where the shared classification lands."""
-        from build123d import Cylinder
-
-        from draftwright.model import rotational
-
-        with pytest.raises(ValueError, match="#950"):
-            rotational(Cylinder(15, 40))
-
-    def test_the_sheet_verb_declares_and_names_the_feature(self):
+    def test_the_sheet_verb_declares_a_dimensionable_feature(self):
+        """The point of #945: a turned part's OD and bores become *nameable*, so a generated
+        script can author them instead of falling back to `auto_dimensions()` (#938). Asserted
+        as role RESOLUTION through the public verb rather than as what got stored — the roles
+        a declared feature answers to are the contract, the storage is not."""
         from build123d import Box
 
         from draftwright import Sheet
 
         sheet = Sheet(Box(80, 60, 20))
         handle = sheet.rotational(od=30, bores=(16,), axis="z")
-        assert handle is not sheet, "every declaration verb hands back a reference (#931)"
-        declared = sheet.features[handle._i]
-        assert declared.kind == "rotational" and declared.bores == (16.0,)
-        sheet.dimension(handle, "od.diameter")  # nameable — the point of #945
+        sheet.dimension(handle, "od.diameter")
+        sheet.dimension(handle, "bore.diameter")
+        with pytest.raises(ValueError, match="no 'depth.length' measurement"):
+            sheet.dimension(handle, "depth.length")
 
     def test_bad_values_raise(self):
         from draftwright.model import rotational

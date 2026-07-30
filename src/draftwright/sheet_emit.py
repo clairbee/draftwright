@@ -12,8 +12,12 @@ authoritative. A caller who
 *has* the objects (mode 3b) wires their real part into the seam and swaps the number lines for
 ``sheet.hole(obj)`` references — the emitter's numbers are a starting point, not a ceiling.
 
-Kinds with no declarative verb yet (``rotational``) are flagged inline — never silently dropped —
-and left to the auto-pass that runs over the declared model on re-run. Imported authored
+Kinds with no declarative verb are flagged inline — never silently dropped — and left to the
+auto-pass that runs over the declared model on re-run. Every *geometric* kind now has one
+(``rotational`` was the last, #945, keyword-only — see :func:`draftwright.model.rotational`);
+what remains on the comment floor is the aspect kinds a detector never emits (``finish``,
+``note``, ``control_frame``, ``datum_ref``), so the branch is a live guard against a NEW kind
+arriving unemitted rather than a standing gap. Imported authored
 dimensions, including AP242 dimensional PMI, emit as Sheet ``measured_dimension(...)``
 declarations (#873 — never the transitional ``dimension`` overload, so a regenerated script is
 not born deprecated).
@@ -324,8 +328,9 @@ def _feature_line(f) -> str:
         return (
             f'sheet.plate(axis="{f.axis}", lo={_n(f.lo)}, hi={_n(f.hi)}, u={_n(f.u)}, v={_n(f.v)})'
         )
-    # Kinds with no declarative verb yet: flag inline so they aren't silently lost. The auto-pass
-    # over the declared model still draws rotational furniture faithfully (#472).
+    # Kinds with no declarative verb: flag inline so they aren't silently lost. Since #945 every
+    # geometric kind has a verb, so this catches the aspect kinds (finish/note/control_frame/
+    # datum_ref) and, more usefully, a newly added kind whose emit line nobody wrote.
     return f"# {k} @ {_pt(f.frame.origin)} — no declarative verb yet; drawn by the auto-pass"
 
 

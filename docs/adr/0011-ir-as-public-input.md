@@ -311,8 +311,14 @@ On the `Sheet` façade, the *authored* multi-parameter verbs (`pocket`/`slot`/
 role-keyed decoration (a bare `.tolerance()` keeps the kind-only fold), closing the
 authoring-surface gap noted for pockets (#728). The rotational OD/bore case surfaced
 by #754 is served at the **engine** level only: the planner fold now honours a
-role-keyed `(rot, "diameter", "od")` vs `(rot, "diameter", "bore")` decoration, but
-`RotationalFeature` is detection-only (no `sheet.rotational()` verb), so a caller
-authors it against the detected feature via the raw `decorations=` map, not a fluent
-handle. (All bores share `role="bore"`, so a bore decoration folds onto every bore —
+role-keyed `(rot, "diameter", "od")` vs `(rot, "diameter", "bore")` decoration, and at the
+time `RotationalFeature` was detection-only, so a caller authored it against the detected
+feature via the raw `decorations=` map rather than a fluent handle. **Since #945 there is a
+`sheet.rotational(od=…, bores=…, axis=…)` verb** returning the usual `_Params` handle — the
+last kind without one, which is what closed this ADR's round trip. It is **keyword-only**:
+unlike its siblings it takes no object, because the OD, the turning axis and which concentric
+bores are *sizing* bores come from the part classification (`analysis._classify_geometry` /
+`_sizing_bores`), not from a geometry read, so a declare-side derivation would be a second
+inference path for one fact (it silently dropped bores and mis-picked the axis when tried).
+#950 restores the object form once that classification is shared. (All bores share `role="bore"`, so a bore decoration folds onto every bore —
 distinguishing individual bores is out of scope.)
