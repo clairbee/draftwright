@@ -21,6 +21,7 @@ from draftwright.sheet_emit import (
     emit_sheet_script,
     generate_sheet_script,
     resolve_object_spec,
+    unmirrored_dimensions,
 )
 
 # A throwaway source module the object-spec tests import a live part off (#469): an object,
@@ -1655,7 +1656,7 @@ class TestTheDimensionMirror:
 
     @staticmethod
     def _corpus():
-        from build123d import Align, Axis, Box, Cylinder, Pos
+        from build123d import Align, Axis, Box, Cylinder, Pos, Rot
 
         def flange():
             part = Cylinder(21, 4)
@@ -1680,7 +1681,12 @@ class TestTheDimensionMirror:
             - Pos(20, 10, 0) * Cylinder(3, 20),
             "pad": Box(80, 60, 10) + Pos(0, 0, 10) * Box(30, 20, 4),
             "bare block": Box(60, 40, 20),
-            "side-drilled": Box(80, 60, 20) - Pos(0, 0, 10) * Cylinder(3, 200).rotate(Axis.Y, 90),
+            # A real X-axis bore. The first version used a rotated cylinder through a block
+            # and detected NOTHING but an envelope, so the off-axis location path this corpus
+            # claimed to cover was untested (#947 review). `_the_corpus_detects_what_it_claims`
+            # now makes that failure loud instead of invisible.
+            "side-drilled": Box(12, 40, 30) - Pos(0, 8, 6) * Rot(0, 90, 0) * Cylinder(3, 12),
+            "boss": Box(80, 60, 12) + Pos(0, 0, 12) * Cylinder(10, 8),
         }
 
     @staticmethod
@@ -1689,6 +1695,46 @@ class TestTheDimensionMirror:
         body = src.replace("\npart\n", "\n", 1)
         exec(compile(body[: body.index("sheet.export(")], "<emit>", "exec"), ns)  # noqa: S102
         return ns
+
+    #: What each fixture is FOR. A fixture that stops detecting its kind stops testing the
+    #: path it was added for, silently — which is what happened to "side-drilled" (detected
+    #: only an envelope) and "slot" (detected a pocket) until #947's review counted them.
+    _EXPECTED_KINDS = {
+        "plate+hole": {"hole"},
+        "flange (no envelope feature)": {"hole", "pattern", "pad", "step"},
+        "stepped": {"step_level"},
+        "slot": {"pocket"},
+        "pocket": {"pocket"},
+        "two holes": {"hole"},
+        "pad": {"pad", "slot"},
+        "bare block": {"envelope"},
+        "side-drilled": {"hole"},
+        "boss": {"boss"},
+    }
+
+    @pytest.mark.parametrize("name", sorted(_corpus()))
+    def test_the_corpus_detects_what_it_claims(self, name):
+        """A fixture named for a kind it does not produce is coverage theatre."""
+        kinds = {f.kind for f in detect_part_model(self._corpus()[name]).features}
+        expected = self._EXPECTED_KINDS[name]
+        assert expected <= kinds, (
+            f"{name} detects {sorted(kinds)}, missing {sorted(expected - kinds)}"
+        )
+
+    def test_the_corpus_names_every_fixture_it_carries(self):
+        """The two tables cannot drift: a fixture added without an expectation is a fixture
+        nobody has said what it is for."""
+        assert set(self._corpus()) == set(self._EXPECTED_KINDS)
+
+    def test_the_side_drilled_fixture_reaches_the_off_axis_location_path(self):
+        """Named because it is the path that was silently uncovered. An X-axis bore's
+        position is compiled by `_compile_off_axis_hole_locations`, a different code path
+        from the Z-normal ladder (#925)."""
+        model = detect_part_model(self._corpus()["side-drilled"])
+        from draftwright.model.compiled import compile_dimensions
+
+        roles = {loc.role for loc in compile_dimensions(model).locations}
+        assert "location_off_axis" in roles, f"got {sorted(roles)}"
 
     @pytest.mark.parametrize("name", sorted(_corpus()))
     def test_the_mirrored_script_draws_what_the_automatic_drawing_draws(self, name):
@@ -1795,10 +1841,307 @@ class TestTheDimensionMirror:
         be able to name every measurement in it and `_compile_overall_height` refuses the
         bounding-box fallback under one (#925). Naming only `height` keeps the drawing
         identical — width and depth stay omitted exactly as the planner left them."""
-        part = self._corpus()["flange (no envelope feature)"]
+        part = TestTheDimensionMirror._corpus()["flange (no envelope feature)"]
         model = detect_part_model(part)
         assert not any(f.kind == "envelope" for f in model.features)
         src = emit_sheet_script(model, "part", "s", title="T", number="N")
         assert 'sheet.dimension(envelope1, "height.length")' in src
         assert 'sheet.dimension(envelope1, "width.length")' not in src
         assert 'sheet.dimension(envelope1, "depth.length")' not in src
+
+
+#: Annotations a generated script legitimately does NOT declare, keyed by EXACT name prefix
+#: where the family is closed, and each carrying the argument that it can never be a
+#: dimension line (ADR 0016's permanent-exception category, #937).
+#:
+#: Deliberately NOT subsystem-wide prefixes: `"section_"` would admit every annotation that
+#: subsystem ever grows, including a future `section_depth` measurement — the exact blind
+#: spot the behavioural test below claims to supersede (#947 review).
+#:
+#: And deliberately only what the corpus OBSERVES. An earlier version listed a section/detail
+#: family from memory; the names were wrong (`section_label` does not exist — it is
+#: `section_caption`), so the list simultaneously carried dead entries and would have flagged
+#: a real sectioned drawing. A drawing feature this corpus does not reach is absent on
+#: purpose: adding one fails loudly, and whoever adds it names the annotation with the real
+#: name in front of them.
+_SCRIPT_FURNITURE = {
+    "m_cm": "centre marks — sized off the hole they mark, not a printed value (#875)",
+    "centerline_plan": "shows where the plan view's axis is; no measurement",
+    "centerline_side": "shows where the side view's axis is; no measurement",
+    "bc_": "a bolt circle's centreline — geometry, like a centre mark",
+    "note_iso_nts": "the ISO NTS caption — a sheet-level statement, not a feature's",
+    "title_block": "sheet metadata; edited through Sheet(...) kwargs, not a dimension line",
+}
+
+
+def _is_value_bearing(annotation) -> bool:
+    """Does this annotation PRINT a measurement?
+
+    The classification that matters, and the one a name cannot give. An allowlist entry is
+    only defensible if the thing it names carries no number — otherwise "furniture" is just
+    a word for "we decided not to look" (#947 review).
+    """
+    label = getattr(annotation, "label", None)
+    return bool(label) and any(ch.isdigit() for ch in str(label))
+
+
+#: Every DIMENSIONAL collection on `RenderableDimensionPlan`, and how `unmirrored_dimensions`
+#: accounts for it. A field added without an entry fails `test_the_plan_surface_is_ratcheted`.
+#:
+#: Python gives no exhaustiveness check, so a new collection — `plan.ordinate_dimensions`,
+#: say — would be rendered and silently unmirrored, and every corpus test would still pass
+#: (#947 review). This is the ratchet that makes adding one a decision rather than an
+#: oversight.
+_PLAN_DIMENSIONAL_FIELDS = {
+    "groups": "walked per approved dim, matched on parameter_id or bare role",
+    "locations": "walked per approved location, matched on the coarse 'location' role",
+    "ladders": "walked per ladder, via _LADDER_PARAMETER where the spelling differs",
+    "diagnostics": "NOT dimensional — the omissions channel; nothing to mirror by definition",
+}
+
+
+def test_the_plan_surface_is_ratcheted():
+    """`unmirrored_dimensions` walks the compiled plan field by field, so the plan growing a
+    field is the one way it can silently stop being complete."""
+    from draftwright.model.compiled import RenderableDimensionPlan
+
+    assert set(RenderableDimensionPlan.__dataclass_fields__) == set(_PLAN_DIMENSIONAL_FIELDS), (
+        "RenderableDimensionPlan changed shape — classify the new field here and, if it "
+        "carries dimensions, walk it in sheet_emit.unmirrored_dimensions"
+    )
+
+
+#: Every IR feature kind, mapped to how the dimension mirror is proven to handle it.
+#:
+#: `"corpus"` — a fixture in `TestTheDimensionMirror._corpus()` detects it, so the round trip
+#: is exercised end to end (emit → run → compare annotation signatures).
+#: A string starting with `"unnameable"` — no declarative verb, so the emitter falls back and
+#: says so; the kind cannot be mirrored by design until that verb exists.
+#: `"untested"` — neither. **This is debt**, and naming it is the point: the review found two
+#: fixtures detecting something other than their name, and an unlisted kind is the same hole
+#: with no label on it.
+_KIND_MIRROR_COVERAGE = {
+    "hole": "corpus",
+    "pattern": "corpus",
+    "boss": "corpus",
+    "step": "corpus",
+    "step_level": "corpus",
+    "slot": "corpus",
+    "pocket": "corpus",
+    "pad": "corpus",
+    "envelope": "corpus",
+    "rotational": "unnameable — no declarative verb (#945)",
+    "pmi": "unnameable — raw AP242, emitted as sheet.add(PmiFeature(...)) (ADR 0016)",
+    "chamfer": "untested — no corpus fixture detects one (#948)",
+    "fillet": "untested — no corpus fixture detects one (#948)",
+    "flat": "untested — no corpus fixture detects one (#948)",
+    "groove": "untested — no corpus fixture detects one (#948)",
+    "plate": "untested — no corpus fixture detects one (#948)",
+    "pocket_pattern": "untested — no corpus fixture detects one (#948)",
+    "slot_pattern": "untested — no corpus fixture detects one (#948)",
+    "authored_dimension": "untested — the measured_dimension path (#948)",
+    "control_frame": "aspect — carries no DimParameter, so nothing to mirror",
+    "datum_ref": "aspect — carries no DimParameter, so nothing to mirror",
+    "finish": "aspect — carries no DimParameter, so nothing to mirror",
+    "note": "aspect — carries no DimParameter, so nothing to mirror",
+}
+
+
+def test_every_ir_kind_is_classified_for_mirror_coverage():
+    """Every feature kind is either exercised, argued unnameable, or NAMED as untested.
+
+    An earlier version of this test was called
+    `test_every_ir_kind_is_reachable_by_the_mirror_or_named_as_unnameable` and compared the
+    IR kinds to `_FACTS` — it constructed nothing and proved nothing about the mirror, while
+    its name and docstring claimed otherwise (#947 review). A test whose name overstates it
+    is worse than no test: it answers the question a reader came to ask.
+
+    This does not prove the untested kinds work. It makes the fact that they are untested a
+    thing you have to look at, and fails the moment a kind is added without a decision.
+    """
+    from draftwright.model import ir as _ir
+
+    kinds = {
+        value.kind
+        for value in vars(_ir).values()
+        if isinstance(value, type) and isinstance(getattr(value, "kind", None), str)
+    }
+    assert kinds == set(_KIND_MIRROR_COVERAGE), (
+        "an IR kind was added or removed — classify it: exercised by the corpus, argued "
+        "unnameable, or explicitly untested"
+    )
+
+
+def test_the_corpus_really_covers_the_kinds_it_claims():
+    """`"corpus"` is a claim about fixtures, so check it against them. Two fixtures were
+    detecting something other than their name until the review counted them (#947)."""
+    detected: set[str] = set()
+    for part in TestTheDimensionMirror._corpus().values():
+        detected |= {f.kind for f in detect_part_model(part).features}
+    claimed = {k for k, v in _KIND_MIRROR_COVERAGE.items() if v == "corpus"}
+    assert claimed <= detected, (
+        f"{sorted(claimed - detected)} are marked 'corpus' but no fixture detects them"
+    )
+
+
+class TestTheMirrorCoversTheCompiledSet:
+    """The structural half, and the durable one: every dimension the COMPILER approved has an
+    emitted line, checked against the compiler rather than against a drawing.
+
+    The behavioural test below can only see what its corpus draws. This one is complete for
+    whatever model it is given, so a new compiled dimension kind fails it the moment any
+    fixture carries the feature — instead of waiting for someone to notice the drawing
+    changed (#947 review).
+    """
+
+    @pytest.mark.parametrize("name", sorted(TestTheDimensionMirror._corpus()))
+    def test_every_approved_dimension_has_a_line(self, name):
+        model = detect_part_model(TestTheDimensionMirror._corpus()[name])
+        from draftwright.sheet_emit import _is_mirrorable
+
+        if not _is_mirrorable(model):
+            pytest.skip(f"{name} falls back to auto_dimensions() — #945")
+        missing = unmirrored_dimensions(model)
+        assert not missing, (
+            f"{name}: the compiler approved {missing} and the script declares no line for "
+            "them, so 'THIS IS THE COMPLETE SET' is false"
+        )
+
+    def test_the_guard_reports_each_kind_of_gap_it_can_find(self, monkeypatch):
+        """The guard's FAILURE branches, which nothing else reaches.
+
+        Every other test drives `unmirrored_dimensions` on models where it correctly finds
+        nothing, so the code that reports a gap — one branch per compiled collection — was
+        never executed. A guard whose reporting path is untested is a guard that might not
+        fire, which is the whole thing it exists to prevent.
+
+        Starves the emitter of requests and asserts each collection is accounted for
+        separately, so a branch that silently stopped reporting shows up as a missing
+        category rather than as a slightly shorter list.
+        """
+        from draftwright import sheet_emit
+
+        # A part carrying all three: group dims (hole/envelope), a location, and the
+        # bounding-box overall-height ladder via the synthesised envelope.
+        part = TestTheDimensionMirror._corpus()["flange (no envelope feature)"]
+        model = detect_part_model(part)
+        monkeypatch.setattr(sheet_emit, "_mirrored_requests", lambda *_a, **_kw: [])
+
+        missing = unmirrored_dimensions(model)
+        assert missing, "starved of every request, the guard must report gaps"
+        assert any("." in m and "location" not in m for m in missing), "no group dim reported"
+        assert any(m.endswith(".location") for m in missing), "no location reported"
+        assert "(bounding box).overall_height" in missing, "no bbox overall height reported"
+
+    def test_the_guard_reports_a_ladder_attached_to_a_feature(self, monkeypatch):
+        """The fourth branch: an `overall_height` ladder whose ref IS a feature, which the
+        bounding-box case above cannot reach."""
+        from draftwright import sheet_emit
+
+        model = detect_part_model(TestTheDimensionMirror._corpus()["stepped"])  # has envelope
+        monkeypatch.setattr(sheet_emit, "_mirrored_requests", lambda *_a, **_kw: [])
+        missing = unmirrored_dimensions(model)
+        assert any(m.startswith("envelope.") for m in missing), f"got {missing}"
+
+    def test_the_fallback_is_the_ONLY_way_a_dimension_escapes(self):
+        """A model the emitter says it can mirror must have no unmirrored dimension. That is
+        what makes `_is_mirrorable` a real capability check rather than a guess: if it returns
+        True while something is unexpressible, this fails."""
+        from draftwright.sheet_emit import _is_mirrorable
+
+        for name, part in TestTheDimensionMirror._corpus().items():
+            model = detect_part_model(part)
+            if _is_mirrorable(model):
+                assert not unmirrored_dimensions(model), (
+                    f"{name}: _is_mirrorable said yes but dimensions are unexpressible"
+                )
+
+
+class TestTheScriptAccountsForEveryAnnotation:
+    """Absence of a `dimension(...)` line means SUPPRESSED — a claim that is only safe over
+    the set the emitter can actually express (#939).
+
+    So every annotation the drawing carries must be one of two things: produced by a line the
+    script contains, or named here as furniture. **No third state.** A dimensional mark the
+    script cannot express would otherwise sit in the drawing with nothing to comment out and
+    nothing saying why — the reader would conclude the engine chose it, when in fact the
+    script could not say anything about it.
+
+    Checked BEHAVIOURALLY, by commenting every line out and seeing what survives, rather than
+    by classifying annotation names. A prefix taxonomy is a proxy: it asserts what the author
+    believed about the names, and the same shortcut has twice been the bug (`_VALUE_FREE`
+    absorbing the pitch dim, `_PENDING_VALUE_CARRYING` read as "furniture").
+    """
+
+    def _corpus(self):
+        return TestTheDimensionMirror._corpus()
+
+    @pytest.mark.parametrize("name", sorted(TestTheDimensionMirror._corpus()))
+    def test_commenting_every_dimension_line_leaves_only_named_furniture(self, name):
+        part = self._corpus()[name]
+        src = emit_sheet_script(detect_part_model(part), "part", "s", title="T", number="N")
+        if "sheet.dimension(" not in src:
+            pytest.skip(f"{name} falls back to auto_dimensions() — #945")
+
+        blanked = "\n".join(
+            "# " + line if line.startswith("sheet.dimension(") else line
+            for line in src.splitlines()
+        )
+        ns: dict = {"part": part}
+        body = blanked.replace("\npart\n", "\n", 1)
+        exec(compile(body[: body.index("sheet.export(")], "<emit>", "exec"), ns)  # noqa: S102
+        survivors = {n for n, _ in ns["sheet"].build().iter_annotations()}
+
+        # Two independent checks, because a name is not a classification. First: does the
+        # thing print a measurement — the claim each furniture entry's ARGUMENT makes.
+        # `_is_value_bearing` was introduced for exactly this and then never called; the list
+        # was validated only by the length of its prose (#947 review).
+        annotations = dict(ns["sheet"].build().iter_annotations())
+        smuggled = sorted(
+            n
+            for n in survivors
+            if n.startswith(tuple(_SCRIPT_FURNITURE)) and _is_value_bearing(annotations[n])
+        )
+        assert not smuggled, (
+            f"{name}: {smuggled} are allowed as furniture but PRINT a measurement — the "
+            "entry's argument is false, so it is an unexpressible dimension in disguise"
+        )
+        unaccounted = sorted(n for n in survivors if not n.startswith(tuple(_SCRIPT_FURNITURE)))
+        assert not unaccounted, (
+            f"{name}: {unaccounted} survive with every dimension line commented out — the "
+            "script cannot express them, so 'absence of a line means suppressed' is false "
+            "for them. Either emit a line, or add them to _SCRIPT_FURNITURE with a reason."
+        )
+
+    def test_the_furniture_list_is_argued_not_just_listed(self):
+        """A permanent exception carries its argument (ADR 0016, #937). Without one a reader
+        cannot tell it from unfinished work, and the list decays into a suppression."""
+        for prefix, why in _SCRIPT_FURNITURE.items():
+            assert len(why) > 20, f"{prefix} needs a reason it can never be a dimension line"
+
+    def test_every_furniture_entry_is_OBSERVED_not_asserted(self):
+        """Every entry must be produced by this corpus. **No exemptions.**
+
+        The first version listed a `section_` family from memory — `section_label`,
+        `section_line` — and the renderer actually emits `section_caption`,
+        `section_arrow_*`, `section_wing_*`. So the list carried three dead entries AND would
+        have reported a real sectioned drawing's caption as unaccounted (#947 review). It had
+        been "validated" only by the length of its prose.
+
+        An entry nobody observes is a guess, and a guess in an allowlist only ever widens
+        what the accounting forgives. So the list is exactly what this corpus draws, and a
+        drawing feature it does not reach — sections, detail views, balloons, hole tables —
+        is deliberately ABSENT. Adding such a fixture then fails loudly, and whoever adds it
+        classifies the annotation with its real name in front of them rather than from memory.
+        """
+        drawn: set[str] = set()
+        for part in self._corpus().values():
+            dwg = build_drawing(part, model=detect_part_model(part), title="T", number="N")
+            drawn |= {n for n, _ in dwg.iter_annotations()}
+        unobserved = sorted(
+            prefix for prefix in _SCRIPT_FURNITURE if not any(n.startswith(prefix) for n in drawn)
+        )
+        assert not unobserved, (
+            f"{unobserved} are exempted as furniture but this corpus never draws them — "
+            "remove them, or add a fixture that produces them so the name is observed"
+        )
