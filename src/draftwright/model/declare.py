@@ -49,6 +49,7 @@ from draftwright.model.ir import (
     PocketFeature,
     PocketPatternFeature,
     Point,
+    RotationalFeature,
     SlotFeature,
     SlotPatternFeature,
     StepFeature,
@@ -591,6 +592,41 @@ def _read_plate(obj) -> tuple[str, float, float, float, float]:
         round(span[i][1], 4),
         round(c[oi[0]], 4),
         round(c[oi[1]], 4),
+    )
+
+
+def rotational(obj=None, *, od=None, bores=(), at=None, axis=None) -> RotationalFeature:
+    """A turned body's axial furniture — its outer diameter, rotation axis and concentric
+    bores (#945). Either ``rotational(shaft)`` — the OD and axis read off the object — or
+    explicit ``rotational(od=30, bores=(16,), axis="z")``.
+
+    The last recognised kind with no declarative surface, which made it the last ADR 0011
+    round-trip gap (epic #574). Its absence was load-bearing rather than cosmetic: a
+    `RotationalFeature` carries planned dimensions (`od`, each `bore`), so a generated script
+    could not name them, and the dimension mirror had to fall back to `auto_dimensions()` for
+    the whole part — one unsupported feature turning every other declaration in that script
+    from explicit back to implicit (#938).
+
+    ``bores`` are concentric bore diameters in display order; the renderer places each as a
+    centred leader. ``at`` is a point on the rotation axis (default the origin).
+    """
+    if obj is not None:
+        r_axis, r_od, r_center = _read_cylinder(obj)
+        axis = r_axis if axis is None else axis
+        od = r_od if od is None else od
+        at = r_center if at is None else at
+    if od is None:
+        raise ValueError("rotational() needs a turned object, or an explicit od=")
+    _positive("rotational() od=", od)
+    for b in bores:
+        _positive("rotational() bores=", b)
+    axis = _norm_axis(axis if axis is not None else "z")
+    origin = (0.0, 0.0, 0.0) if at is None else at
+    _require_point("at", origin)
+    return RotationalFeature(
+        frame=Frame(origin=(float(origin[0]), float(origin[1]), float(origin[2])), axis=axis),
+        od=float(od),
+        bores=tuple(float(b) for b in bores),
     )
 
 

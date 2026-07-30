@@ -197,6 +197,12 @@ def _feature_line(f) -> str:
             f"shoulders={_sh}, datum={_pt(f.datum)}, at={_pt(f.frame.origin)})"
             "   # prismatic height ladder + shoulder position(s)"
         )
+    if k == "rotational":
+        bores = f", bores=({', '.join(str(_n(b)) for b in f.bores)},)" if f.bores else ""
+        return (
+            f"sheet.rotational(od={_n(f.od)}{bores}, at={_pt(f.frame.origin)}, "
+            f'axis="{f.frame.axis}")'
+        )
     if k == "hole":
         return _hole_line(f)
     if k == "boss":
