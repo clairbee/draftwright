@@ -86,9 +86,8 @@ from draftwright.layout import StripCandidate, plan_strip
 # drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
-from draftwright.model.compiled import resolve_feature
+from draftwright.model.compiled import FeatureRef, resolve_feature
 from draftwright.model.ir import AUTHORED_DIMENSION_KINDS, HoleFeature, PatternFeature
-from draftwright.model.planner import plan_locations
 
 
 def callout_from_spec(spec, draft, count) -> HoleCallout | None:
@@ -153,7 +152,7 @@ def _record_slot_drop(ctx, dwg, kind, idx, view, feat):
     )
 
 
-def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
+def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
     """Dimension milled slots from the IR — width (the defining size, across
     ``width_axis``) + length (along ``long_axis``) + a position dim from the part
     datum, in the view the two axes span. Places through the engine's zone strips
@@ -180,17 +179,23 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
     (the ``m_slot{i}_*`` names must match the auto-pass — never re-enumerate a compacted
     list; `plan_dimensions` emits one group per slot in model order, so enumerating the
     slot groups preserves that index)."""
-    slot_groups = [g for g in groups if g.feature_kind in ("slot", "pad", "pocket")]
+    slot_groups = plan.of_kind("slot", "pad", "pocket")
     if not slot_groups:
         return 0
-    # Pocket location geometry is rendered in this in-plane pass, but its intent
-    # remains planner-authoritative (ADR 0015): datum and target come from the same
-    # PlannedDimension consumed by render_locations, including non-Z openings.
+    # Pocket location geometry is rendered in this in-plane pass, but its content
+    # remains compiler-authoritative (ADR 0015/0016): datum and target come from the same
+    # approved location consumed by render_locations, including non-Z openings.
+    # Keyed by (feature, MEASURED axis): a non-Z pocket is approved one entry per in-plane
+    # coordinate, so keying by feature alone would keep whichever came last.
     pocket_locations = {
-        pd.feature: pd
-        for pd in plan_locations(dwg.model())
-        if pd.param.role == "location_pocket" and pd.param.span is not None
+        (loc.ref, loc.discriminator): loc
+        for loc in plan.locations
+        if loc.role == "location_pocket" and loc.discriminator is not None
     }
+    # A slot's own position dim — datum→near-end along its long axis. Compiled, not
+    # computed from `a.bb`: it prints a number, so an authored set that does not name the
+    # slot's location must not get one (#925).
+    slot_positions = {loc.ref: loc for loc in plan.locations if loc.role == "location_slot"}
     draft = dwg.draft
     tier = draft.font_size + 2 * draft.pad_around_text
     views = {
@@ -199,16 +204,17 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
         frozenset("yz"): ("side", a.sv_zones, "y", a.proj.side_x, "z", a.proj.side_z),
     }
 
-    def _bb(axis, hi):
-        return getattr(a.bb.max if hi else a.bb.min, axis.upper())
-
     count = 0
     kind_indices: dict[str, int] = {}
+    only_refs = None if only is None else {FeatureRef(f) for f in only}
     for g in slot_groups:
-        s = g.feature
+        # The slot object supplies WITNESS GEOMETRY only — `lo`/`hi`/`w_center`/`width` fix
+        # where the extension lines land, exactly as a centre mark is sized by its hole
+        # (#875). Every PRINTED value below comes from an approved entry.
+        s = resolve_feature(g.ref)
         i = kind_indices.get(s.kind, 0)
         kind_indices[s.kind] = i + 1
-        if only is not None and s not in only:
+        if only_refs is not None and g.ref not in only_refs:
             continue  # #426 Ph2b: skip in place — i must stay the model index
         view = views[frozenset((s.width_axis, s.long_axis))]
         name, zones, h_axis, h_proj, _v_axis, v_proj = view
@@ -219,7 +225,7 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             p_hi,
             perp_lo,
             perp_hi,
-            value,
+            approved,
             kind,
             anchor="center",
             sfx="",
@@ -230,9 +236,10 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             vp=v_proj,
             idx=i,
         ):
-            # The rendered label: the PLANNED value + its pre-formatted tolerance suffix
-            # (#730 — planner-authoritative; sfx="" keeps untolerated labels byte-identical).
-            lbl = _fmt(value) + sfx
+            # The rendered label is the APPROVED entry's own text plus its pre-formatted
+            # tolerance suffix (#730 planner-authoritative, #925 compiler-formatted): the
+            # renderer never turns a number into printed text of its own.
+            lbl = approved.value_text + sfx
             # Raw (pre-snap) endpoints — the dedup key must share a basis with the
             # hole-location key (which uses the raw ref), else the ~0.05 mm snap gap can
             # push a coincident span into an adjacent 0.1 mm page bin and the #345
@@ -240,7 +247,7 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             raw_lo, raw_hi = p_lo, p_hi
             # Snap the geometric span to the displayed (1-dp) value so drawn length
             # matches the label (else label-vs-measured lint trips).
-            disp = float(_fmt(value))
+            disp = float(approved.value_text)
             sgn = 1.0 if p_hi >= p_lo else -1.0
             if anchor == "center":
                 mid = (p_lo + p_hi) / 2
@@ -402,97 +409,75 @@ def render_slots(dwg, groups, a, *, ctx, only=None) -> int:
             )
             return True  # deferred — the callback owns the drop; caller's else must not fire
 
-        # Bind each planned dim explicitly by (role, kind) — never positionally (#730).
-        by_key = {(pd.param.role, pd.param.kind): pd for pd in g.dims}
+        # Bind each approved dim explicitly by (role, kind) — never positionally (#730).
         role_prefix = s.kind if s.kind in ("pad", "slot") else ""
-        wpd = by_key.get((f"{role_prefix}_width", "length"))
-        lpd = by_key.get((f"{role_prefix}_length", "length"))
+        wpd = g.dim(role=f"{role_prefix}_width", kind="length")
+        lpd = g.dim(role=f"{role_prefix}_length", kind="length")
         half = s.width / 2
-        if wpd is not None and not wpd.suppressed:
+        if wpd is not None:
             if _place(
                 s.width_axis,
                 s.w_center - half,
                 s.w_center + half,
                 s.lo,
                 s.hi,
-                wpd.param.value,
+                wpd,
                 "width",
-                sfx=_tol_suffix(wpd.param.tolerance, draft),
+                sfx=_tol_suffix(wpd.tolerance, draft),
             ):
                 count += 1
             else:
                 _record_slot_drop(ctx, dwg, "width", i, name, s)
-        if lpd is not None and not lpd.suppressed:
+        if lpd is not None:
             if _place(
                 s.long_axis,
                 s.lo,
                 s.hi,
                 s.w_center - half,
                 s.w_center + half,
-                lpd.param.value,
+                lpd,
                 "length",
-                sfx=_tol_suffix(lpd.param.tolerance, draft),
+                sfx=_tol_suffix(lpd.tolerance, draft),
             ):
                 count += 1
             else:
                 _record_slot_drop(ctx, dwg, "length", i, name, s)
-        datum = _bb(s.long_axis, False)
-        # Pads are located by plan_locations on both axes; slots retain their
+        # Pads are located by the compiled location set on both axes; slots retain their
         # historical single-axis position dimension here.
-        if s.kind == "slot" and (s.lo - datum) * a.SCALE >= 1.0:
+        pos = slot_positions.get(g.ref)
+        if pos is not None and pos.value * a.SCALE >= 1.0:
+            axis_i = "xyz".index(s.long_axis)
             if _place(
                 s.long_axis,
-                datum,
-                s.lo,
+                pos.span[0][axis_i],
+                pos.span[1][axis_i],
                 s.w_center - half,
                 s.w_center + half,
-                s.lo - datum,
+                pos,
                 "pos",
                 anchor="lo",
             ):
                 count += 1
             else:
                 _record_slot_drop(ctx, dwg, "position", i, name, s)
-        elif s.kind == "pocket" and s.frame.axis != "z" and s in pocket_locations:
+        elif s.kind == "pocket" and s.frame.axis != "z":
             # Side-/front-opening pockets need two in-plane coordinates in their
-            # end-on view.  The planner supplies the datum→centre span; Z-opening
-            # pockets use render_locations' X(plan)/Y(side) ladder.
-            location = pocket_locations[s]
-            span = location.param.span
-            assert span is not None  # pocket_locations only contains planned spans
-            datum_point, target_point = span
-            axis_index = {axis: i for i, axis in enumerate("xyz")}
+            # end-on view.  The compiler approves one entry PER coordinate, each with its
+            # own value and span; Z-opening pockets use render_locations' X(plan)/Y(side)
+            # ladder instead.
             width_lo, width_hi = s.w_center - half, s.w_center + half
-            for axis, start, end, perp_lo, perp_hi, kind in (
-                (
-                    s.long_axis,
-                    datum_point[axis_index[s.long_axis]],
-                    target_point[axis_index[s.long_axis]],
-                    width_lo,
-                    width_hi,
-                    "pos_long",
-                ),
-                (
-                    s.width_axis,
-                    datum_point[axis_index[s.width_axis]],
-                    target_point[axis_index[s.width_axis]],
-                    s.lo,
-                    s.hi,
-                    "pos_width",
-                ),
+            for axis, perp_lo, perp_hi, kind in (
+                (s.long_axis, width_lo, width_hi, "pos_long"),
+                (s.width_axis, s.lo, s.hi, "pos_width"),
             ):
+                entry = pocket_locations.get((FeatureRef(s), axis))
+                if entry is None:
+                    continue  # not approved
+                index = "xyz".index(axis)
+                start, end = entry.span[0][index], entry.span[1][index]
                 if abs(end - start) * a.SCALE < 1.0:
                     continue
-                if _place(
-                    axis,
-                    start,
-                    end,
-                    perp_lo,
-                    perp_hi,
-                    end - start,
-                    kind,
-                    anchor="lo",
-                ):
+                if _place(axis, start, end, perp_lo, perp_hi, entry, kind, anchor="lo"):
                     count += 1
                 else:
                     _record_slot_drop(ctx, dwg, "position", i, name, s)
@@ -562,13 +547,19 @@ def _location_candidate(
     )
 
 
-def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
-    """Baseline X/Y hole-location dims from the IR (#238). The planner decides the
-    intent (`plan_locations`: which refs, from which datum); this renderer owns the
-    layout (Amendment 4) — X dims tier above the plan view, Y dims above the side
+def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
+    """Baseline X/Y hole-location dims from the compiled plan (#238). The compiler decides
+    the content (`plan.locations`: which refs survived, from which datum); this renderer owns
+    the layout (Amendment 4) — X dims tier above the plan view, Y dims above the side
     view, nearest-datum-first, legibility-gated, allocated from the existing strips;
     a ref with no room is dropped as `location_ref_dropped`. Replaces the engine's
     `_add_location_dims`. Returns the count placed.
+
+    Reads `plan.locations`, not `plan_locations(model)`: a location prints a number, so an
+    authored set that does not name one must not get one, and the only way to guarantee
+    that for every renderer at once is for the withheld entries never to arrive (#925).
+    Before this the pass took the raw planner list and drew every ref regardless — an
+    authored set naming a single bore still produced its X/Y position dims.
 
     *only*, when given, restricts placement to refs whose source feature is in the set —
     the #426 finalize() path passes the recorded ``locate`` intents' features so the
@@ -578,32 +569,32 @@ def render_locations(dwg, model, a, *, ctx, only=None, pinned=None) -> int:
     *pinned* carries the #511 first slice: deferred user ``locate(..., pin=True)`` calls
     remain first-class corridor candidates, but get higher survival/dedup priority and
     pin their placed names instead of being hand-added after the solve."""
-    planned = plan_locations(model)
-    if not planned:
+    approved = plan.locations
+    if not approved:
         return 0
     draft = dwg.draft
-    datum = planned[0].datum
-    assert datum is not None  # plan_locations always sets the datum
-    datum_x, datum_y = datum.at[0], datum.at[1]
+    datum_x, datum_y = approved[0].span[0][0], approved[0].span[0][1]
+    only_refs = None if only is None else {FeatureRef(f) for f in only}
     refs = []
-    for pd in planned:
-        if only is not None and pd.feature not in only:  # #426: recorded subset only
+    for loc in approved:
+        if only_refs is not None and loc.ref not in only_refs:  # #426: recorded subset only
             continue
         # This ladder is specifically plan-X / side-Y for Z-normal features.
-        # Non-Z pockets are still planner-backed, but their two in-plane spans
+        # Non-Z pockets are still compiler-backed, but their two in-plane spans
         # are rendered in their end-on view by render_slots.
-        if pd.feature is None or pd.feature.frame.axis != "z":
+        if loc.axis != "z":
             continue
-        if pd.param.span is None:
-            continue
-        rx, ry = pd.param.span[1][0], pd.param.span[1][1]
+        rx, ry = loc.span[1][0], loc.span[1][1]
         # A rotational part's on-axis (concentric) *hole* bore is located by the
         # centreline, not a position dim (matches the engine's feature_holes
         # filter). A pattern ref (role "location_pattern" — e.g. a bolt-circle
-        # centre) is NOT filtered, even on the axis.
-        if pd.param.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
+        # centre) is NOT filtered, even on the axis. A renderer-side filter only ever
+        # REMOVES an approved entry (a drop), so it does not breach the boundary.
+        if loc.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
             continue
-        refs.append((rx, ry, pd.feature))  # carry the source feature for provenance (ADR 0010)
+        # Provenance (ADR 0010): the located feature. `resolve_feature` is the sanctioned
+        # seam for exactly this — the corridor's feature map keys drop()/annotations_of().
+        refs.append((rx, ry, resolve_feature(loc.ref)))
     if not refs:
         return 0
     pinned_set = set(pinned or ())
@@ -1348,16 +1339,21 @@ def _reroute_crossing_diameters(dwg, *, ctx) -> int:
     return rerouted
 
 
-def _chamfer_label(leg, ch) -> str:
+def _chamfer_label(leg_text, leg, ch) -> str:
     """The chamfer callout string: ``C{leg}`` for an equal-leg 45° chamfer, else
-    ``{leg} × {angle}°`` (#560). *leg* is the PLANNED value (``pd.param.value`` —
-    the planner-authoritative number, #724 review); the feature supplies only the
-    geometric *form* discriminators (``leg2``/``angle``). Formatting lives in the
-    render layer, not on the IR feature — every other feature's label is formed by
-    the planner/renderer too, so a ``ChamferFeature`` stays pure data (ADR 0013 §7)."""
+    ``{leg} × {angle}°`` (#560).
+
+    Takes the leg TWICE, on purpose, because printing it and testing its form are different
+    jobs: *leg_text* is the compiler's own `value_text` and is what appears on the sheet,
+    while *leg* is the number the equal-leg comparison needs. The feature supplies only the
+    geometric form discriminators (``leg2``/``angle``), and a ``ChamferFeature`` stays pure
+    data (ADR 0013 §7)."""
     if abs(leg - ch.leg2) < 0.05 and abs(ch.angle - 45.0) < 0.5:
-        return f"C{_fmt(leg)}"
-    return f"{_fmt(leg)} × {_fmt(ch.angle)}°"
+        return f"C{leg_text}"
+    # `ch.angle` is a FORM discriminator, not a planned parameter — `ChamferFeature.
+    # parameters()` emits only the leg — so it has no approved text to consume. That is the
+    # IR gap `_FACTS` records, and it is why this line stays in the provenance budget.
+    return f"{leg_text} × {_fmt(ch.angle)}°"
 
 
 # ── Shared machined-feature leader-callout pass (#637) ──────────────────────────────────
@@ -1524,17 +1520,17 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
                 f"m_chamfer_{ch.axis}{i}",
                 view,
                 vb,
-                _chamfer_label(pd.value, ch) + _tol_suffix(pd.tolerance, draft),
+                _chamfer_label(pd.value_text, pd.value, ch) + _tol_suffix(pd.tolerance, draft),
                 _corner_candidates(dwg, view, vb, [ch], reach, provenances=[g.ref]),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="chamfer", drop_code="chamfer_dropped", ctx=ctx)
 
 
-def _fillet_label(radius, count) -> str:
+def _fillet_label(radius_text, count) -> str:
     """The fillet callout string: ``R{radius}``, prefixed ``{count}×`` when a set of equal
     fillets shares one callout (#561). Formatting lives in the render layer (ADR 0013 §7)."""
-    r = f"R{_fmt(radius)}"
+    r = f"R{radius_text}"
     return f"{count}× {r}" if count > 1 else r
 
 
@@ -1593,7 +1589,7 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                 f"m_fillet_{axis}{gi}",
                 view,
                 vb,
-                _fillet_label(members[0][1].value, len(ordered)) + _tol_suffix(tol, draft),
+                _fillet_label(members[0][1].value_text, len(ordered)) + _tol_suffix(tol, draft),
                 _corner_candidates(
                     dwg,
                     view,
@@ -1607,13 +1603,13 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
 
 
-def _flat_label(across, sfx="") -> str:
+def _flat_label(across_text, sfx="") -> str:
     """The machined-flat callout string: ``{across} A/F`` (across flats) — the standard
     abbreviation for a spanner-flat / D / hex size (#148b). *across* is the PLANNED value
     (``pd.param.value``, #726); *sfx* is the pre-formatted tolerance suffix, interleaved
     after the value (``17 ±0.2 A/F`` — the tolerance rides the number, not the ``A/F``
     qualifier). Formatting lives in the render layer, not on the IR feature (ADR 0013 §7)."""
-    return f"{_fmt(across)}{sfx} A/F"
+    return f"{across_text}{sfx} A/F"
 
 
 def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
@@ -1663,7 +1659,7 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
                 f"m_flat_{axis}{gi}",
                 view,
                 vb,
-                _flat_label(members[0][1].value, _tol_suffix(tol, draft)),
+                _flat_label(members[0][1].value_text, _tol_suffix(tol, draft)),
                 _corner_candidates(
                     dwg,
                     view,
@@ -1677,14 +1673,14 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
     return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
 
 
-def _groove_label(width, diameter, wsfx="", dsfx="") -> str:
+def _groove_label(width_text, diameter_text, wsfx="", dsfx="") -> str:
     """The turned/circlip-groove callout string: ``{width} WIDE × ø{diameter}`` — the groove's
     axial width and its floor diameter (#148c). *width*/*diameter* are the PLANNED values
     (``pd.param.value``, #727); *wsfx*/*dsfx* are each value's pre-formatted tolerance
     suffix, interleaved so a tolerance rides its own number (``4 ±0.1 WIDE × ø16 ±0.05``) —
     the two params carry independent tolerances (kinds "length"/"diameter"). Formatting
     lives in the render layer, not on the IR feature (ADR 0013 §7)."""
-    return f"{_fmt(width)}{wsfx} WIDE × ø{_fmt(diameter)}{dsfx}"
+    return f"{width_text}{wsfx} WIDE × ø{diameter_text}{dsfx}"
 
 
 def _ray_exit_dist(px, py, ux, uy, rect) -> float:
@@ -1704,7 +1700,7 @@ def _ray_exit_dist(px, py, ux, uy, rect) -> float:
     return max(min([t for t in ts if t > 0], default=0.0), 0.0)
 
 
-def _pocket_label(width, length, depth, wsfx="", lsfx="", dsfx="") -> str:
+def _pocket_label(width_text, length_text, depth_text, wsfx="", lsfx="", dsfx="") -> str:
     """The pocket callout string: ``{width} × {length} × {depth} DEEP`` (#148a). The values
     are the PLANNED ones (``pd.param.value``, #728); *wsfx*/*lsfx*/*dsfx* are each value's
     pre-formatted tolerance suffix, interleaved so a tolerance rides its own number. (All
@@ -1714,14 +1710,14 @@ def _pocket_label(width, length, depth, wsfx="", lsfx="", dsfx="") -> str:
     helper's hole callouts, not as font text — a plain :class:`Leader` label has no access
     to it, so this uses the font-safe ``DEEP`` word (the vendored Plex Mono lacks ↧).
     Formatting lives in the render layer (ADR 0013 §7)."""
-    return f"{_fmt(width)}{wsfx} × {_fmt(length)}{lsfx} × {_fmt(depth)}{dsfx} DEEP"
+    return f"{width_text}{wsfx} × {length_text}{lsfx} × {depth_text}{dsfx} DEEP"
 
 
-def _slot_label(width, length, wsfx="", lsfx="") -> str:
+def _slot_label(width_text, length_text, wsfx="", lsfx="") -> str:
     """The grouped slot-array callout string: ``SLOT {width} × {length}`` (#841). A slot has no
     depth, so — unlike :func:`_pocket_label` — there is no ``× depth DEEP``; the ``SLOT`` prefix
     names the feature the way a lone slot's linear dims otherwise would."""
-    return f"SLOT {_fmt(width)}{wsfx} × {_fmt(length)}{lsfx}"
+    return f"SLOT {width_text}{wsfx} × {length_text}{lsfx}"
 
 
 # Unit lead directions tried (nearest-clear wins), diagonals first so a central pocket's
@@ -1841,9 +1837,9 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _pocket_label(
-                    wpd.value,
-                    lpd.value,
-                    dpd.value,
+                    wpd.value_text,
+                    lpd.value_text,
+                    dpd.value_text,
                     wsfx=_tol_suffix(wpd.tolerance, draft),
                     lsfx=_tol_suffix(lpd.tolerance, draft),
                     dsfx=_tol_suffix(dpd.tolerance, draft),
@@ -1899,8 +1895,8 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
                 view,
                 vb,
                 _groove_label(
-                    wpd.value,
-                    dpd.value,
+                    wpd.value_text,
+                    dpd.value_text,
                     wsfx=_tol_suffix(wpd.tolerance, draft),
                     dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
@@ -2003,7 +1999,7 @@ def render_boss_heights(dwg, plan, a, *, ctx) -> int:
         p1 = dwg.at(view, *pd.span[0])
         p2 = dwg.at(view, *pd.span[1])
         edge = max(p1[0], p2[0]) if side == "right" else max(p1[1], p2[1])
-        label = _fmt(pd.value) + _tol_suffix(pd.tolerance, dwg.draft)
+        label = pd.value_text + _tol_suffix(pd.tolerance, dwg.draft)
         name = f"m_bossheight_{b.frame.axis}{bi}"
 
         def build(pos, p1=p1, p2=p2, side=side, edge=edge, label=label):
@@ -2269,16 +2265,16 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             "plan",
             _SLOT_DIM_WIDTH,
             abs(x1 - x0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value_text: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
                 _w - pos,
                 dwg.draft,
-                label=_fmt(_v),
+                label=_v,
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value: dim_footprint(
-                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value_text: dim_footprint(
+                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
             ),
         )
         n += 1
@@ -2293,16 +2289,16 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             "side",
             _SLOT_DIM_DEPTH,
             abs(y1 - y0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value_text: _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
                 _w - pos,
                 dwg.draft,
-                label=_fmt(_v),
+                label=_v,
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value: dim_footprint(
-                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _fmt(_v)
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value_text: dim_footprint(
+                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
             ),
         )
         n += 1
@@ -3204,7 +3200,7 @@ def render_rotational(dwg, plan, a, *, ctx) -> int:
 
     def _dia_label(dim):
         # Planner-fed value + authored tolerance/fit suffix (#754).
-        return f"ø{_fmt(dim.value)}{_tol_suffix(dim.tolerance, draft)}"
+        return f"ø{dim.value_text}{_tol_suffix(dim.tolerance, draft)}"
 
     if axis == "z":
         # Vertical turning axis (the common case): OD across the top of the front

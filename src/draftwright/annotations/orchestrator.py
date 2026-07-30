@@ -371,12 +371,12 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     def _s_hole_callouts():
         # Any hole/pattern member (declared holes render even where detection missed them).
         if feature_keys:
-            _annotate_holes(dwg, a, view_of_axis, _groups, feature_keys, ctx=ctx)
+            _annotate_holes(dwg, a, view_of_axis, _groups, feature_keys, ctx=ctx, plan=_compiled)
 
     def _s_locations():
         # Hole location dims — IR renderer (planner picks the refs + datum, #238); placed
         # through the existing above-view strips. Replaces the engine's _add_location_dims.
-        render_locations(dwg, _model, a, ctx=ctx)
+        render_locations(dwg, _compiled, a, ctx=ctx)
         if a.cross_diams and a.is_rotational and not feature_keys:
             _log.info(
                 "Cross-hole ø%s detected but not annotated (requires section view)",
@@ -453,7 +453,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # later subchain + mandatory priority keeps ISO outermost stacking and prevents
         # best-effort locations from starving the principal depth dimension (#477).
         if feature_keys:
-            _locate_off_axis_holes(dwg, ctx, a, which="across")
+            _locate_off_axis_holes(dwg, ctx, a, which="across", plan=_compiled)
 
     def _s_envelope():
         # Overall width (plan, below) + depth (side, below) envelope dims — IR renderer,
@@ -500,14 +500,14 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
         # survives inside its candidates' build closures since #636; nothing here
         # places immediately.)
         if feature_keys:
-            _locate_off_axis_holes(dwg, ctx, a, which="along")
+            _locate_off_axis_holes(dwg, ctx, a, which="along", plan=_compiled)
 
     def _s_slots():
         # Non-cylindrical machined features: slots / reduced across-flats sections
         # (#135) — IR renderer, placed through the zone strips (shared infra). Runs
         # after every hole/diameter pass so it claims strip space last.
         # Planner-fed (#730): consumes the DimensionGroups so authored tolerances render.
-        render_slots(dwg, _groups, a, ctx=ctx)
+        render_slots(dwg, _compiled, a, ctx=ctx)
 
     def _s_gdt():
         # Declared GD&T frames / datum symbols / surface finishes (ADR 0011 §4, #61)

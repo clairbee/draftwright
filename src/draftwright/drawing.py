@@ -1094,6 +1094,20 @@ class Drawing:
                 f"callout(): a {kind} is auto-named and placed in its characteristic view; "
                 "view=/name= are unsupported for machined-feature callouts"
             )
+        # There is deliberately NO authored-omission pre-check here.
+        #
+        # Three versions of one lived at this point, each a hand-written prediction of what
+        # a callout would draw given the plan, and each wrong for some kind (#921 rounds
+        # 6–8). The last asked "does this feature have ANY approved dimension?", which is
+        # sound only in one direction: a turned step with its length authored and its
+        # diameter omitted answered yes, and the live path then drew the omitted diameter
+        # (#925 review). Adding a fourth prediction would rebuild the per-kind table this
+        # boundary exists to delete.
+        #
+        # The renderers below now consume approved content, so "draws nothing" is what they
+        # DO rather than something to forecast — and both paths reach it the same way: the
+        # live call returns "" with an `authored_omission` build issue, and the deferred
+        # intent drains through the same migrated renderers to the same nothing.
         if self._defer_intents:  # #426: record, don't place — finalize() drains it
             self._intents.append(Intent("callout", feature, {"view": view, "name": name}))
             return ""
@@ -1741,6 +1755,40 @@ class Drawing:
         routable = model is not None and a is not None
         queued_dim_ids: set = set()
 
+        def _report_authored_omissions(features, before) -> None:
+            """Say so when a recorded edit drew nothing because the AUTHOR omitted it.
+
+            The round-6 defect (#921) was silence: the drain recorded the intent, drew
+            nothing, dropped the intent unconditionally and reported success, so the edit
+            vanished with no annotation, no pending intent and no warning. #925 replaced the
+            pre-check that fixed it — a fourth hand-written prediction of what a callout
+            would draw, and wrong for a feature with some measurements authored and some not
+            — so the report has to move here, where "drew nothing" is observed rather than
+            forecast, and matches what the live path records at the same moment.
+            """
+            if not features or model is None or model.authored_dimensions is None:
+                return
+            drawn = set(self.annotations()) - before
+            for feature in features:
+                if drawn & set(self.annotations_of(feature)):
+                    continue
+                omission = next(
+                    (
+                        o
+                        for o in compile_dimensions(model).diagnostics
+                        if o.feature is feature and o.authored
+                    ),
+                    None,
+                )
+                if omission is not None:
+                    self._record_build_issue(
+                        "info",
+                        "authored_omission",
+                        f"the recorded edit for this {feature.kind} drew nothing: "
+                        f"{omission.parameter_id} is not in the authored dimension set — "
+                        "add a dimension(feature, role) line",
+                    )
+
         def _s_rotational():
             # Rotational furniture — OD dim + axis centrelines + concentric-bore leaders —
             # through the shared whole-model render_rotational (#424/#426). Runs FIRST (its
@@ -1797,6 +1845,7 @@ class Drawing:
         def _s_hole_callouts():
             # Hole/pattern callouts through the REAL priority-drop/anchoring solve.
             # Furniture is owned by the replayed furniture() intents → place_furniture=False.
+            before_callouts = set(self.annotations())
             if r.only_callout:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
                 _annotate_holes(
@@ -1806,9 +1855,11 @@ class Drawing:
                     plan_dimensions(model),
                     feature_hole_keys(model, a),
                     ctx=ctx,
+                    plan=compile_dimensions(model),
                     only=r.only_callout,
                     place_furniture=False,
                 )
+            _report_authored_omissions(r.only_callout, before_callouts)
             # Drop the placed callout intents NOW — before the fallible later stages — so
             # a raise there can't re-route (and, via first-free hc_ naming, duplicate)
             # them on a retry.
@@ -1821,23 +1872,32 @@ class Drawing:
             # dedups (#345).
             if r.only_loc:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_locations(self, model, a, ctx=ctx, only=r.only_loc, pinned=r.pinned_loc)
+                render_locations(
+                    self,
+                    compile_dimensions(model),
+                    a,
+                    ctx=ctx,
+                    only=r.only_loc,
+                    pinned=r.pinned_loc,
+                )
 
         def _s_off_axis_across():
             # Side-drilled holes' in-plane (side-below) locations — REGISTER-only, whole-model
-            # (_locate_off_axis_holes reads the IR's X/Y holes, no only= subset); they place at
-            # the shared drain. Whole-model like the auto pass: commenting SOME dwg.locate lines
+            # (_locate_off_axis_holes takes the compiled plan's approved off-axis positions,
+            # no only= subset); they place at the shared drain. Whole-model like the auto pass: commenting SOME dwg.locate lines
             # still redraws every side-drilled location; commenting them ALL empties the bucket.
             if r.off_axis_loc_ids:
                 assert a is not None
-                _locate_off_axis_holes(self, ctx, a, which="across")
+                _locate_off_axis_holes(
+                    self, ctx, a, which="across", plan=compile_dimensions(model)
+                )
 
         def _s_off_axis_along():
             # Side-drilled (X/Y-axis) hole HEIGHT locations — register-only, placed at the drain
             # (mirrors the auto pass's off_axis_along stage; after the envelope candidates).
             if r.off_axis_loc_ids:
                 assert a is not None
-                _locate_off_axis_holes(self, ctx, a, which="along")
+                _locate_off_axis_holes(self, ctx, a, which="along", plan=compile_dimensions(model))
 
         def _s_height_ladder():
             # Prismatic step-height ladder through the auto-pass renderer. (#636) This
@@ -1887,6 +1947,7 @@ class Drawing:
             # column-left) — placed immediately, before the corridor drain, exactly as
             # the auto-pass runs it (#699 slice b — the old drain-first order gave the
             # deferred path different obstacle visibility).
+            before_dia = set(self.annotations())
             if r.only_dia:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
                 from typing import cast as _cast_dia
@@ -1903,6 +1964,7 @@ class Drawing:
                     ctx=ctx,
                     only={_DiaRef(_cast_dia(_DiaFeature, f)) for f in r.only_dia},
                 )
+            _report_authored_omissions(r.only_dia, before_dia)
             self._intents = [it for it in self._intents if id(it) not in r.dia_ids]
 
         def _s_step_lengths():
@@ -1932,7 +1994,7 @@ class Drawing:
             # values + tolerances come from the plan, like the auto-pass.
             if r.slot_feats:
                 assert a is not None and isinstance(model, PartModel)  # ⟹ routable
-                render_slots(self, plan_dimensions(model), a, ctx=ctx, only=r.slot_feats)
+                render_slots(self, compile_dimensions(model), a, ctx=ctx, only=r.slot_feats)
 
         # Machined-feature leader callouts (#148): each recorded callout intent draws exactly
         # its own feature — the renderer is restricted to the surviving intents' features via

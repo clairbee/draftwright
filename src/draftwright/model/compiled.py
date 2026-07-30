@@ -22,24 +22,29 @@ they never receive**:
   Omission stays inspectable — ADR 0016's "marked, not filtered" is preserved — but it is
   not on the path a renderer walks.
 
-  **Nothing consumes diagnostics yet, and this is deliberately not claimed otherwise.**
-  The consumer arrives with #921: an authored set is the first source of omissions that
-  coverage must tell apart from a measurement simply missed, which is what
-  ``Omission.authored`` exists for. Until then every omission here is a planner rule the
-  lint layer already understands by other means, so wiring a consumer now would be
-  connecting a channel to nothing. The owner is `linting/coverage.py`, at the #921 rebase.
+  The first consumer is `add_feature_diameter`, which asks WHY a callout has nothing to
+  draw so it can say "the author left this out" rather than "this feature exposes none".
+  Coverage lint is the next owner (`linting/coverage.py`).
 - Correlated sets (a step-height ladder, a shoulder chain) arrive as explicit
   :class:`ApprovedLadder` groups, so a renderer never reconstructs one from a feature.
+- **Positions are dimensions.** A datum-referenced location prints a number, so it is
+  compiled like any other (:attr:`RenderableDimensionPlan.locations`) rather than being a
+  parallel pipeline the authored set could not reach. That was the #925 gap: locations had
+  no `DimParameter`, so `dimension(hole, "location")` raised and every location was drawn
+  regardless of what the script declared.
 
-Where the boundary does NOT yet reach, stated so the exceptions cannot be mistaken for
+Where the boundary does NOT reach, stated so the exceptions cannot be mistaken for
 completeness:
 
-- **Location dimensions** are dimensions and belong inside it; `plan_locations` returns a
-  flat cross-feature list that never enters a `DimensionGroup`, so they are sequenced later
-  in this work rather than carved out (#883).
-- **Raw AP242 PMI** is a documented non-generated exception: `PmiFeature.parameters()` is
-  empty by design and the record is rendered verbatim, so there is no compiled content for
-  it to come from.
+- **Hole callouts** still take legacy `DimensionGroup`s. They honour `suppressed` at every
+  term (`model/callout.py`), so this is a structural gap, not a behavioural one — but
+  "the renderer checks" is precisely the guarantee this boundary replaces, so it is listed
+  rather than assumed safe.
+- **Author-supplied text is not a generated measurement.** Raw AP242 PMI, GD&T control
+  frames and surface finishes carry values the script or the STEP file wrote; their
+  `parameters()` are empty by design and the record is rendered verbatim. There is no
+  compiled content for them to come from, and an authored dimension set does not govern
+  them because they are not the engine's choice to make.
 """
 
 from __future__ import annotations
@@ -51,14 +56,22 @@ from draftwright._geometry import _fmt
 from draftwright.model.ir import (
     EnvelopeFeature,
     Feature,
+    HoleFeature,
     PartModel,
+    PocketFeature,
     Point,
     RotationalFeature,
+    SlotFeature,
     StepLevelFeature,
 )
-from draftwright.model.planner import DimensionId, plan_dimensions
-
-_AUTHORED_OMISSION = "not in the authored dimension set"
+from draftwright.model.planner import (
+    _AUTHORED_OMISSION,
+    DimensionId,
+    authored_location_omitted,
+    location_datum,
+    plan_dimensions,
+    plan_locations,
+)
 
 
 class FeatureRef:
@@ -396,6 +409,13 @@ class RenderableDimensionPlan:
 
     groups: tuple[ApprovedGroup, ...] = ()
     ladders: tuple[ApprovedLadder, ...] = ()
+    #: Approved datum-referenced positions, in planner order. A location is a dimension
+    #: and lives inside the boundary like any other; it arrives as its own collection
+    #: because the planner synthesizes it across features (datum → ref) rather than off a
+    #: single feature's parameters, so it has no `DimensionGroup` to belong to.
+    #: `span` is ``(datum, located point)`` and `axis` is the feature's frame axis — the
+    #: two things the renderer needs and cannot derive.
+    locations: tuple[ApprovedDimension, ...] = ()
     diagnostics: tuple[Omission, ...] = field(default=())
 
     def of_kind(self, *kinds: str) -> tuple[ApprovedGroup, ...]:
@@ -600,6 +620,16 @@ def _compile_overall_height(
         mark = marked.get((id(env), "height.length"))
         if mark is not None:
             return None, [Omission(env, "height.length", mark[0], mark[1])]
+    elif model.authored_dimensions is not None:
+        # No `EnvelopeFeature`, so the height falls back to the bounding box and no
+        # parameter anywhere names it. An AUTHORED set is the drawing's complete
+        # dimensioning, so it must not acquire a measurement its author had no way to ask
+        # for: declaring `.envelope()` is how the overall height becomes nameable (#876).
+        # This is the one place the fallback lives, so refusing it is one branch rather
+        # than a rule every renderer has to remember.
+        return None, [
+            Omission(None, "height.length", float(bb.size.Z), "not in the authored dimension set")
+        ]
     value = float(env.height) if env is not None else float(bb.size.Z)
     env_ref = FeatureRef(env) if env is not None else None
     x, y = float(bb.max.X), float(bb.min.Y)
@@ -622,16 +652,213 @@ def _compile_overall_height(
     )
 
 
-def _compile_groups(planned) -> list[ApprovedGroup]:
-    """Every planned group, reduced to what the compiler approved.
+def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[Omission]]:
+    """The datum-referenced positions, approved or omitted.
+
+    A location is a dimension: it prints a number, so an authored set that does not name it
+    must not get one. That decision is made in `plan_locations` (which owns the datum and
+    the coincident-ref dedup) and read off `suppressed` here, so this stays the single place
+    a renderer's location content comes from.
+
+    The renderer keeps its own filters — the concentric-bore exclusion, the legibility gate,
+    the sub-millimetre offset test. Those only ever REMOVE an approved entry, which is a
+    drop, not a leak; the rule this boundary enforces is that nothing reaches the page that
+    the compiler did not approve, not that everything approved reaches it.
+    """
+    approved: list[ApprovedDimension] = []
+    omissions: list[Omission] = []
+    for pd in plan_locations(model):
+        feature = pd.feature
+        span = pd.param.span
+        assert span is not None  # plan_locations always sets the datum → ref span
+        if pd.suppressed:
+            omissions.append(
+                Omission(feature, pd.param.parameter_id, None, pd.reason or "suppressed")
+            )
+            continue
+        axis = feature.frame.axis if feature is not None else None
+        if isinstance(feature, PocketFeature) and axis != "z":
+            # A non-Z pocket's two in-plane coordinates are drawn as TWO dims in its end-on
+            # view (`render_slots`), so they are approved as two entries carrying their own
+            # values — the same shape `_compile_off_axis_hole_locations` uses.
+            #
+            # One entry with `value_text=""` made the renderer subtract the span's endpoints
+            # itself to get each axis's number, which is the compiler's job done twice; the
+            # site that consumed it would have printed an empty label the moment it read
+            # `value_text` (#925). The Z-normal ladder below is the remaining exception and
+            # is listed as such.
+            for meas in (feature.long_axis, feature.width_axis):
+                index = "xyz".index(meas)
+                value = abs(span[1][index] - span[0][index])
+                start = list(span[1])
+                start[index] = span[0][index]
+                approved.append(
+                    ApprovedDimension(
+                        id=_dim_id(feature, f"{pd.param.role}.{meas}"),
+                        value_text=_fmt(value),
+                        value=value,
+                        span=((start[0], start[1], start[2]), span[1]),
+                        ref=FeatureRef(feature),
+                        kind="location",
+                        role=pd.param.role,
+                        discriminator=meas,
+                        axis=axis,
+                    )
+                )
+            continue
+        approved.append(
+            ApprovedDimension(
+                id=_dim_id(feature, pd.param.parameter_id),
+                #: The Z-normal ladder is the one location entry with no per-axis value:
+                #: `render_locations` groups refs ACROSS features and dedups per axis before
+                #: it knows which dims exist, so an entry per axis would be approving a mark
+                #: whose existence the renderer decides. Splitting it needs that grouping to
+                #: move into the compiler — tracked as follow-up work, and listed in the
+                #: label-provenance ratchet so it cannot be forgotten.
+                value_text="",
+                value=0.0,
+                span=span,
+                ref=FeatureRef(feature) if feature is not None else None,
+                kind="location",
+                role=pd.param.role,
+                axis=axis,
+            )
+        )
+    return approved, omissions
+
+
+def _compile_off_axis_hole_locations(
+    model: PartModel,
+) -> tuple[list[ApprovedDimension], list[Omission]]:
+    """A side-drilled hole's positions — its in-plane offset and its height.
+
+    `plan_locations` handles the Z-normal ladder, which measures from `datum_xy`. These
+    measure from the BOUNDING BOX in the hole's end-on view, so they are compiled here for
+    the same reason a slot's position is: same authored decision, different datum.
+
+    The gap this closes: `location_role` said a hole is locatable, `plan_locations` said
+    only a Z-normal one is, and `_locate_off_axis_holes` drew the X/Y ones anyway from the
+    raw IR. Three statements of one fact, so an authored set naming only a side-drilled
+    bore's ⌀ still produced its 35 mm offset and 12 mm height (#925 review).
+
+    **Two entries per member, not one.** `dim_loc_side_y3500` and `dim_loc_front_z1200` are
+    separate dimensions on the page; collapsing them into a single "this hole is located"
+    approval would leave the renderer deciding which of the two an approval covered, which
+    is the content decision this boundary exists to remove. `discriminator` is the MEASURED
+    axis and `axis` is the hole's own — the renderer needs both, and neither is derivable
+    from the other.
+    """
+    approved: list[ApprovedDimension] = []
+    omissions: list[Omission] = []
+    bb: Any = model.bbox
+    for f in model.features:
+        # Eligibility comes from `location_datum`, not a second orientation rule here —
+        # that is the duplication this whole class of defect keeps coming from (#925).
+        if not isinstance(f, HoleFeature) or location_datum(f) != "bbox":
+            continue
+        # An X-drilled hole is located across Y; a Y-drilled one across X. Both carry a
+        # height. (Pattern members are their own `PatternFeature`, so patterned holes are
+        # excluded by construction — as `_ir_off_axis_holes` documents.)
+        measured = ("y" if f.frame.axis == "x" else "x", "z")
+        omitted = authored_location_omitted(model, f)
+        for member in f.members or (f.frame.origin,):
+            for meas in measured:
+                index = "xyz".index(meas)
+                datum = float(getattr(bb.min, meas.upper()))
+                value = abs(member[index] - datum)
+                if omitted:
+                    omissions.append(
+                        Omission(f, f"location_off_axis.{meas}", value, _AUTHORED_OMISSION)
+                    )
+                    continue
+                start = list(member)
+                start[index] = datum
+                approved.append(
+                    ApprovedDimension(
+                        id=_dim_id(f, f"location_off_axis.{meas}"),
+                        value_text=_fmt(value),
+                        value=value,
+                        span=((start[0], start[1], start[2]), member),
+                        ref=FeatureRef(f),
+                        kind="length",
+                        role="location_off_axis",
+                        discriminator=meas,
+                        axis=f.frame.axis,
+                    )
+                )
+    return approved, omissions
+
+
+def _compile_slot_positions(model: PartModel) -> tuple[list[ApprovedDimension], list[Omission]]:
+    """A slot's datum→near-end position, along its long axis.
+
+    Compiled here rather than in `plan_locations` because it measures from the BOUNDING BOX
+    rather than from `datum_xy`, and is drawn in the slot's own view — but it is a position
+    dimension like any other, so it obeys the authored set through the same
+    :func:`~draftwright.model.planner.location_role` table. Before this it obeyed nothing:
+    `render_slots` computed `s.lo - a.bb.min` and printed it, so an authored set naming only
+    a slot's width still produced its position dim.
+
+    `SlotFeature.parameters()` has no position param — the datum is drawing state, not a
+    feature property — which is exactly why the compiler is the right place for it.
+    """
+    approved: list[ApprovedDimension] = []
+    omissions: list[Omission] = []
+    bb: Any = model.bbox
+    for f in model.features:
+        if not isinstance(f, SlotFeature):
+            continue
+        datum = float(getattr(bb.min, f.long_axis.upper()))
+        value = f.lo - datum
+        if authored_location_omitted(model, f):
+            omissions.append(Omission(f, "location_slot.length", value, _AUTHORED_OMISSION))
+            continue
+        start = list(f.frame.origin)
+        end = list(f.frame.origin)
+        start["xyz".index(f.long_axis)] = datum
+        end["xyz".index(f.long_axis)] = f.lo
+        approved.append(
+            ApprovedDimension(
+                id=_dim_id(f, "location_slot.length"),
+                value_text=_fmt(value),
+                value=value,
+                span=((start[0], start[1], start[2]), (end[0], end[1], end[2])),
+                ref=FeatureRef(f),
+                kind="length",
+                role="location_slot",
+                axis=f.long_axis,
+            )
+        )
+    return approved, omissions
+
+
+def _compile_groups(planned) -> tuple[list[ApprovedGroup], list[Omission]]:
+    """Every planned group, reduced to what the compiler approved, plus what it withheld.
 
     The general path all remaining renderers migrate onto: same per-feature shape they
     already consume, with the suppressed entries REMOVED rather than marked. A renderer
     receiving one of these cannot draw a withheld measurement, because it was never
     handed it — which is the whole rule, applied to every feature kind rather than the
-    three that had bespoke migrations."""
+    three that had bespoke migrations.
+
+    The withheld entries leave through `diagnostics`. They did not before: only the two
+    bespoke compilers reported, so `plan.diagnostics` was empty for every ordinary feature
+    and a caller asking "was this the author's doing?" got no for an authored omission
+    (#925). An output channel that is right for three kinds and silent for sixteen is worse
+    than no channel, because it reads as an answer."""
     out: list[ApprovedGroup] = []
+    omissions: list[Omission] = []
     for g in planned:
+        omissions.extend(
+            Omission(
+                g.feature,
+                pd.param.parameter_id,
+                float(pd.param.value),
+                pd.reason or "suppressed",
+            )
+            for pd in g.dims
+            if pd.suppressed
+        )
         approved = tuple(
             ApprovedDimension(
                 id=DimensionId(g.feature, pd.param.parameter_id),
@@ -659,7 +886,7 @@ def _compile_groups(planned) -> list[ApprovedGroup]:
                 dims=approved,
             )
         )
-    return out
+    return out, omissions
 
 
 def compile_dimensions(
@@ -690,8 +917,17 @@ def compile_dimensions(
     )
     if overall is not None:
         ladders.append(overall)
+    locations, location_omissions = _compile_locations(model)
+    slot_positions, slot_omissions = _compile_slot_positions(model)
+    locations.extend(slot_positions)
+    location_omissions.extend(slot_omissions)
+    off_axis, off_axis_omissions = _compile_off_axis_hole_locations(model)
+    locations.extend(off_axis)
+    location_omissions.extend(off_axis_omissions)
+    groups_out, group_omissions = _compile_groups(planned)
     return RenderableDimensionPlan(
-        groups=tuple(_compile_groups(planned)),
+        groups=tuple(groups_out),
         ladders=tuple(ladders),
-        diagnostics=tuple(omissions + height_omissions),
+        locations=tuple(locations),
+        diagnostics=tuple(omissions + height_omissions + location_omissions + group_omissions),
     )

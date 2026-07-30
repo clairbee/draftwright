@@ -159,33 +159,67 @@ def _refuse_headless_callout(group: DimensionGroup) -> None:
 
     if not _is_suppressed(group, "diameter", "bore"):
         return
-    across = [
-        label
-        for name, head, dependents in _CALLOUT_SEGMENTS[1:]
-        if not _shadowed(group, name)
-        for label in _printing(group, head, *dependents)
-    ]
-    # Not every dependent is a dimension. The thread spec and a pattern's count/suffix ride the
-    # same string and live on the FEATURE, so they survive any amount of parameter suppression
-    # and would be discarded in silence — the very outcome the head rule exists to prevent
-    # (#920 review). They are dependents of the head exactly as a counterbore is.
+
+    # Everything the bore ⌀ heads splits in two, and the split is the whole rule.
+    #
+    # A **dependent** has a `DimParameter` and the drawing prints its value: a counterbore ⌀,
+    # a countersink angle, and — the case that made the distinction necessary — a bolt
+    # circle's `bolt_circle.diameter`, which renders only as the `EQ SP ON ø50 BC` suffix.
+    # Appearing in the suffix is what made the BCD look like a rider; where a term sits in
+    # the string is not what classifies it, having a parameter is.
+    #
+    # A **rider** lives on the FEATURE with no parameter to suppress — the thread spec, the
+    # `n×` multiplier, a grid's `(3×3)` — so it survives any amount of parameter suppression
+    # and has no existence outside the string (#920 review).
     feat = group.feature
-    hole = feat.member if isinstance(feat, PatternFeature) else feat
-    thread = getattr(hole, "thread", None)
-    if thread:
-        across.append(f"the thread spec {thread}")
-    # A plain `HoleFeature` may also carry a count — `4× ⌀6 THRU` — so the multiplier is a
-    # dependent of the head for both feature kinds, not just for patterns (#920 review).
-    multiplier = getattr(feat, "count", 0) or 0
-    if multiplier > 1:
-        across.append(f"the {multiplier}× multiplier")
-    pattern_suffix = _pattern_suffix(group)
-    if pattern_suffix:
-        across.append(f"the pattern suffix {pattern_suffix!r}")
-    if not across:
+    suffix = _pattern_suffix(group)
+    bcd_suffix = (
+        suffix if isinstance(feat, PatternFeature) and feat.pattern == "bolt_circle" else None
+    )
+    # `dependent_labels`, not `dependents`: the segment loop above binds that name at
+    # function scope, and reusing it silently retyped the list.
+    dependent_labels = [
+        label
+        for name, head, deps in _CALLOUT_SEGMENTS[1:]
+        if not _shadowed(group, name)
+        for label in _printing(group, head, *deps)
+    ]
+    if bcd_suffix:
+        dependent_labels.append(f"the pattern suffix {bcd_suffix!r}")
+
+    # Riders are waived for an AUTHORED omission, and only for one. Whether losing a rider in
+    # silence is acceptable turns on WHO decided, which is the distinction `Omission.authored`
+    # carries: a planner rule dropping a thread spec is the engine quietly discarding
+    # manufacturing intent, and #920's refusal stands; an author who omits the bore is
+    # declining the string, not orphaning its prefix. Refusing there made a pattern the one
+    # feature whose callout could not be omitted at all, so `dimension(pattern, "pitch")`
+    # raised instead of drawing a pitch dim (#925 review).
+    #
+    # A DEPENDENT is never waived. Doing so let an authored set naming `bolt_circle.diameter`
+    # and omitting `bore.diameter` produce neither the 50 mm BCD nor a diagnostic — the
+    # requested dimension vanished (#925 review).
+    riders: list[str] = []
+    if not authored_omission_in(group):
+        hole = feat.member if isinstance(feat, PatternFeature) else feat
+        thread = getattr(hole, "thread", None)
+        if thread:
+            riders.append(f"the thread spec {thread}")
+        # A plain `HoleFeature` may also carry a count — `4× ⌀6 THRU` — so the multiplier is a
+        # dependent of the head for both feature kinds, not just for patterns (#920 review).
+        multiplier = getattr(feat, "count", 0) or 0
+        if multiplier > 1:
+            riders.append(f"the {multiplier}× multiplier")
+        if suffix and not bcd_suffix:
+            riders.append(f"the pattern suffix {suffix!r}")
+
+    # One raise naming EVERYTHING orphaned. Checking dependents first and returning early
+    # produced a message listing the BCD while silently omitting the `4×` multiplier beside
+    # it — accurate but incomplete, and the author fixes both with the same edit.
+    orphans = dependent_labels + riders
+    if not orphans:
         return  # the whole callout is suppressed — coherent, and nothing to print
     raise ValueError(
-        f"suppressing the bore diameter would leave {', '.join(across)} with no callout to "
+        f"suppressing the bore diameter would leave {', '.join(orphans)} with no callout to "
         "head. A compound callout reads as one string, so its leading ⌀ is a dependency: "
         "suppress those segments too, or keep the bore ⌀."
     )
@@ -212,6 +246,40 @@ def _recess(group: DimensionGroup) -> tuple[float | None, float | None]:
                 None if depth is None or depth.suppressed else float(depth.param.value),
             )
     return None, None
+
+
+_AUTHORED_OMISSION = "not in the authored dimension set"
+
+# What a `callout()` PRINTS, by feature kind — the parameter kinds whose values make up
+# the callout text. A dimension outside this set belongs to some other mark: a pattern's
+# `pitch` is a linear dim drawn between members, not a term in the callout, so a pattern
+# whose pocket size is omitted has an undrawable callout even though its pitch survives
+# (#921 review round 7). Kinds absent here fall back to "any un-suppressed dim will do".
+_AUTHORED_OMISSION = "not in the authored dimension set"
+
+
+def authored_omission_in(group) -> bool:
+    """Does *group* have any measurement the AUTHOR left out (ADR 0016 / #876)?
+
+    Only that — deliberately NOT "would the callout draw?". Three attempts at predicting
+    the second from a hand-written per-kind table were each wrong for some feature: a
+    hole's callout survives losing an optional segment, a pocket's does not survive losing
+    a required component, and a pattern's pitch is not a callout term at all (#921 rounds
+    6–8). Each renderer owns that rule, and a copy of it here is a parallel representation
+    that drifts.
+
+    Since the compiled-plan boundary landed there is no need to predict at all: a renderer
+    receives approved entries, so "draws nothing" is observable rather than forecast. What
+    the plan still has to say is WHY it drew nothing — an author's omission is recoverable
+    by adding a `dimension(...)` line, a planner rule's suppression is not.
+    """
+    if group is None:
+        return False
+    dims = getattr(group, "dims", ())
+    return any(
+        getattr(d, "suppressed", False) and getattr(d, "reason", None) == _AUTHORED_OMISSION
+        for d in dims
+    )
 
 
 def hole_callout_spec(group: DimensionGroup) -> dict | None:

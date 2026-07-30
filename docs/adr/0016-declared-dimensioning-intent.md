@@ -97,31 +97,100 @@ being a thing the height-ladder renderer did while claiming to be doing layout.
 **The rule is the destination. The migration is substantially advanced but not complete;
 the inventory below is the honest state of it.**
 
-Sixteen renderers have crossed: `render_height_ladder`, `render_step_positions`,
-`render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`,
-`render_boss_diameters`, `render_boss_heights`, `render_envelope`, and `render_pockets`,
-`render_pocket_patterns`, `render_slot_patterns`, `render_diameters`, and
-`render_rotational`, and `render_step_lengths`, plus the prismatic detail redraw.
-Everything else still takes either the legacy `DimensionGroup` surface — where
-`suppressed` remains an advisory boolean a renderer may ignore, which is exactly what eight
-#921 rounds found happening — or the raw model.
+**Every `render_*` renderer of generated dimensions has crossed** (#925). No renderer takes
+the legacy `DimensionGroup` surface any more, so `suppressed` is no longer an advisory
+boolean anyone can ignore — which is exactly what eight #921 rounds found happening.
 
-Two earlier versions of this section understated that, each time because the guard behind
-it measured the wrong thing (#923 reviews). Counting renderers that take `model` reported
-the migration nearly complete while sixteen sat on the advisory surface; not naming a
-parameter `model` is not the same as having crossed the boundary.
-`tests/test_compiled_plan_boundary.py` now classifies by **contract** and pins all three
-lists, so this inventory cannot drift from the code:
+Two earlier versions of this section understated the gap, each time because the guard
+behind it measured the wrong thing (#923 reviews). Counting renderers that take `model`
+reported the migration nearly complete while sixteen sat on the advisory surface; not
+naming a parameter `model` is not the same as having crossed the boundary.
+`tests/test_compiled_plan_boundary.py` classifies by **contract** and pins all three lists,
+so this inventory cannot drift from the code:
 
 | Contract | Meaning | Renderers |
 |---|---|---|
-| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope`, `render_pockets`, `render_pocket_patterns`, `render_slot_patterns`, `render_diameters`, `render_rotational`, `render_step_lengths` (+ the detail redraw) |
-| `groups` | advisory `suppressed` — **pending** | `render_slots` |
-| `model` | raw inventory — **pending**, except PMI | `render_locations` (#883), `render_gdt`, `render_pmi` (permitted) |
+| `plan` | approved entries only — inside the rule | `render_height_ladder`, `render_step_positions`, `render_plates`, `render_chamfers`, `render_fillets`, `render_flats`, `render_grooves`, `render_boss_diameters`, `render_boss_heights`, `render_envelope`, `render_pockets`, `render_pocket_patterns`, `render_slot_patterns`, `render_diameters`, `render_rotational`, `render_step_lengths`, `render_locations`, `render_slots` (+ the prismatic detail redraw) |
+| `groups` | advisory `suppressed` | *(empty — the guard fails if anything reappears)* |
+| `model` | author-supplied text, not a generated measurement | `render_gdt`, `render_pmi` |
 
-Pattern pitch dimensions (`_add_furniture` → `_place_pitch_dim`) are pending too: they are
-grouped with furniture in the code but print a VALUE, which is what makes something
-dimensional under this rule. The grouping is the bug.
+`render_gdt` and `render_pmi` take the model on purpose and permanently. A control frame's
+tolerance and a PMI record's label are written by the script or by the STEP file and
+rendered verbatim; their `parameters()` are empty by design, so there is nothing to plan,
+suppress or approve. An authored dimension set does not govern them because they were never
+the engine's choice to make.
+
+Two paths outside `render_*` also print values, and both are now compiled:
+
+- **Pattern pitch** (`_add_furniture` → `_place_pitch_dim`) is grouped with furniture in the
+  code but prints a VALUE, which is what makes something dimensional under this rule. Its
+  pitch/grid values come from the approved group; its bolt-circle centreline still reads
+  `feat.bcd`, because a centreline is geometry, like a centre mark. `_furnish_uncalled_
+  patterns` draws the pitch for a pattern with no callout — furniture used to be a side
+  effect of placing one, which an authored set separates.
+- **Slot positions** measure from the bounding box rather than from `datum_xy`, so they are
+  compiled by `_compile_slot_positions` rather than by `plan_locations`, and gated by the
+  same `location_role` table.
+- **Side-drilled hole positions** likewise: an X/Y-drilled bore's in-plane offset and its
+  height are measured from the bounding box in its end-on view, so
+  `_compile_off_axis_hole_locations` owns them. Two approved entries per member, not one —
+  `dim_loc_side_y3500` and `dim_loc_front_z1200` are separate dimensions on the page, and a
+  single "this hole is located" approval would leave the renderer deciding which of the two
+  it covered.
+
+**Two ratchets, on the symptom and on the cause.** `test_compiled_plan_boundary.py` checks
+behaviour — an empty plan draws nothing — and `test_label_provenance.py` checks the cause:
+a renderer that calls `_fmt(x)` is turning a number into printed text, which means the
+number reached it as a number rather than as the compiler's `value_text`. Every defect of
+this class looked exactly like that. A behavioural guard only covers the paths its fixtures
+reach (`_staircase()` has no holes, which is how two dimensional paths stayed outside the
+boundary unnoticed); the source ratchet covers every path whether a fixture walks it or not.
+It is shrink-only, and each survivor carries a written reason.
+
+**Hole callouts (`hc_`) remain on the legacy surface.** They honour `suppressed` at every
+term (`model/callout.py` checks it for each segment, head and dependent), so this is a
+structural gap rather than a behavioural one — but "the renderer checks" is exactly the
+guarantee this boundary exists to replace, so it stays named rather than assumed safe.
+
+### Locations are addressable (#925, and #883 is not a blocker)
+
+A location prints a number, so it is a dimension and belongs inside the boundary. It had no
+`DimParameter` — it is synthesized from the feature and the datum — so before #925
+`dimension(hole, "location")` raised and an authored set could neither include nor exclude
+one. **A dimension the author cannot address is a dimension the author cannot omit**, and
+every location was drawn regardless of what the script declared.
+
+`planner._LOCATION_ROLE` is now the single statement of which kinds have a position;
+`location_role()` derives both `plan_locations` and the authored vocabulary from it, and
+`compile_dimensions().locations` is the approved set every location renderer reads.
+
+**Eligibility is one answer, read three times.** `planner.location_datum(feature)` returns
+`"datum_xy"`, `"bbox"` or `None` — where a position is measured from, or that the feature
+has none — and `plan_locations`, the bbox compilers and the authored vocabulary all read
+it. Re-deriving that answer is what broke twice: the kind table said a hole is locatable
+while `plan_locations` said only a Z-normal one is (side-drilled positions drawn outside
+the plan), and then it said a *pattern* is locatable while neither compiler emits one
+off-axis, so `dimension(x_pattern, "location")` was accepted and silently drew nothing.
+
+An off-axis pattern is `None` because the engine has never drawn one — the off-axis pass
+excluded patterns by construction. Compiling one would be new output with its own layout
+consequences, not a boundary fix, so the vocabulary tells the truth about today's engine
+and the author gets an error rather than a blank drawing.
+
+**A position is compiled wherever it is measured from.** `plan_locations` owns the Z-normal
+ladder, which measures from `datum_xy`; the compiler owns the two that measure from the
+BOUNDING BOX in a feature's own view — a slot's near-end offset and a side-drilled hole's
+offset + height. Splitting by datum rather than by feature kind is what keeps
+`_LOCATION_ROLE` a single answer: a hole is locatable, full stop, and where its span comes
+from is a separate question. Before #925 those three disagreed — the table said locatable,
+`plan_locations` said Z-normal only, and `_locate_off_axis_holes` drew the X/Y ones from raw
+IR anyway.
+
+The authored role is the coarse `"location"` — one unit per feature. #883 asks whether a
+patterned hole's position is one addressable thing or one per member, which is a question
+about NAMING. Omission is well-formed at either granularity, and a finer id
+(`location.member.3`) refines this one later without contradicting it, so the completeness
+contract does not wait on #883.
 
 - **Furniture is not dimensional content.** Centrelines, centre marks and section arrows
   print no value; they are sized off the geometry they mark and stay outside this rule.
@@ -335,11 +404,12 @@ grouping never learn about it" — is better served by the inversion than by the
   construction site in the repo (the planner), the type is planner **output** that callers
   consume rather than build, and an alpha package already carrying the phase-2 breaking
   change should not grow a compatibility initializer for a call form nobody uses.*
-- ***The identity layer does not yet cover location dimensions.*** *`plan_dimensions` skips
-  `location`-kind parameters and `plan_locations` returns a flat cross-feature list that
-  never enters a `DimensionGroup`, so `sheet.dimension(bore, "location")` — an example in
-  this ADR's own selector table — has no key. Tracked as **#883**; it blocks the `"location"`
-  role in the selector.*
+- ***The identity layer covers locations at feature granularity (#925).*** *`plan_dimensions`
+  still skips `location`-kind parameters and `plan_locations` still returns a flat
+  cross-feature list, so a location has no `AddressableDimension`. What it does have is a
+  role in `planner._LOCATION_ROLE`, which is enough for `sheet.dimension(bore, "location")`
+  to address it and for an authored set to omit it. **#883 remains open** for the finer
+  question — one unit per feature or one per member — which affects naming, not omission.*
 
 Most addressable dimensions hold exactly one member. A correlated set holds N, and those
 members are **not** separately addressable — that is the whole content of tier 3, now stated
@@ -476,6 +546,29 @@ lint-and-drop (silently discards authored intent), not implicit restore (makes t
 something it does not say). So "every segment separately suppressible" holds *except for the
 head* — an asymmetry the addressable unit declares, rather than one scattered through the
 renderer.
+
+**Dependents and riders are different things, and only riders are waived.** A compound
+callout string carries two kinds of trailing content:
+
+- **Dimensional dependents** — a counterbore ⌀, a countersink angle, and a bolt circle's
+  `bolt_circle.diameter`. Each is a planned, addressable `DimParameter` that the drawing
+  prints. Losing one silently is losing a dimension, so the head rule applies: approved
+  without its head **raises**.
+- **Non-dimensional riders** — the `n×` multiplier, a thread spec, a grid's `(3×3)`. These
+  live on the FEATURE with no parameter to suppress, so they survive any amount of
+  parameter suppression and have no independent existence outside the string.
+
+For a rider, whether silence is acceptable turns on **who decided**, which is what
+`Omission.authored` carries: a planner rule discarding a thread spec is the engine quietly
+dropping manufacturing intent (#920's refusal stands), while an author who omits the bore is
+declining the string, not orphaning its prefix — and refusing there made a pattern the one
+feature whose callout could not be omitted at all.
+
+That escape must not extend to a dependent. The BCD renders *only* as the
+`EQ SP ON ø50 BC` suffix, which made it look like a rider; classifying it as one let an
+authored set naming `bolt_circle.diameter` and omitting `bore.diameter` produce neither the
+BCD nor a diagnostic — the requested dimension vanished (#925 review). **The test is whether
+the term has a `DimParameter`, not where it appears in the string.**
 
 ### Two explicit sources of dimension intent
 
@@ -675,7 +768,7 @@ constraining planner internals that are still moving. The gaps are known and fin
 | Not mirrored as a `dimension(...)` line | Why | Where it goes instead |
 | --- | --- | --- |
 | Correlated sets, per member | `step_height` / `step_position` ladders and rotational bores are one `AddressableDimension` holding N members | **One** line per set; suppress the set, not a member |
-| Location dimensions | Planned by `plan_locations` outside `DimensionGroup`, so they have no addressable identity yet — **#883** | Comment floor until #883 lands |
+| Location dimensions, per member | Addressable per FEATURE since #925 (`dimension(hole, "location")`); whether a patterned hole's position splits per member is **#883** | **One** line per feature |
 | Inter-feature spans and angles | No `(feature, role)` form — needs `RelationDimensionId`, whose selector spelling is still open | Comment floor until the relation selector lands |
 | Imported AP242 PMI | Materialized: carries `ref_pts` / `ref_bbox` / `at`, so there is nothing to reference | `sheet.measured_dimension(...)` — still one editable line |
 | Low-level furniture | Centre marks, section arrows, hatching, the NTS caption carry no editable intent | Engine-automatic, by decision |
@@ -693,7 +786,7 @@ absence both mean something exact** — which is all suppression-by-omission nee
   different scale. That identity is the `DimensionId` above, not a page-keyed annotation
   name — it leans on the ADR 0015 planner keeping parameter roles stable, and on ADR 0010
   provenance growing an N-ids channel (#886) before an id can resolve to the annotations
-  it produced. (*Location* dims are not nameable at all yet — #883.) Both intents need the key — `add_dimension` for its handle and for
+  it produced. (*Location* dims are nameable per feature since #925; per member is #883.) Both intents need the key — `add_dimension` for its handle and for
   idempotence against the plan — but **suppressive intent additionally needs that identity
   to be stable across re-detection and recomposition**, which is why identity lands *with*
   the augmenting verb while suppression waits for the set boundary.
@@ -800,10 +893,8 @@ sheet.dimension(bore,    "spotface_diameter")  # ⌴ ⌀32
 sheet.dimension(bore,    "spotface_depth")     # ↓ 1.5
 
 sheet.dimension(corners, "diameter")           # 4× ⌀5 THRU  (read off `corners`)
-# Locations are NOT addressable yet (#883) — the engine still places them
-# automatically; these two lines are what the surface will read once it lands.
-# sheet.dimension(corners, "location")         # location ladder  ← comment out to drop
-# sheet.dimension(bore,    "location")         # bore on centre
+sheet.dimension(corners, "location")           # location ladder  ← comment out to drop
+sheet.dimension(bore,    "location")           # bore on centre
 sheet.dimension(env,     "width")              # 80    (read off the bbox)
 sheet.dimension(env,     "depth")              # 50
 sheet.dimension(env,     "height")             # 8     (thickness)
@@ -994,8 +1085,8 @@ second with the single-source-of-truth of the first — over the identified set,
 - The `role` vocabulary for `sheet.dimension(feature, role)`: which measurements to support
   first (`"diameter"`, `"pitch"`, `"width"`/`"depth"`/`"height"`, `"angle"`, `"radius"`), and
   how the call-site role maps onto the `ParameterId` space (`"depth"` → `"bore.depth"`) when a
-  feature has counterbore and spotface depths as well. **`"location"` is blocked on #883** —
-  location dims are planned outside `DimensionGroup` and have no addressable identity yet.
+  feature has counterbore and spotface depths as well. `"location"` is supported at feature
+  granularity (#925); splitting a patterned hole's position per member is **#883**.
 - **The relation selector.** `RelationDimensionId` settles the *identity* of an
   inter-feature measurement; how it reads at the call site does not —
   `sheet.dimension(a, b)` / `sheet.dimension((a, b), "span")` / a feature-handle method.

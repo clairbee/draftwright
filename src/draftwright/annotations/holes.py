@@ -63,8 +63,8 @@ from draftwright.annotations.from_model import (
 )
 from draftwright.layout import StripCandidate, plan_strip
 from draftwright.model import plan_dimensions
+from draftwright.model.compiled import FeatureRef, compile_dimensions, resolve_feature
 from draftwright.model.ir import HoleFeature, PatternFeature
-from draftwright.model.planner import plan_locations
 
 # |cos| threshold for treating a view's side vector as axis-aligned (≈ within 1.6° of an
 # axis) when choosing the strip a hole-location row stacks against — above it the side is
@@ -99,6 +99,18 @@ def add_feature_callout(
     group = next((g for g in plan_dimensions(model) if g.feature is feature), None)
     spec = hole_callout_spec(group) if group is not None else None
     if spec is None:
+        if any(o.feature is feature and o.authored for o in compile_dimensions(model).diagnostics):
+            # "Exposes none" would be a false claim: the feature exposes a bore ⌀ and was
+            # told not to draw it. A DROP, not a raise, so the live path lands where the
+            # deferred one does — see `add_feature_diameter` for the same reasoning.
+            ctx.record_issue(
+                "info",
+                "authored_omission",
+                f"callout(): this {feature.kind}'s callout terms are not in the authored "
+                "dimension set, so there is nothing to call out — add a "
+                "dimension(feature, role) line",
+            )
+            return ""
         raise ValueError(
             f"callout() draws a hole/pattern ø-depth leader callout; "
             f"{type(feature).__name__} exposes none — use dimension() for a linear param"
@@ -188,8 +200,8 @@ def add_feature_location(
 
     Distinct from :meth:`dimension` (a feature's own *intrinsic* linear params):
     a location dim measures the *datum → feature-centre* offset, which no feature
-    exposes as a ``parameter()``. Reuses the planner's :func:`plan_locations`
-    *intent* (which ref, from which datum) and this renderer's projection, then
+    exposes as a ``parameter()``. Reuses the compiled plan's approved locations
+    (which ref, from which datum) and this renderer's projection, then
     places each dim into free strip space beside the view (corridor-free, like
     :meth:`callout` — the auto-pass's shared corridor batch does not exist on a
     detect-only build). X dims tier above the plan view, Y dims above the side
@@ -235,13 +247,22 @@ def add_feature_location(
     # result (as the docstring promises), not an error, so the verb composes: the emitted
     # #400 Ph2 script calls locate() on every hole and this no-ops the ones the auto-pass
     # would also skip, matching its dedup rather than crashing.
-    mine = [pd for pd in plan_locations(model) if pd.feature is feature]
+    #
+    # Sourced from the COMPILED plan, not the raw planner list: `locate()` is an edit verb,
+    # and an edit verb that drew a position the authored set omitted would put the live path
+    # and the deferred path back in disagreement — the #925 defect, in the one place a user
+    # is most likely to notice. Asking the plan is not a per-kind refusal rule; it is the
+    # same question every migrated renderer asks.
+    mine = [loc for loc in compile_dimensions(model).locations if loc.ref == FeatureRef(feature)]
     if not mine:
         return []
     draft = dwg.draft
-    datum = mine[0].datum
-    assert datum is not None  # plan_locations always sets the datum
-    dx, dy = datum.at[0], datum.at[1]
+
+    def _span(loc):
+        assert loc.span is not None  # a compiled location always carries datum → ref
+        return loc.span
+
+    dx, dy = _span(mine[0])[0][0], _span(mine[0])[0][1]
     tier = draft.font_size + 2 * draft.pad_around_text
     PX, PY = a.proj.plan_x, a.proj.plan_y
     SX, SZ = a.proj.side_x, a.proj.side_z
@@ -271,13 +292,11 @@ def add_feature_location(
     names: list[str] = []
     seen_x: list[float] = []
     seen_y: list[float] = []
-    for pd in mine:
-        if pd.param.span is None:
-            continue
-        rx, ry = pd.param.span[1][0], pd.param.span[1][1]
+    for loc in mine:
+        rx, ry = _span(loc)[1][0], _span(loc)[1][1]
         # A rotational part's on-axis *hole* is located by the centreline, not a
         # position dim (matches render_locations); a pattern ref is never filtered.
-        if pd.param.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
+        if loc.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
             continue
         # Coincident X (or Y) across this feature's own members → one dim, not a stack
         # of identical position dims (matches render_locations' x_refs/y_refs dedup).
@@ -371,7 +390,16 @@ def add_feature_furniture(dwg, feature, model, a, *, view: str | None = None, ct
             for nm in ctx.registry.names()
         ):
             j += 1
-        _add_furniture(dwg, a, view, j, feature, lambda loc: dwg.at(view, *loc), ctx=ctx)
+        _add_furniture(
+            dwg,
+            a,
+            view,
+            j,
+            feature,
+            lambda loc: dwg.at(view, *loc),
+            ctx=ctx,
+            plan=compile_dimensions(model),
+        )
 
     return sorted(set(dwg.annotations()) - before)
 
@@ -395,17 +423,38 @@ def add_feature_diameter(dwg, feature, model, *, ctx) -> str:
             "callout(): feature is not from this drawing's model — "
             "pass one from dwg.model().features"
         )
-    group = next((g for g in plan_dimensions(model) if g.feature is feature), None)
-    dpd = (
-        next((pd for pd in group.dims if pd.param.kind == "diameter"), None)
-        if group is not None
-        else None
-    )
-    dia = dpd.param.value if dpd is not None else None
-    if group is None or dpd is None or dia is None:
+    # From the COMPILED plan, not `plan_dimensions`. Reading the planned parameter meant
+    # reading past its `suppressed` flag, so a live `callout()` drew a diameter the authored
+    # set had omitted while the deferred path (through the migrated `render_diameters`) drew
+    # nothing — the two disagreeing about the same edit (#925 review).
+    plan = compile_dimensions(model)
+    group = plan.group_for(FeatureRef(feature))
+    dpd = group.dim(kind="diameter") if group is not None else None
+    if dpd is None:
+        omission = next(
+            (
+                o
+                for o in plan.diagnostics
+                if o.feature is feature and o.parameter_id.endswith(".diameter")
+            ),
+            None,
+        )
+        if omission is not None:
+            # Nothing to draw, and the author said so. A DROP, not a raise: the deferred
+            # path reaches the same state by drawing nothing, and the two must agree about
+            # one edit. The build issue is what keeps it from being silent on either.
+            ctx.record_issue(
+                "info",
+                "authored_omission",
+                f"callout(): the {feature.kind} diameter is not in the authored dimension "
+                "set, so there is nothing to call out — add a dimension(feature, role) line",
+            )
+            return ""
         raise ValueError(
             f"callout(): {type(feature).__name__} exposes no step/boss diameter callout"
         )
+    assert group is not None  # dpd came off it
+    dia = dpd.value
     axis = feature.frame.axis
     if axis not in ("x", "z"):
         raise ValueError(
@@ -414,7 +463,7 @@ def add_feature_diameter(dwg, feature, model, *, ctx) -> str:
         )
     # 5-tuple (anchor, dia, feature, tolerance, thread): a manual callout honours a declared ±
     # tolerance (P2a, #28) and an external thread aspect (#859) too, like the auto-pass.
-    items = [(group.anchor, dia, feature, dpd.param.tolerance, getattr(feature, "thread", None))]
+    items = [(group.anchor, dia, feature, dpd.tolerance, getattr(feature, "thread", None))]
     # The row/column placers name leaders m_dia_{x,z}{start+i} — pass the first FREE
     # index so a second callout() (or a call on an already-annotated turned part) never
     # collides on m_dia_x0/z0 and clobbers an existing leader (#419 review F1).
@@ -486,27 +535,55 @@ def _record_callout_drop(ctx, dwg, view, diam, reason, feat=None):
 
 
 class _OffHole(NamedTuple):
-    """One side-drilled hole occurrence for the off-axis location pass — the IR fields
-    it reads (the axis letter + the member location), so no ``HoleRecord`` is needed
-    (ADR 0008; #584 WP1 B3)."""
+    """One side-drilled hole occurrence for the off-axis location pass.
+
+    *approved* maps the MEASURED axis (``"x"``/``"y"``/``"z"``) to the compiled entry for
+    that dimension, and is the pass's whole content contract: a member with no entry for an
+    axis has no dimension on it, and the value printed is the entry's, not one the renderer
+    recomputes from `a.bb`. Two formulas for one number is the drift #923 removed
+    everywhere else.
+    """
 
     axis: str
     location: tuple
+    approved: dict
 
 
-def _ir_off_axis_holes(model) -> list[_OffHole]:
-    """Every loose x/y-axis (side-drilled) hole member in the IR, as :class:`_OffHole`.
+def _approved_off_axis_holes(plan) -> list[_OffHole]:
+    """Every side-drilled hole member the compiler approved a position for.
 
-    Pattern members are separate ``PatternFeature``s (skipped), so patterned holes are
-    excluded by construction — matching the old ``h not in patterned`` filter without a
-    ``HoleRecord`` (ADR 0008; #584 WP1 B3). The turning-axis concentric filter is applied
-    by the caller that needs it."""
-    return [
-        _OffHole(f.frame.axis, pos)
-        for f in (model.features if model is not None else ())
-        if f.kind == "hole" and f.frame.axis in ("x", "y")
-        for pos in (f.members or (f.frame.origin,))
-    ]
+    Replaces `_ir_off_axis_holes`, which walked `model.features` directly. That was the
+    last dimensional path outside the boundary: `location_role` said a hole is locatable,
+    `plan_locations` said only a Z-normal one is, and this pass drew the X/Y ones from raw
+    IR regardless — so an authored set naming only a side-drilled bore's ⌀ still produced
+    its offset and height dims (#925 review).
+
+    A filter over approved entries, deliberately, rather than an authored check added here:
+    a renderer-side check is the suppression convention this work exists to replace.
+
+    Keyed by ``(ref, member)`` — feature identity AND occurrence, not the coordinate alone.
+    A cross-drilled pair (one X-axis bore and one Y-axis bore through the same centre) is
+    two features at one point, so keying on the point merged their four entries into a
+    single `_OffHole` whose `axis` was whichever feature came first: the other's planar
+    dimension sat unused in the merged dict, and the result flipped when the model's feature
+    order did (#925 review). The coordinate is geometry; it does not identify a feature.
+
+    The intentional GEOMETRIC dedup still happens, downstream and per axis, in the
+    `seen_x`/`seen_y`/`seen_z` sets — which is why the pair keeps both planar dims and
+    still shares one height dim. Merging here conflated the two jobs.
+    """
+    holes: dict[tuple, _OffHole] = {}
+    for entry in plan.locations:
+        if entry.role != "location_off_axis":
+            continue
+        assert entry.span is not None  # off-axis entries always carry datum → member
+        member = entry.span[1]
+        key = (entry.ref, member)
+        hole = holes.get(key)
+        if hole is None:
+            hole = holes[key] = _OffHole(entry.axis, member, {})
+        hole.approved[entry.discriminator] = entry
+    return list(holes.values())
 
 
 def _off_axis_drop(dwg, axis, view, *, ctx):
@@ -621,7 +698,11 @@ def _locate_across(dwg, ctx, a: Analysis, off):
     order_y: dict = {}
     loc_by_name: dict = {}  # dim name -> contributing hole locations (for provenance)
     for h in (h for h in off if h.axis == "x"):
-        yo = round(abs(h.location[1] - dy), 2)
+        # The VALUE is the approved entry's; `dy` survives only as the witness anchor.
+        entry = h.approved.get("y")
+        if entry is None:
+            continue  # not approved — the compiler withheld this position
+        yo = round(entry.value, 2)
         if yo * a.SCALE < 1.0:
             continue
         name = f"dim_loc_side_y{round(yo * 100)}"
@@ -633,8 +714,10 @@ def _locate_across(dwg, ctx, a: Analysis, off):
             cands.append(
                 (
                     name,
-                    lambda pos, pl=p_lo, ph=p_hi, lb=yo: _dim(
-                        pl, ph, "below", yw - pos, draft, label=_fmt(lb)
+                    # The label is the approved entry's text; `yo` survives only as the
+                    # name key and the spacing order.
+                    lambda pos, pl=p_lo, ph=p_hi, lb=entry.value_text: _dim(
+                        pl, ph, "below", yw - pos, draft, label=lb
                     ),
                 )
             )
@@ -668,7 +751,10 @@ def _locate_along_planar(dwg, ctx, a: Analysis, off):
     order_x: dict = {}
     x_loc_by_name: dict = {}
     for h in (h for h in off if h.axis == "y"):
-        xo = round(abs(h.location[0] - dx), 2)
+        entry = h.approved.get("x")
+        if entry is None:
+            continue  # not approved
+        xo = round(entry.value, 2)
         if xo * a.SCALE < 1.0:
             continue
         name = f"dim_loc_front_x{round(xo * 100)}"
@@ -680,8 +766,8 @@ def _locate_along_planar(dwg, ctx, a: Analysis, off):
             x_cands.append(
                 (
                     name,
-                    lambda pos, pl=p_lo, ph=p_hi, lb=xo: _dim(
-                        pl, ph, "below", xw - pos, draft, label=_fmt(lb)
+                    lambda pos, pl=p_lo, ph=p_hi, lb=entry.value_text: _dim(
+                        pl, ph, "below", xw - pos, draft, label=lb
                     ),
                 )
             )
@@ -715,23 +801,26 @@ def _locate_along_z(dwg, ctx, a: Analysis, off):
     zr, zrf = SX(a.bb.max.Y), FX(a.bb.max.X)
     z_locs: dict = {}  # z-offset -> contributing hole locations (for provenance)
     for h in off:
-        zo = round(abs(h.location[2] - dz), 2)
-        if zo * a.SCALE >= 1.0:
-            z_locs.setdefault(zo, []).append(h.location)
+        entry = h.approved.get("z")
+        if entry is not None and round(entry.value, 2) * a.SCALE >= 1.0:
+            z_locs.setdefault(round(entry.value, 2), []).append(h.location)
     seen_z = set()
     for h in off:
-        zo = round(abs(h.location[2] - dz), 2)
+        entry = h.approved.get("z")
+        if entry is None:
+            continue  # not approved
+        zo = round(entry.value, 2)
         if zo * a.SCALE < 1.0 or zo in seen_z:
             continue
         seen_z.add(zo)
         hz = h.location[2]
         owner = _off_axis_owner(ctx, z_locs[zo])
 
-        def _zc(view, p_lo, p_hi, edge, _zo=zo):
+        def _zc(view, p_lo, p_hi, edge, _zo=zo, _lbl=entry.value_text):
             return (
                 f"dim_loc_{view}_z{round(_zo * 100)}",
                 lambda pos, pl=p_lo, ph=p_hi, e=edge: _dim(
-                    pl, ph, "right", pos - e, draft, label=_fmt(_zo)
+                    pl, ph, "right", pos - e, draft, label=_lbl
                 ),
             )
 
@@ -797,7 +886,7 @@ def _locate_along_z(dwg, ctx, a: Analysis, off):
         )
 
 
-def _locate_off_axis_holes(dwg, ctx, a: Analysis, *, which):
+def _locate_off_axis_holes(dwg, ctx, a: Analysis, *, which, plan):
     """Location dimensions for side-drilled holes (#133).
 
     An X-axis hole is a circle in the SIDE view (locate its Y below the view and
@@ -815,7 +904,6 @@ def _locate_off_axis_holes(dwg, ctx, a: Analysis, *, which):
     ``across`` phase is `_locate_across`; the ``along`` phase is `_locate_along_planar`
     (a Y-hole's X) then `_locate_along_z` (every hole's height), split out at #638.
     """
-    model = ctx.part_model
 
     def _coaxial(h):
         # The turning-axis bore of a rotational part is located by its centreline, not
@@ -842,9 +930,10 @@ def _locate_off_axis_holes(dwg, ctx, a: Analysis, *, which):
             if ax != turning_axis
         )
 
-    # Off-axis holes sourced from the IR (ADR 0008 Am6; #584 WP1 B3) — the turning-axis
-    # concentric bore excluded (located by its centreline, not a position dim).
-    off = [h for h in _ir_off_axis_holes(model) if not _coaxial(h)]
+    # Off-axis holes sourced from the COMPILED PLAN — the turning-axis concentric bore
+    # excluded (located by its centreline, not a position dim). That exclusion stays here
+    # because it only ever REMOVES an approved entry, which is a drop, not a leak.
+    off = [h for h in _approved_off_axis_holes(plan) if not _coaxial(h)]
     if not off:
         return
     if which == "across":
@@ -854,19 +943,46 @@ def _locate_off_axis_holes(dwg, ctx, a: Analysis, *, which):
     _locate_along_z(dwg, ctx, a, off)
 
 
-def _add_furniture(dwg, a: Analysis, view, j, feat: PatternFeature | None, to_page, *, ctx):
+def _add_furniture(
+    dwg,
+    a: Analysis,
+    view,
+    j,
+    feat: PatternFeature | None,
+    to_page,
+    *,
+    ctx,
+    plan,
+    furnished=None,
+    cover=True,
+):
     """Pattern sheet furniture, added once its callout is placed (#92). Driven by the
     IR `PatternFeature` *feat* (members / bcd / pitch / grid), not a recogniser
     `Pattern` — ADR 0008 Amendment 6. Plain (unpatterned) plan callouts carry no
     furniture; their scattered-hole-table coverage is recorded at the emit site (not
-    here) so it survives finalize's ``place_furniture=False`` (#426 Ph4c)."""
+    here) so it survives finalize's ``place_furniture=False`` (#426 Ph4c).
+
+    The split between what comes off the FEATURE and what comes off *plan* is the ADR 0016
+    rule, not a convenience: the bolt-circle centreline is furniture *geometry* sized by the
+    physical circle, so it reads `feat.bcd` exactly as a centre mark reads its hole's
+    diameter (#875); the pitch and grid dims PRINT a number, so their values are approved
+    entries or they are not drawn. Reading `feat.pitch` for a printed label is what let an
+    authored set naming only a bore still produce ``4× 20`` (#925).
+
+    *furnished* records which patterns have been handled, so :func:`_furnish_uncalled_patterns`
+    can find the ones that got no callout. *cover* is False for that sweep: hole-table coverage
+    is claimed by a *placed* callout, and there is none to claim it."""
     if feat is None:
         return
+    if furnished is not None:
+        furnished.add(id(feat))
+    group = plan.group_for(FeatureRef(feat))
     members = feat.members or (feat.frame.origin,)  # guard a declared pattern's empty members
     # Remember the bore-callout name AND the holes it documents (by position), so a
     # later hole-table escalation leaves the grouped pattern callout standing and
     # tabulates only the holes no *placed* pattern callout covers (#92).
-    ctx.coverage.cover_pattern(f"hc_{view}{j}", [HoleRef.of(m) for m in members])
+    if cover:
+        ctx.coverage.cover_pattern(f"hc_{view}{j}", [HoleRef.of(m) for m in members])
     if feat.pattern == "bolt_circle":
         assert feat.bcd is not None  # a bolt circle always carries its BCD
         cx = sum(to_page(m)[0] for m in members) / len(members)
@@ -879,7 +995,9 @@ def _add_furniture(dwg, a: Analysis, view, j, feat: PatternFeature | None, to_pa
             feature=feat,
         )
     elif feat.pattern == "linear":
-        assert feat.pitch is not None  # a linear array always carries its pitch
+        pitch = group.dim(kind="length", role="pitch") if group is not None else None
+        if pitch is None:
+            return  # not approved — the compiler withheld the value, so there is none to print
         _place_pitch_dim(
             dwg,
             a,
@@ -887,15 +1005,78 @@ def _add_furniture(dwg, a: Analysis, view, j, feat: PatternFeature | None, to_pa
             members[0],
             members[-1],
             len(members),
-            feat.pitch,
+            pitch.value_text,
             to_page,
             f"dim_pitch_{view}{j}",
             feature=feat,
             ctx=ctx,
         )
     elif feat.pattern == "grid":
-        assert feat.grid is not None  # a grid always carries its (row, col) pitch
-        _add_grid_pitch_dims(dwg, a, view, j, members, feat.grid, to_page, feature=feat, ctx=ctx)
+        # Both pitches or neither: a grid dimensioned along one axis only states half its
+        # lattice, and the renderer has no way to say which half is missing. Partial
+        # approval is therefore a whole-set omission, decided here rather than by drawing
+        # one dim and leaving the drawing to imply the other.
+        pitches = (
+            {}
+            if group is None
+            else {d.discriminator: d for d in group.dims if d.role == "grid_pitch"}
+        )
+        if not {"row", "col"} <= set(pitches):
+            return
+        _add_grid_pitch_dims(
+            dwg,
+            a,
+            view,
+            j,
+            members,
+            (pitches["row"], pitches["col"]),
+            to_page,
+            feature=feat,
+            ctx=ctx,
+        )
+
+
+def _furnish_uncalled_patterns(dwg, a: Analysis, view_of_axis, plan, *, ctx, furnished):
+    """Pattern furniture for patterns that got no callout — the pitch/grid dims only.
+
+    Furniture has always been a side effect of placing a bore callout, which was fine while
+    the two stood or fell together. An authored set separates them: `dimension(pattern,
+    "pitch")` names the pitch and nothing else, so there is no callout to hang the furniture
+    off and the measurement the script explicitly asked for was silently not drawn (#925
+    review) — the blank-drawing failure `_check_authored_targets` exists to prevent, arriving
+    by a different route.
+
+    Additive by construction: it runs only for patterns `_add_furniture` did not already
+    handle, so every drawing with a placed callout is untouched. Bolt-circle centrelines are
+    NOT swept — a centreline with no callout is furniture for a feature the drawing does not
+    otherwise mention, and unlike a pitch dim nobody asked for it.
+    """
+    for group in plan.of_kind("pattern"):
+        feat = resolve_feature(group.ref)
+        if id(feat) in furnished or feat.pattern == "bolt_circle":
+            continue
+        axis = feat.frame.axis
+        if axis not in view_of_axis:
+            continue
+        view = _END_ON[axis]
+        j = 0
+        while any(
+            nm == f"dim_pitch_{view}{j}" or nm.startswith(f"dim_pitch_{view}{j}_")
+            for nm in ctx.registry.names()
+        ):
+            j += 1
+        _add_furniture(
+            dwg,
+            a,
+            view,
+            j,
+            feat,
+            view_of_axis[axis][1],
+            ctx=ctx,
+            plan=plan,
+            furnished=furnished,
+            cover=False,
+        )
 
 
 def _add_grid_pitch_dims(
@@ -904,7 +1085,7 @@ def _add_grid_pitch_dims(
     view,
     j,
     members,
-    nominals,
+    nominals,  # the approved grid_pitch entries, one per lattice axis
     to_page,
     feature=None,
     *,
@@ -970,8 +1151,9 @@ def _add_grid_pitch_dims(
         hi = max(line, key=along)
         span = along(hi) - along(lo)
         n = round(span / pitch_page) + 1
-        # Label with the recogniser's nominal pitch nearest this axis' page step.
-        pitch = min(nominals, key=lambda v: abs(v - pitch_page / a.SCALE))
+        # Label with the approved pitch entry nearest this axis' page step. Selection is
+        # numeric, the LABEL is the compiler's own text — the two are different jobs.
+        pitch = min(nominals, key=lambda e: abs(e.value - pitch_page / a.SCALE))
         _place_pitch_dim(
             dwg,
             a,
@@ -979,7 +1161,7 @@ def _add_grid_pitch_dims(
             members[lo],
             members[hi],
             n,
-            pitch,
+            pitch.value_text,
             to_page,
             f"{name_prefix}_{view}{j}_{sub}",
             feature=feature,
@@ -991,7 +1173,7 @@ def _add_grid_pitch_dims(
 
 
 def _place_pitch_dim(
-    dwg, a: Analysis, view, loc1, loc2, n, pitch, to_page, name, feature=None, *, ctx
+    dwg, a: Analysis, view, loc1, loc2, n, pitch_text, to_page, name, feature=None, *, ctx
 ):
     """Pitch dimension between two hole-centre *locations* ``loc1``→``loc2``, labelled
     ``(n-1)× pitch``, placed just outside the view on the side of the row's
@@ -1040,7 +1222,7 @@ def _place_pitch_dim(
         side, reach = max(cands, key=lambda c: c[0][0] * pref[0] + c[0][1] * pref[1])
     fallback_sides = [(side, reach)] + [c for c in cands if c[0] != side]
 
-    label = f"{n - 1}× {_fmt(pitch)}"
+    label = f"{n - 1}× {pitch_text}"
 
     def _make(off, side_vec=side, label_offset_x=0.0):
         return _dim(
@@ -1211,7 +1393,7 @@ def _place_pitch_dim(
                 feature=feature,
             )
             return
-    _log.info("Pitch dimension for the %s× %s array skipped (no room)", n, _fmt(pitch))
+    _log.info("Pitch dimension for the %s× %s array skipped (no room)", n, pitch_text)
 
 
 def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
@@ -1253,9 +1435,9 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
         if vb is None:
             continue
         label = f"{feat.count}× " + _pocket_label(
-            wpd.value,
-            lpd.value,
-            dpd.value,
+            wpd.value_text,
+            lpd.value_text,
+            dpd.value_text,
             wsfx=_tol_suffix(wpd.tolerance, draft),
             lsfx=_tol_suffix(lpd.tolerance, draft),
             dsfx=_tol_suffix(dpd.tolerance, draft),
@@ -1290,7 +1472,7 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
         feat = g.facts
         members = feat.members or (feat.frame.origin,)
         pitch = g.dim(role="pitch")
-        grid = tuple(d.value for d in g.dims if d.role == "grid_pitch")
+        grid = tuple(d for d in g.dims if d.role == "grid_pitch")
 
         def to_page(loc, _view=view):
             return dwg.at(_view, *loc)
@@ -1303,7 +1485,7 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 members[0],
                 members[-1],
                 len(members),
-                pitch.value,
+                pitch.value_text,
                 to_page,
                 f"dim_pocketpat_pitch_{view}{i}",
                 feature=g.ref,
@@ -1364,8 +1546,8 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
         if vb is None:
             continue
         label = f"{feat.count}× " + _slot_label(
-            wpd.value,
-            lpd.value,
+            wpd.value_text,
+            lpd.value_text,
             wsfx=_tol_suffix(wpd.tolerance, draft),
             lsfx=_tol_suffix(lpd.tolerance, draft),
         )
@@ -1395,7 +1577,7 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
         feat = g.facts
         members = feat.members or (feat.frame.origin,)
         pitch = g.dim(role="pitch")
-        grid = tuple(d.value for d in g.dims if d.role == "grid_pitch")
+        grid = tuple(d for d in g.dims if d.role == "grid_pitch")
 
         def to_page(loc, _view=view):
             return dwg.at(_view, *loc)
@@ -1408,7 +1590,7 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 members[0],
                 members[-1],
                 len(members),
-                pitch.value,
+                pitch.value_text,
                 to_page,
                 f"dim_slotpat_pitch_{view}{i}",
                 feature=g.ref,
@@ -1743,6 +1925,8 @@ def _place_front_callouts(
     feat_of_callout,
     only,
     place_furniture,
+    plan,
+    furnished,
     draft,
     gap,
     min_gap,
@@ -1825,7 +2009,9 @@ def _place_front_callouts(
             continue
         if place_furniture:  # #426: finalize's furniture() replay owns furniture
             idx, feat = furniture[name]
-            _add_furniture(dwg, a, view, idx, feat, to_page, ctx=ctx)
+            _add_furniture(
+                dwg, a, view, idx, feat, to_page, ctx=ctx, plan=plan, furnished=furnished
+            )
 
 
 def _place_queue(
@@ -1844,6 +2030,8 @@ def _place_queue(
     hc_used,
     only,
     place_furniture,
+    plan,
+    furnished,
 ):
     """Pass 2 — Y placement + selection via the collect-then-solve seam (#638; #321 P1a).
 
@@ -1963,7 +2151,7 @@ def _place_queue(
         if view == "plan" and feat is None:
             ctx.coverage.cover_scattered_hole_doc(name)
         if place_furniture:  # #426: finalize's furniture() replay owns furniture
-            _add_furniture(dwg, a, view, i, feat, to_page, ctx=ctx)
+            _add_furniture(dwg, a, view, i, feat, to_page, ctx=ctx, plan=plan, furnished=furnished)
         i += 1
     return i
 
@@ -1980,6 +2168,8 @@ def _place_planside_callouts(
     feat_of_callout,
     only,
     place_furniture,
+    plan,
+    furnished,
     draft,
     gap,
     min_gap,
@@ -2020,10 +2210,15 @@ def _place_planside_callouts(
     #    its callout crossed by the centre mark / centreline (#305). Near-centre callouts only.
     clr = draft.font_size + 3 * draft.pad_around_text  # clearance off a crossing line
     off_axis_letter = {"side": "x", "front": "y"}.get(view)
+    # Sourced from the plan, like the pass that draws them. Reserving from raw IR was a
+    # deliberate over-reservation ("still valid, never under"), and on an auto build the two
+    # agree exactly — every off-axis hole is approved. They diverge only under an authored
+    # set, where reserving rows for dims that will not be drawn would deny a callout space
+    # for no reason.
     reserved_rows = (
         [
             to_page(h.location)[1]
-            for h in _ir_off_axis_holes(ctx.part_model)
+            for h in _approved_off_axis_holes(plan)
             if h.axis == off_axis_letter
         ]
         if off_axis_letter
@@ -2093,6 +2288,8 @@ def _place_planside_callouts(
         hc_used=hc_used,
         only=only,
         place_furniture=place_furniture,
+        plan=plan,
+        furnished=furnished,
     )
     if left_queue:
         assert edge_left is not None  # populated only when edge_left is set
@@ -2114,13 +2311,28 @@ def _place_planside_callouts(
             hc_used=hc_used,
             only=only,
             place_furniture=place_furniture,
+            plan=plan,
+            furnished=furnished,
         )
 
 
 def _annotate_holes(
-    dwg, a: Analysis, view_of_axis, groups, feature_keys, *, ctx, only=None, place_furniture=True
+    dwg,
+    a: Analysis,
+    view_of_axis,
+    groups,
+    feature_keys,
+    *,
+    ctx,
+    plan,
+    only=None,
+    place_furniture=True,
 ):
     """Leader-attached HoleCallouts, one per distinct hole spec per view (#91).
+
+    *plan* is the compiled plan the pattern furniture draws its pitch values from — required
+    rather than defaulted, so a caller that forgets fails at the call instead of silently
+    reverting to reading the feature (#925).
 
     Identical holes share one callout with an ``n×`` count prefix (#92's
     grouping half) — through holes group on diameter and steps regardless of
@@ -2168,6 +2380,8 @@ def _annotate_holes(
     # One shared name pool across every view + both branches (#430): built once and
     # mutated by `_hc_name`'s finalize path — never copied.
     hc_used = set(ctx.registry.names())
+    # Which patterns got their furniture, so the sweep below can find the ones that did not.
+    furnished: set[int] = set()
 
     for view, view_groups in by_view.items():
         to_page = view_of_axis[{"plan": "z", "front": "y", "side": "x"}[view]][1]
@@ -2191,6 +2405,8 @@ def _annotate_holes(
                 feat_of_callout=feat_of_callout,
                 only=only,
                 place_furniture=place_furniture,
+                plan=plan,
+                furnished=furnished,
                 draft=draft,
                 gap=gap,
                 min_gap=min_gap,
@@ -2209,6 +2425,8 @@ def _annotate_holes(
                 feat_of_callout=feat_of_callout,
                 only=only,
                 place_furniture=place_furniture,
+                plan=plan,
+                furnished=furnished,
                 draft=draft,
                 gap=gap,
                 min_gap=min_gap,
@@ -2218,3 +2436,6 @@ def _annotate_holes(
                 plan_left=plan_left,
                 side_right=side_right,
             )
+
+    if place_furniture:
+        _furnish_uncalled_patterns(dwg, a, view_of_axis, plan, ctx=ctx, furnished=furnished)

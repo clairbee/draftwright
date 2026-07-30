@@ -29,7 +29,7 @@ import pickle
 from dataclasses import replace
 
 import pytest
-from build123d import Box, Cylinder, Pos
+from build123d import Box, Cylinder, Pos, Rot
 
 from draftwright import Sheet
 from draftwright.annotations.from_model import render_height_ladder
@@ -55,11 +55,11 @@ _VALUE_FREE = (
 #: semantic type system, and a prefix list quietly became the definition of "dimensional"
 #: (#923 review round 4). Each entry is a pending migration, and the ADR names it too.
 _PENDING_VALUE_CARRYING = (
-    "m_locx",  # hole location ladders — #883
-    "m_locy",
-    "hc_",  # hole callouts — likewise
-    "dim_pitch",  # pattern pitch — derived in _add_furniture from the feature
-    "m_slot",  # slot dimensions — the last legacy DimensionGroup renderer
+    # Hole callouts still take legacy `DimensionGroup`s. They DO honour `suppressed`
+    # (model/callout.py checks it at every term), so this is a structural gap rather than a
+    # behavioural one — but the whole point of the boundary is that "the renderer checks"
+    # is not a guarantee, so it stays on the list until the contract changes.
+    "hc_",
     "pmi_",  # raw AP242 PMI — the one documented permanent exception
 )
 
@@ -83,6 +83,22 @@ def _crowded_staircase():
         part = part + Pos(0, 0, z + 1.5) * Box(w, 12, 3)
         z += 3
     return part
+
+
+def _side_drilled():
+    """A block with X- and Y-drilled bores and a Z one, so the empty-plan guard actually
+    walks the off-axis location pass.
+
+    `_staircase()` has no holes at all, which is why the guard passed for a whole review
+    round while `_locate_off_axis_holes` rebuilt every side-drilled position from raw IR
+    (#925 review). A behavioural guard only covers the paths its fixture reaches.
+    """
+    return (
+        Box(100, 60, 20)
+        - Pos(0, 5, 2) * Rot(0, 90, 0) * Cylinder(2, 200)
+        - Pos(10, 0, 8) * Rot(90, 0, 0) * Cylinder(2, 200)
+        - Pos(-30, -15, 0) * Cylinder(3, 60)
+    )
 
 
 def _uniform_staircase():
@@ -370,7 +386,474 @@ class TestOmissionIsNotADrop:
         assert Omission(None, "height.length", 1.0, "not in the authored dimension set").authored
 
 
+class TestAPositionIsADimension:
+    """A location prints a number, so the authored set governs it like any other dimension.
+
+    It did not before #925, for a reason worth stating: a location has no `DimParameter` —
+    it is synthesized from the feature and the datum — so it was not *addressable*, and a
+    dimension the author cannot address is a dimension the author cannot omit. The set could
+    neither name nor exclude one, and every location was drawn regardless.
+    """
+
+    @staticmethod
+    def _plate_with_a_hole():
+        return Box(80, 60, 12) - Pos(20, 10, 0) * Cylinder(3, 20)
+
+    @staticmethod
+    def _authored(part, roles):
+        from draftwright.model import hole as declare_hole
+
+        sheet = Sheet(part)
+        sheet.hole(Pos(20, 10, 0) * Cylinder(3, 20))
+        assert declare_hole is not None  # the verb above is the declaration under test
+        for role in roles:
+            sheet.dimension(sheet.features[0], role)
+        return {n for n, _ in sheet.build().iter_annotations()}
+
+    def test_an_omitted_location_is_not_drawn(self):
+        drawn = self._authored(self._plate_with_a_hole(), ["bore.diameter"])
+        assert not [n for n in drawn if n.startswith(("m_locx", "m_locy"))], (
+            f"the authored set named only the bore ⌀, so its position dims are an omission: "
+            f"{sorted(drawn)}"
+        )
+
+    def test_a_named_location_IS_drawn(self):
+        """The other half, and the one that makes omission meaningful rather than a way of
+        saying locations never work under an authored set."""
+        drawn = self._authored(self._plate_with_a_hole(), ["bore.diameter", "location"])
+        assert [n for n in drawn if n.startswith("m_locx")]
+        assert [n for n in drawn if n.startswith("m_locy")]
+
+    def test_the_auto_set_is_unchanged(self):
+        """Nothing above may cost a location on a drawing that authored nothing."""
+        auto = {
+            n for n, _ in Sheet.from_part(self._plate_with_a_hole()).build().iter_annotations()
+        }
+        assert [n for n in auto if n.startswith("m_locx")]
+        assert [n for n in auto if n.startswith("m_locy")]
+
+    def test_the_dedup_runs_over_the_SURVIVORS(self):
+        """Two features whose refs coincide, one authored and one not.
+
+        Deduping before the authored filter would let the omitted feature's ref absorb the
+        approved one's and take the drawing's position dim down with it — the author names a
+        measurement and gets nothing, which is the failure `_check_authored_targets` exists
+        to prevent, arriving by a different route.
+        """
+        part = Box(80, 60, 12) - Pos(20, 10, 0) * Cylinder(3, 20) - Pos(20, 10, 0) * Cylinder(6, 4)
+        sheet = Sheet(part)
+        sheet.hole(Pos(20, 10, 0) * Cylinder(3, 20))
+        sheet.hole(Pos(20, 10, 0) * Cylinder(6, 4))
+        # Name the SECOND hole's location only. Its ref coincides with the first's, and the
+        # first is the one the undeduped order would have kept.
+        sheet.dimension(sheet.features[1], "location")
+        drawn = {n for n, _ in sheet.build().iter_annotations()}
+        assert [n for n in drawn if n.startswith("m_locx")], (
+            "the surviving feature's position was deduped away against an OMITTED sibling"
+        )
+
+    @pytest.mark.parametrize("axis", ["x", "y"])
+    def test_a_side_drilled_holes_positions_obey_the_authored_set(self, axis):
+        """Off-axis positions were the last dimensional path outside the boundary.
+
+        Three statements of one fact disagreed: `location_role` said a hole is locatable,
+        `plan_locations` said only a Z-normal one is, and `_locate_off_axis_holes` drew the
+        X/Y ones from raw IR regardless — so an authored set naming only a side-drilled
+        bore's ⌀ still produced its offset and height dims, with no diagnostic, because they
+        were successfully PLACED dimensions that simply sat outside the plan (#925 review).
+        """
+        from draftwright.model.ir import Frame, HoleFeature, RequestedDimension
+
+        hole = HoleFeature(Frame((10, 5, 2), axis), 4.0, depth=None, through=True)
+
+        def drawn(roles):
+            return {
+                n
+                for n, _ in build_drawing(
+                    Box(100, 60, 20),
+                    model=[hole],
+                    authored=tuple(RequestedDimension(hole, r) for r in roles),
+                ).iter_annotations()
+                if n.startswith("dim_loc_")
+            }
+
+        assert not drawn(["bore.diameter"]), "the author named the ⌀ only"
+        # Both halves: omission is only meaningful if naming it still works. A side-drilled
+        # hole carries TWO positions (its in-plane offset and its height), and the coarse
+        # `location` role approves both.
+        assert len(drawn(["bore.diameter", "location"])) == 2
+
+    @pytest.mark.parametrize("order", [("x", "y"), ("y", "x")], ids=["x-first", "y-first"])
+    def test_cross_drilled_holes_at_one_point_keep_both_planar_positions(self, order):
+        """Two features can share a centre, so the coordinate does not identify a feature.
+
+        A cross-drilled pair — an X bore and a Y bore through the same point — produces four
+        approved entries. Grouping them by the member coordinate alone merged all four into
+        one occurrence whose axis was whichever feature came first, so the other's planar
+        dimension was silently dropped and the output flipped with the model's feature order
+        (#925 review). Grouping is by identity AND occurrence; the intentional GEOMETRIC
+        dedup happens downstream, per axis.
+
+        Parametrised over both orders because that is what pins this as a property rather
+        than as list-order luck.
+        """
+        from draftwright.model.ir import Frame, HoleFeature, RequestedDimension
+
+        holes = {
+            axis: HoleFeature(Frame((10, 5, 2), axis), 4.0, depth=None, through=True)
+            for axis in ("x", "y")
+        }
+        features = [holes[axis] for axis in order]
+        dwg = build_drawing(
+            Box(100, 60, 20),
+            model=features,
+            authored=tuple(RequestedDimension(h, "location") for h in features),
+        )
+        # `dim_loc_{view}_{axis}{value×100}` — compare the MEASUREMENT (axis + value), not
+        # the view. Which view carries the shared height is legitimately order-dependent:
+        # one Z dim is drawn on whichever bore's natural strip took it, and both read `12`.
+        measured = {
+            n.rsplit("_", 1)[1] for n, _ in dwg.iter_annotations() if n.startswith("dim_loc_")
+        }
+        assert measured == {"y3500", "x6000", "z1200"}, (
+            "both bores were authored; each keeps its own planar position and the two share "
+            f"one height — got {sorted(measured)}"
+        )
+
+    @pytest.mark.parametrize("axis", ["x", "y"])
+    @pytest.mark.parametrize(
+        "roles", [("location",), ("bore.diameter", "location")], ids=["alone", "with-bore"]
+    )
+    def test_an_off_axis_pattern_location_is_refused_not_accepted_and_lost(self, axis, roles):
+        """Eligibility must match what a compiler will actually produce.
+
+        `_LOCATION_ROLE` said every pattern is locatable; `plan_locations` planned only
+        Z-normal ones and the bbox compiler handled only holes, so an X/Y pattern fell
+        between them — `dimension(pattern, "location")` was ACCEPTED and produced nothing,
+        with no diagnostic. That is precisely the blank-drawing failure
+        `_check_authored_targets` exists to prevent (#925 review).
+
+        The engine has never drawn an off-axis pattern position (the off-axis pass excluded
+        patterns by construction), so the honest fix is for the vocabulary to say so rather
+        than for the compiler to invent output. `location_datum` is now the single answer
+        that `plan_locations`, the bbox compiler and this check all read.
+
+        The `with-bore` case is the one that survived the first fix: the target check asked
+        whether the FEATURE matched anything, so a valid `bore.diameter` entry vouched for
+        the invalid `location` beside it.
+        """
+        from draftwright.model.ir import Frame, HoleFeature, PatternFeature, RequestedDimension
+
+        member = HoleFeature(Frame((10, 5, 2), axis), 4.0, depth=None, through=True)
+        pattern = PatternFeature(
+            Frame((10, 5, 2), axis),
+            "linear",
+            3,
+            member,
+            members=((10, -10, 2), (10, 5, 2), (10, 20, 2)),
+            pitch=15,
+            direction=(0, 1, 0),
+        )
+        with pytest.raises(ValueError, match="draws no position"):
+            build_drawing(
+                Box(100, 60, 20),
+                model=[pattern],
+                authored=tuple(RequestedDimension(pattern, r) for r in roles),
+            )
+
+    def test_a_Z_normal_pattern_location_still_works(self):
+        """The false-positive half: narrowing eligibility must not cost the case that works."""
+        from draftwright.model.ir import Frame, HoleFeature, PatternFeature, RequestedDimension
+
+        member = HoleFeature(Frame((-40, 0, 0), "z"), 3.0, depth=None, through=True)
+        pattern = PatternFeature(
+            Frame((0, 0, 0), "z"),
+            "linear",
+            3,
+            member,
+            members=((-40, 0, 0), (0, 0, 0), (40, 0, 0)),
+            pitch=40,
+            direction=(1, 0, 0),
+        )
+
+        def drawn(roles):
+            return {
+                n
+                for n, _ in build_drawing(
+                    Box(120, 60, 12),
+                    model=[pattern],
+                    authored=tuple(RequestedDimension(pattern, r) for r in roles),
+                ).iter_annotations()
+                if n.startswith("m_loc")
+            }
+
+        assert not drawn(["bore.diameter"])
+        assert drawn(["bore.diameter", "location"])
+
+    def test_eligibility_and_the_compilers_cannot_disagree(self):
+        """The property behind both tests above, checked directly rather than per fixture.
+
+        Every feature `location_role` accepts must be produced by one of the two compilers,
+        and nothing else may be. Stated over a model carrying every locatable kind in every
+        orientation, so a new kind or a new orientation rule cannot land on one side only —
+        which is how this defect arrived twice.
+        """
+        from draftwright.model.ir import (
+            Frame,
+            HoleFeature,
+            PatternFeature,
+            PocketFeature,
+            SlotFeature,
+        )
+        from draftwright.model.planner import location_datum, location_role
+
+        member = HoleFeature(Frame((0, 0, 0), "x"), 4.0, depth=None, through=True)
+        features = [
+            HoleFeature(Frame((0, 0, 0), ax), 4.0, depth=None, through=True) for ax in "xyz"
+        ]
+        features += [
+            PatternFeature(
+                Frame((0, 0, 0), ax),
+                "linear",
+                2,
+                member,
+                members=((0, 0, 0),),
+                pitch=5,
+                direction=(0, 1, 0),
+            )
+            for ax in "xyz"
+        ]
+        features += [
+            PocketFeature(Frame((0, 0, 0), ax), "x", "y", 10.0, 20.0, 5.0, 0.0, 0.0, 10.0)
+            for ax in "xyz"
+        ]
+        features.append(SlotFeature(Frame((0, 0, 0), "z"), "x", "y", 8.0, 20.0, 0.0, 0.0, 20.0))
+
+        for feature in features:
+            assert (location_role(feature) is None) == (location_datum(feature) is None), (
+                f"{feature.kind}/{feature.frame.axis}: a role without a datum is a target "
+                "the vocabulary accepts and no compiler produces"
+            )
+
+    def test_a_pattern_pitch_obeys_the_authored_set_both_ways(self):
+        """`4× 20` is a value, so it is dimensional however the code groups it.
+
+        Authoring only the pitch also has to WORK, not merely not-crash: furniture used to be
+        a side effect of placing a bore callout, so a pattern with no callout drew no pitch
+        dim and the measurement the script named vanished silently (#925 review).
+        """
+        from draftwright.model import hole as declare_hole
+
+        def build(roles):
+            sheet = Sheet(Box(120, 60, 12))
+            sheet.pattern(
+                declare_hole(Pos(-40, 0, 0) * Cylinder(3, 20)),
+                kind="linear",
+                count=5,
+                pitch=20,
+                direction=(1, 0, 0),
+                at=(0, 0, 0),
+            )
+            for role in roles:
+                sheet.dimension(sheet.features[0], role)
+            return {n for n, _ in sheet.build().iter_annotations()}
+
+        assert not [n for n in build(["bore.diameter"]) if n.startswith("dim_pitch")]
+        assert [n for n in build(["pitch"]) if n.startswith("dim_pitch")], (
+            "the script named the pitch and the drawing has no pitch dim"
+        )
+
+    @staticmethod
+    def _bolt_circle():
+        import math
+
+        from draftwright.model.ir import Frame, HoleFeature, PatternFeature
+
+        hole = HoleFeature(Frame((0, 0, 10), "z"), 4.0, depth=None, through=True)
+        members = tuple(
+            (25 * math.cos(i * math.pi / 2), 25 * math.sin(i * math.pi / 2), 10) for i in range(4)
+        )
+        return PatternFeature(
+            Frame((0, 0, 10), "z"), "bolt_circle", 4, hole, members=members, bcd=50.0
+        )
+
+    def _bolt_circle_drawing(self, roles):
+        from draftwright.model.ir import RequestedDimension
+
+        pattern = self._bolt_circle()
+        return build_drawing(
+            Box(100, 60, 20),
+            model=[pattern],
+            authored=tuple(RequestedDimension(pattern, r) for r in roles),
+        )
+
+    def test_an_authored_BCD_without_its_bore_is_an_orphaned_term_not_a_silent_loss(self):
+        """A bolt circle's BCD is a planned dimension, so the authored escape must not waive it.
+
+        `bolt_circle.diameter` renders ONLY as the `EQ SP ON ø50 BC` suffix on the bore
+        callout, which makes it a dimensional dependent of the head exactly as a counterbore
+        ⌀ is — not a rider like the `4×` multiplier. Classifying it as a rider let the
+        authored-omission escape swallow the dependency error, `hole_callout_spec` return
+        `None`, and the bolt-circle branch of the furniture sweep skip it: the author named a
+        50 mm BCD and the drawing contained neither it nor a diagnostic (#925 review).
+        """
+        with pytest.raises(ValueError, match="EQ SP ON ø50 BC"):
+            self._bolt_circle_drawing(["bolt_circle.diameter"])
+
+    def test_the_BCD_prints_when_its_bore_is_authored_too(self):
+        """The false-positive half. Refusing the pair as well would trade a silent loss for
+        a bolt circle nobody can dimension."""
+        drawn = {
+            n: getattr(o, "label", None)
+            for n, o in self._bolt_circle_drawing(
+                ["bore.diameter", "bolt_circle.diameter"]
+            ).iter_annotations()
+        }
+        assert [n for n in drawn if n.startswith("hc_")]
+
+    def test_an_authored_set_still_governs_the_BCD_suffix(self):
+        """Naming the bore alone drops the suffix rather than raising — the BCD is omitted,
+        which orphans nothing, and asserting on the spec is what makes this about the STRING
+        rather than about which annotations happen to be placed."""
+        from draftwright.model.ir import PartModel, RequestedDimension
+        from draftwright.model.planner import plan_dimensions
+
+        pattern = self._bolt_circle()
+
+        def suffix(roles):
+            model = PartModel(
+                bbox=Box(100, 60, 20).bounding_box(),
+                orientation=None,
+                features=[pattern],
+                authored_dimensions=(
+                    None if roles is None else tuple(RequestedDimension(pattern, r) for r in roles)
+                ),
+            )
+            (group,) = [g for g in plan_dimensions(model) if g.feature_kind == "pattern"]
+            from draftwright.model.callout import hole_callout_spec
+
+            return hole_callout_spec(group)["suffix"]
+
+        assert suffix(None) == "EQ SP ON ø50 BC", "the auto set carries it"
+        assert suffix(["bore.diameter"]) is None, "omitted, so it must not print"
+        assert suffix(["bore.diameter", "bolt_circle.diameter"]) == "EQ SP ON ø50 BC"
+
+    def test_omitting_a_whole_bolt_circle_is_still_coherent(self):
+        """Nothing authored on the pattern at all: no callout, no suffix, and no raise —
+        the orphan rule fires on a dependent that WOULD print, not on an empty set."""
+        from draftwright.model.ir import EnvelopeFeature as _Env
+        from draftwright.model.ir import Frame, RequestedDimension
+
+        pattern = self._bolt_circle()
+        env = _Env(
+            Frame((0, 0, 0), "z"),
+            width=100.0,
+            depth=60.0,
+            height=20.0,
+            bbox_min=(-50.0, -30.0, -10.0),
+            bbox_max=(50.0, 30.0, 10.0),
+        )
+        dwg = build_drawing(
+            Box(100, 60, 20),
+            model=[pattern, env],
+            authored=(RequestedDimension(env, "width"),),
+        )
+        drawn = {n for n, _ in dwg.iter_annotations()}
+        assert not [n for n in drawn if n.startswith("hc_")]
+
+    def test_omitting_a_pattern_bore_is_not_an_orphaned_multiplier(self):
+        """The `n×` multiplier lives on the FEATURE, so it survives any suppression, and
+        #920 refuses to discard it silently. That refusal must not extend to an AUTHORED
+        omission: an author who leaves the bore out is not orphaning a multiplier, they are
+        declining the string it prefixes — and refusing there made a pattern the one feature
+        whose callout could not be omitted at all."""
+        from draftwright.model import hole as declare_hole
+
+        sheet = Sheet(Box(120, 60, 12))
+        sheet.pattern(
+            declare_hole(Pos(-40, 0, 0) * Cylinder(3, 20)),
+            kind="linear",
+            count=5,
+            pitch=20,
+            direction=(1, 0, 0),
+            at=(0, 0, 0),
+        )
+        sheet.dimension(sheet.features[0], "pitch")
+        drawn = {n for n, _ in sheet.build().iter_annotations()}  # must not raise
+        assert not [n for n in drawn if n.startswith("hc_")]
+
+
+class TestLiveAndDeferredEditsAgree:
+    """One edit, two paths, one answer.
+
+    `Drawing.callout()` used to answer this with a hand-written prediction of what a callout
+    would draw. Three versions were each wrong for some kind (#921 rounds 6–8); the last
+    asked "does this feature have ANY approved dimension?", which a turned step with its
+    length authored answers yes — and the live path then drew the omitted diameter while the
+    deferred path drew nothing (#925 review). There is no prediction now: the renderers
+    consume approved content, so drawing nothing is what they DO.
+    """
+
+    @staticmethod
+    def _boss_with_only_its_height_authored():
+        part = Box(80, 60, 12) + Pos(0, 0, 12) * Cylinder(10, 8)
+        sheet = Sheet.from_part(part)
+        for feature in [f for f in sheet.features if f.kind == "boss"]:
+            sheet.dimension(feature, "boss_height.length")
+        dwg = sheet.build()
+        return dwg, next(f for f in dwg.model().features if f.kind == "boss")
+
+    def test_the_live_path_does_not_draw_an_omitted_diameter(self):
+        dwg, boss = self._boss_with_only_its_height_authored()
+        before = set(dwg.annotations())
+        assert dwg.callout(boss) == "", "a callout with nothing approved is a drop, not a draw"
+        assert set(dwg.annotations()) == before
+
+    def test_the_drop_says_why(self):
+        """Silence is what makes the deferred path's behaviour indefensible on its own, so
+        the live path records the reason rather than matching the silence."""
+        dwg, boss = self._boss_with_only_its_height_authored()
+        dwg.callout(boss)
+        assert any(i.code == "authored_omission" for i in dwg.lint())
+
+    def test_the_deferred_path_agrees(self):
+        dwg, boss = self._boss_with_only_its_height_authored()
+        with dwg.deferred():
+            assert dwg.callout(boss) == ""
+
+
 class TestTheBoundaryIsLoadBearing:
+    @pytest.mark.parametrize(
+        "make_part", [_staircase, _side_drilled], ids=["staircase", "side-drilled"]
+    )
+    def test_an_empty_plan_draws_nothing_dimensional_in_a_REAL_build(self, monkeypatch, make_part):
+        """The behavioural statement, over a fixture set that reaches every pass.
+
+        Parametrised because a single fixture is how a whole dimensional path stayed
+        outside the boundary unnoticed: `_staircase()` has no holes, so it never entered
+        `_locate_off_axis_holes`, which was rebuilding side-drilled positions from raw IR
+        (#925 review). The guard is only as wide as what its parts exercise.
+        """
+        part = make_part()
+        before = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
+        assert [n for n in before if not n.startswith(_VALUE_FREE)], (
+            "the fixture must draw something dimensional to be worth emptying"
+        )
+
+        monkeypatch.setattr(
+            "draftwright.annotations.orchestrator.compile_dimensions",
+            lambda *a, **kw: RenderableDimensionPlan(),
+        )
+        empty = {n for n, _ in Sheet.from_part(part).build().iter_annotations()}
+        leaked = sorted(
+            n for n in empty if not n.startswith(_VALUE_FREE + _PENDING_VALUE_CARRYING)
+        )
+        assert not leaked, (
+            f"{leaked} reached the page from an EMPTY compiled plan — something is "
+            "rebuilding dimensions from somewhere other than the plan, and it is not on "
+            "the pending list"
+        )
+
     def test_an_empty_plan_draws_no_ladder_in_a_REAL_build(self, monkeypatch):
         """The behavioural statement, and it has to render to mean anything.
 
@@ -530,42 +1013,54 @@ class TestTheBoundaryIsLoadBearing:
             "render_flats",
             "render_grooves",
             "render_height_ladder",
+            "render_locations",
             "render_plates",
             "render_pocket_patterns",
             "render_pockets",
             "render_rotational",
             "render_slot_patterns",
+            "render_slots",
             "render_step_lengths",
             "render_step_positions",
         ], "the migrated set changed — update this and the ADR's inventory together"
 
-        assert sorted(by_contract["groups"]) == [
-            "render_slots",
-        ], f"the advisory-surface set changed: {sorted(by_contract['groups'])}"
+        assert by_contract["groups"] == [], (
+            f"no renderer may take the advisory surface: {sorted(by_contract['groups'])}"
+        )
 
+        # `render_gdt` and `render_pmi` draw AUTHOR-SUPPLIED text, not generated measurements:
+        # a control frame's tolerance and a PMI record's label are written by the script (or
+        # by the STEP file) and rendered verbatim, with no `DimParameter` to plan or suppress.
+        # They take the model because that is where those records live, which is a different
+        # thing from reconstructing a withheld measurement.
         assert sorted(by_contract["model"]) == [
             "render_gdt",
-            "render_locations",
             "render_pmi",
         ], f"the raw-inventory set changed: {sorted(by_contract['model'])}"
 
     def test_the_pending_dimensional_paths_are_the_ones_the_adr_names(self):
-        """Two paths still emit dimensional content of their own, and the ADR says so.
+        """The ADR and the code must agree about what has NOT crossed.
 
-        A pattern's pitch dim prints `4× 20` — a VALUE, which is what makes something
-        dimensional under this rule, however it is grouped in the code. It survives an
-        empty compiled plan today. This test does not assert the bypass exists (a test
-        that requires a bug is not a guard); it asserts the ADR and the code agree about
-        WHICH paths are outstanding, so the list cannot quietly grow."""
+        A prefix list of annotation names is not a semantic type system, so the two places
+        that record the remaining gap — `_PENDING_VALUE_CARRYING` here and the ADR's
+        inventory — are checked against each other. Naming the exception is what stops
+        "everything else is covered" becoming an assumption nobody rechecks."""
         adr = (
             pathlib.Path(__file__).resolve().parents[1]
             / "docs"
             / "adr"
             / "0016-declared-dimensioning-intent.md"
         ).read_text(encoding="utf-8")
-        assert "render_rotational" in adr and "render_step_lengths" in adr, (
-            "the ADR's pending inventory stopped naming the advisory-surface renderers — "
-            "it must list what has NOT crossed the boundary, not just what has"
+        assert "Hole callouts (`hc_`) remain on the legacy surface" in adr, (
+            "the ADR stopped naming the one renderer still on the advisory surface — it "
+            "must list what has NOT crossed the boundary, not just what has"
         )
-        assert "Pattern pitch dimensions" in adr, "pitch dims dropped off the pending list"
-        assert "#883" in adr, "locations dropped off the pending list"
+        assert "Pattern pitch" in adr, "pitch dims dropped out of the inventory"
+        assert "Slot positions" in adr, "slot positions dropped out of the inventory"
+        assert "#883 is not a blocker" in adr, (
+            "the ADR must say why locations no longer wait on #883 — otherwise the next "
+            "reader re-derives the blocker that was removed"
+        )
+        assert set(_PENDING_VALUE_CARRYING) == {"hc_", "pmi_"}, (
+            "the pending list changed; update the ADR inventory in the same commit"
+        )

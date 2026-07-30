@@ -35,7 +35,13 @@ from draftwright.model.ir import (
     PocketFeature,
     PocketPatternFeature,
     Point,
+    SlotFeature,
 )
+
+#: The `reason` marking a measurement the AUTHORED set left out — the author's own
+#: omission, as opposed to a rule-set suppression. Defined here, beside the code that
+#: sets it, and re-exported by `model/compiled.py` so the two cannot drift.
+_AUTHORED_OMISSION = "not in the authored dimension set"
 
 # How each (role, kind) is drawn. Defaults keep the table small.
 _CONVENTION = {
@@ -137,14 +143,17 @@ class AddressableDimension:
     provenance — survive the grouping instead of needing a second parallel structure
     alongside it.
 
-    **Scope: the feature parameters that flow through `plan_dimensions`.** Location
-    dimensions do *not* have addressable identity yet — `plan_dimensions` skips every
-    `location`-kind parameter and `plan_locations` returns a flat cross-feature list of
-    bare `PlannedDimension`s, deduped by ref point, that never enters a
-    `DimensionGroup`. Giving them identity is a design question rather than a wiring
-    gap (is a grouped hole's location one unit or one per member? does a deduped
-    coincident ref belong to which feature?), so it is tracked separately as **#883**
-    and blocks the `"location"` role in the selector."""
+    **Scope: the feature parameters that flow through `plan_dimensions`.** A location has
+    no entry here — `plan_dimensions` skips every `location`-kind parameter and
+    `plan_locations` returns a flat cross-feature list of bare `PlannedDimension`s, deduped
+    by ref point, that never enters a `DimensionGroup`.
+
+    That no longer means a location is unaddressable. :data:`_LOCATION_ROLE` gives each
+    locatable kind a role, which is what `sheet.dimension(bore, "location")` names and what
+    an authored set omits (#925) — one unit per feature. The finer question **#883** asks
+    (is a grouped hole's location one unit or one per member? does a deduped coincident ref
+    belong to which feature?) is about NAMING, and omission is well-formed either way, so
+    it no longer blocks the `"location"` role."""
 
     id: ParameterId
     members: tuple[PlannedDimension, ...]
@@ -317,13 +326,104 @@ def _datum_for(model: PartModel, param: DimParameter) -> Datum | None:
     return next((d for d in model.datums if d.id in param.refs), None)
 
 
+#: Which feature kinds get a datum-referenced position, and what that position is called.
+#:
+#: The ONE statement of "this feature is locatable". :func:`plan_locations` builds from it,
+#: and the authored-set vocabulary derives from it (:func:`location_role`), so a script can
+#: name `dimension(hole, "location")` exactly when the planner would emit one. Before #925
+#: a location was unnameable — it had no `DimParameter`, so an authored set could neither
+#: include nor exclude it, and every location was drawn regardless of what the script
+#: declared. A dimension the author cannot address is a dimension the author cannot omit.
+_LOCATION_ROLE: dict[type, str] = {
+    HoleFeature: "location",
+    PatternFeature: "location_pattern",
+    PocketFeature: "location_pocket",
+    PocketPatternFeature: "location_pocket_pattern",
+    PadFeature: "location_pad",
+    # A slot's position is datum-referenced too, but from the BOUNDING BOX along its long
+    # axis rather than from `datum_xy`, and it is drawn in the slot's own view. So it is
+    # addressable here (an authored set can name or omit it) while `plan_locations` skips
+    # it — the span is compiled in `model/compiled._compile_slot_positions`, which has the
+    # bbox. Listing it in one table with the rest is what keeps "which features have a
+    # position" a single answer.
+    SlotFeature: "location_slot",
+}
+
+
+#: Which DATUM each kind's position is measured from, per orientation — and therefore
+#: whether it has one at all.
+#:
+#: ``"datum_xy"`` is the Z-normal ladder `plan_locations` owns. ``"bbox"`` is a position
+#: measured from the bounding box in the feature's own view, compiled in `model/compiled`
+#: (a slot's near-end offset, a side-drilled hole's offset + height). ``None`` means the
+#: engine draws no position for that feature at all.
+#:
+#: **The eligibility question is answered once, here, and read three times** — by
+#: `plan_locations`, by the bbox compilers, and by the authored vocabulary. Re-deriving it
+#: is what broke twice: `location_role` said a hole is locatable while `plan_locations`
+#: said only a Z-normal one is (side-drilled positions drawn outside the plan), and then
+#: it said a PATTERN is locatable while neither compiler emits one off-axis — so
+#: `dimension(x_pattern, "location")` was ACCEPTED and silently produced nothing, the exact
+#: failure `_check_authored_targets` exists to prevent (#925 review).
+#:
+#: An off-axis pattern is ``None`` because the engine has never drawn one: the off-axis
+#: pass excluded patterns by construction. Compiling one would be new output with its own
+#: layout consequences, not a boundary fix — so the vocabulary tells the truth about
+#: today's engine and the author gets an error instead of a blank drawing.
+def location_datum(feature) -> str | None:
+    """``"datum_xy"``, ``"bbox"``, or ``None`` — where *feature*'s position is measured
+    from, or that it has none. See :data:`_LOCATION_ROLE`."""
+    if type(feature) not in _LOCATION_ROLE:
+        return None
+    if isinstance(feature, SlotFeature):
+        return "bbox"  # near-end offset along its long axis, in its own view
+    if isinstance(feature, PocketFeature):
+        return "datum_xy"  # every orientation: its two in-plane coordinates
+    if isinstance(feature, HoleFeature):
+        return "datum_xy" if feature.frame.axis == "z" else "bbox"
+    # Patterns and pads: the plan-X / side-Y ladder only, so Z-normal only.
+    return "datum_xy" if feature.frame.axis == "z" else None
+
+
+#: The role every authored entry uses to name a location, whatever the per-kind role above.
+#:
+#: One coarse unit per feature, deliberately: #883 asks whether a patterned hole's location
+#: is one addressable thing or one per member, and that is a question about NAMING. Omission
+#: does not need the answer — "this feature's position is not in the set" is well-formed at
+#: either granularity, and a finer id (`location.member.3`) refines this one later without
+#: contradicting it. So the completeness contract does not wait on #883.
+LOCATION_ROLE = "location"
+
+
+def location_role(feature) -> str | None:
+    """The role *feature*'s position is planned under, or ``None`` if it has none.
+
+    Derived from :func:`location_datum` rather than from the kind table alone, so the
+    authored vocabulary cannot accept a target no compiler will produce."""
+    if location_datum(feature) is None:
+        return None
+    return _LOCATION_ROLE.get(type(feature))
+
+
 def plan_locations(model: PartModel) -> list[PlannedDimension]:
     """Plan hole **location** dimensions — the *intent*: which features get located
     and from which datum. The renderer owns the tier/legibility/zone layout
     (Amendment 4). One ref per un-patterned Z-hole + one per Z-pattern (bolt-circle
     centre, else the array member nearest the datum); coincident refs deduped. Each
     returned `PlannedDimension` carries the datum and a `span` of datum → ref; the
-    renderer derives the X (plan) and Y (side) distances from it (#238)."""
+    renderer derives the X (plan) and Y (side) distances from it (#238).
+
+    Under an AUTHORED set (#876) a feature whose position the script did not name is
+    marked suppressed here, exactly as `plan_dimensions` marks an unnamed parameter — a
+    location is a dimension and obeys the same completeness rule. Two consequences worth
+    stating:
+
+    - The coincident-ref DEDUP runs over the surviving refs only. Deduping first would let
+      an omitted feature's ref absorb an approved sibling's and take the drawing's position
+      dim down with it — the author would have named a measurement and got nothing.
+    - Everything else is unchanged when no set is authored: every ref survives, so the
+      dedup sees the same input it always did.
+    """
     datum = next((d for d in model.datums if d.id == "datum_xy"), None)
     if datum is None:
         return []
@@ -335,22 +435,24 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     # record provenance on the placed location dim (ADR 0010).
     refs: list[tuple[Point, str, Feature]] = []
     for f in model.features:
-        # The established hole/pattern/pad ladder is Z-normal.  A pocket is
-        # different: its two coordinates belong in the view normal to its opening,
-        # so preserve its datum→centre intent for every principal orientation and
-        # let the renderer choose the corresponding end-on axes.
-        if f.frame.axis != "z" and not isinstance(f, PocketFeature):
+        # Which features get a `datum_xy` position — including the orientation rule (the
+        # hole/pattern/pad ladder is Z-normal; a pocket's two in-plane coordinates belong
+        # in the view normal to its opening, for every orientation) — is `location_datum`'s
+        # single answer. This loop used to restate the orientation half inline, which is
+        # how it came to disagree with the kind table (#925 review).
+        role = location_role(f)
+        if role is None or location_datum(f) != "datum_xy":
             continue
         if isinstance(f, HoleFeature):
             # un-patterned holes — a HoleFeature may group identical holes
             for m in f.members or (f.frame.origin,):
-                refs.append((m, "location", f))
+                refs.append((m, role, f))
         elif isinstance(f, PatternFeature):
             if f.pattern == "bolt_circle":
-                refs.append((f.frame.origin, "location_pattern", f))
+                refs.append((f.frame.origin, role, f))
             elif f.members:
                 near = min(f.members, key=lambda m: (m[0] - dx) ** 2 + (m[1] - dy) ** 2)
-                refs.append((near, "location_pattern", f))
+                refs.append((near, role, f))
         elif isinstance(f, PocketFeature):
             if f.edge_anchored:
                 continue
@@ -361,17 +463,12 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
             centre["xyz".index(f.long_axis)] = (f.lo + f.hi) / 2
             centre["xyz".index(f.width_axis)] = f.w_center
             ref = (centre[0], centre[1], centre[2])
-            refs.append((ref, "location_pocket", f))
-        elif isinstance(f, PocketPatternFeature):
-            refs.append((f.frame.origin, "location_pocket_pattern", f))
-        elif isinstance(f, PadFeature):
-            refs.append((f.frame.origin, "location_pad", f))
-    unique: list[tuple[Point, str, Feature]] = []
-    for r, role, feat in refs:
-        if not any(abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5 for u, _, _ in unique):
-            unique.append((r, role, feat))
-    return [
-        PlannedDimension(
+            refs.append((ref, role, f))
+        else:
+            refs.append((f.frame.origin, role, f))
+
+    def _plan(r, role, feat, *, suppressed=False, reason=None) -> PlannedDimension:
+        return PlannedDimension(
             param=DimParameter(
                 kind="location",
                 role=role,
@@ -380,11 +477,26 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
                 refs=(datum.id,),
             ),
             convention="location",
+            suppressed=suppressed,
+            reason=reason,
             datum=datum,
             feature=feat,
         )
-        for r, role, feat in unique
-    ]
+
+    omitted: list[PlannedDimension] = []
+    if model.authored_dimensions is not None:
+        kept: list[tuple[Point, str, Feature]] = []
+        for r, role, feat in refs:
+            if _authored_location_for(model, feat) is None:
+                omitted.append(_plan(r, role, feat, suppressed=True, reason=_AUTHORED_OMISSION))
+            else:
+                kept.append((r, role, feat))
+        refs = kept
+    unique: list[tuple[Point, str, Feature]] = []
+    for r, role, feat in refs:
+        if not any(abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5 for u, _, _ in unique):
+            unique.append((r, role, feat))
+    return [_plan(r, role, feat) for r, role, feat in unique] + omitted
 
 
 def _request_for(model, feature, param):
@@ -417,10 +529,121 @@ def _request_for(model, feature, param):
     return None
 
 
+def _authored_addresses(authored, feature, param) -> bool:
+    """Does this ONE authored entry name *param* on *feature*?
+
+    Split out from :func:`_authored_for` so `_check_authored_targets` can ask about a single
+    entry. Asking "did this FEATURE match anything" let one valid entry vouch for every
+    invalid one beside it: `dimension(pattern, "bore.diameter")` plus
+    `dimension(pattern, "location")` passed the check because the bore matched, and the
+    unmatched location then silently produced nothing (#925 review)."""
+    if authored.feature is not feature:
+        return False
+    if "." in authored.role:
+        if authored.role != param.parameter_id:
+            return False
+    elif authored.role != param.role:
+        return False
+    return authored.discriminator is None or authored.discriminator == param.discriminator
+
+
+def _authored_for(model, feature, param):
+    """The caller's `dimension(...)` naming this parameter, or ``None`` if it is omitted.
+
+    Same matching as :func:`_request_for` — the two verbs address a measurement identically;
+    what differs is what the answer means. `add_dimension` ADDS to the planner's set, so a
+    miss leaves the rule set's own decision standing. `dimension` DECLARES the set, so a miss
+    is an omission and the measurement is suppressed."""
+    for authored in model.authored_dimensions or ():
+        if _authored_addresses(authored, feature, param):
+            return authored
+    return None
+
+
+def authored_location_omitted(model, feature) -> bool:
+    """Did an AUTHORED set leave *feature*'s position out?
+
+    ``False`` when no set is authored (the rule set draws every position it plans) and when
+    the set names this feature's location. Exported so the compiler can gate the positions
+    it derives itself — a slot's, which measures from the bounding box — against the same
+    authored decision `plan_locations` applies to its own."""
+    if model.authored_dimensions is None:
+        return False
+    return _authored_location_for(model, feature) is None
+
+
+def _authored_location_for(model, feature):
+    """The caller's ``dimension(feature, "location")``, or ``None`` if it is omitted.
+
+    Separate from :func:`_authored_for` because a location has no `DimParameter` to match
+    against: it is synthesized from the feature and the datum, so the entry names the
+    feature and the coarse role and nothing else (see :data:`LOCATION_ROLE`)."""
+    for authored in model.authored_dimensions or ():
+        if authored.feature is feature and authored.role == LOCATION_ROLE:
+            return authored
+    return None
+
+
+def _check_authored_targets(model: PartModel) -> None:
+    """Every authored entry must address a measurement this model actually has.
+
+    An authored entry that hits nothing is not a no-op the way a stray `add_dimension`
+    is: `dimension(...)` DECLARES the set, so an entry matching no parameter leaves that
+    feature — potentially the whole drawing — silently blank, and the caller sees a clean
+    build with no dimensions rather than an error (#921 review round 4). This is the
+    failure mode #630/#631/#632 rank as worse than a visible raise.
+
+    The `Sheet` façade cannot reach this: it resolves the role when the verb is called
+    and materialises entries against the FINAL features at build. It is reachable through
+    the ADR 0011 public input — `build_drawing(part, model=…, authored=…)` with a
+    hand-built `PartModel` — where a feature object may be an equal-but-distinct CLONE of
+    the one in `model.features`. Matching stays identity-based on purpose (see
+    `_request_for`: two equal-valued features are two distinct targets, so structural
+    equality would make an authored dimension on one of a pair of identical holes
+    ambiguous). What changes is that a miss now says so."""
+    for authored in model.authored_dimensions or ():
+        if authored.role == LOCATION_ROLE and any(
+            f is authored.feature and location_role(f) is not None for f in model.features
+        ):
+            continue
+        if not any(
+            _authored_addresses(authored, feature, p)
+            for feature in model.features
+            if authored.feature is feature
+            for p in feature.parameters()
+        ):
+            in_model = any(f is authored.feature for f in model.features)
+            if in_model and authored.role == LOCATION_ROLE:
+                # Distinguish "this kind has no position" from "this kind has one, but not
+                # in this orientation" — the second reads as an engine limit, which it is,
+                # and a bare "no location measurement" would send the author looking for a
+                # typo instead.
+                raise ValueError(
+                    f"authored dimension 'location' matches nothing: the engine draws no "
+                    f"position for a {authored.feature.frame.axis}-axis "
+                    f"{authored.feature.kind}. An authored set declares the complete "
+                    "dimensioning, so an entry that addresses nothing would silently leave "
+                    "the drawing blank."
+                )
+            why = (
+                f"no {authored.role!r} measurement on that {authored.feature.kind}"
+                if in_model
+                else "that feature object is not in model.features (an equal-valued COPY "
+                "is a different target — pass the instance the model holds)"
+            )
+            raise ValueError(
+                f"authored dimension {authored.role!r} matches nothing: {why}. An authored "
+                "set declares the complete dimensioning, so an entry that addresses nothing "
+                "would silently leave the drawing blank."
+            )
+
+
 def plan_dimensions(model: PartModel) -> list[DimensionGroup]:
     """Plan each feature's parameters into one `DimensionGroup` (anchor + single
     view + planned dims, each carrying its render intent — convention, model-level
     suppression, datum). No cross- or within-feature value de-duplication."""
+    if model.authored_dimensions is not None:
+        _check_authored_targets(model)
     groups: list[DimensionGroup] = []
     for feature in model.features:
         dims = []
@@ -450,6 +673,16 @@ def plan_dimensions(model: PartModel) -> list[DimensionGroup]:
             request = _request_for(model, feature, p)
             if request is not None:
                 suppressed, reason = False, None
+            if model.authored_dimensions is not None:
+                # An authored set REPLACES the rule set rather than adding to it: what the
+                # script lists is what the drawing carries, and everything else is omitted.
+                # Marked, not filtered (#875) — the value survives on the group so the
+                # omission stays inspectable, and the compound-callout dependency rules
+                # still refuse to orphan half a term.
+                if _authored_for(model, feature, p) is None:
+                    suppressed, reason = True, _AUTHORED_OMISSION
+                else:
+                    suppressed, reason = False, None
             dims.append(
                 PlannedDimension(
                     param=p,
