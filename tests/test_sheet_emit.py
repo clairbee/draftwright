@@ -1661,6 +1661,16 @@ class TestAuthoredSetRoundTrips:
         )
         assert (feat.value, feat.label, feat.upper_tol, feat.lower_tol) == (40, "40", 0.1, 0.0)
 
+        # ...and the WHOLE feature, field by field. The four spot-checks above were what
+        # `_FIDELITY_UNCOVERED` leaned on to exempt `authored_dimension` from the detected-route
+        # oracle — and they missed `ref_pts`, `ref_bbox`, `frame`, `dimension_kind`,
+        # `dominant_axis`, `source` and `source_kind`, all of which the emitter writes. A review
+        # mutation moved every reference point by 1 mm and this test still passed (#967 r4).
+        original = next(f for f in model.features if f.kind == "authored_dimension")
+        assert _structurally_equal(original, feat), (
+            f"the re-run declares a different measurement:\n  from {original}\n  to   {feat}"
+        )
+
     def test_the_authored_set_is_not_silently_widened_to_the_planner_set(self):
         """The specific regression the old refusal existed to prevent: emitting
         `auto_dimensions()` for an authored model restores every omitted dimension."""
@@ -2313,3 +2323,611 @@ class TestTheScriptAccountsForEveryAnnotation:
             f"{unobserved} are exempted as furniture but this corpus never draws them — "
             "remove them, or add a fixture that produces them so the name is observed"
         )
+
+
+def _structurally_equal(a, b, *, tol=5e-4):
+    """Structural equality, tolerant of the emitter's 3-dp rounding but of nothing else.
+
+    Not `==`: the emitted script writes `_n(value)`, so a detected 12.4999 comes back as 12.5.
+    A tolerance smaller than that rounding fails on every float; one larger stops noticing real
+    drift, which is the failure the fidelity oracles exist to catch.
+
+    Module level because BOTH round-trip routes use it — the detected corpus and the declared
+    one. They compared different things while each leaned on the other, which is how a 1 mm
+    shift in every reference point survived four review rounds (#967 r4).
+    """
+    import dataclasses
+    import math
+
+    if dataclasses.is_dataclass(a) and dataclasses.is_dataclass(b):
+        fields = {f.name for f in dataclasses.fields(a)}
+        if fields != {f.name for f in dataclasses.fields(b)}:
+            return False
+        return all(
+            _structurally_equal(getattr(a, n), getattr(b, n), tol=tol) for n in sorted(fields)
+        )
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        if isinstance(a, bool) or isinstance(b, bool):
+            return a is b
+        return math.isclose(a, b, rel_tol=0, abs_tol=tol)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_structurally_equal(x, y, tol=tol) for x, y in zip(a, b))
+    return a == b
+
+
+#: ``route -> the obligation it imposes``, as CODE. Each takes the kinds carrying that route
+#: plus what the two corpora actually produced, and returns the offenders.
+#:
+#: This mapping is the single source of truth for what routes exist. Seven review rounds found
+#: the same defect — a coverage claim nothing enforced — and each fix moved the claim one level
+#: out: from a note string, to a substring match, to a separately-listed tuple of valid routes.
+#: The last of those was still editable independently of the enforcement, so adding a route
+#: with no handler excused a kind while everything stayed green (#967 r7). Deriving the route
+#: set FROM the handlers ends the regress: a route that imposes nothing cannot be spelled.
+_ROUTE_OBLIGATIONS = {
+    # Must be produced by the corpus its route names...
+    "detected": lambda kinds, detected, declared: (
+        kinds - detected,
+        "is routed 'detected' but no detected fixture produces one",
+    ),
+    "declared": lambda kinds, detected, declared: (
+        kinds - declared,
+        "is routed 'declared' but no declared fixture produces one",
+    ),
+    # ...or, for the routes that assert NO obligation, must be produced by neither — an excuse
+    # is only honest while nothing falsifies it.
+    "aspect": lambda kinds, detected, declared: (
+        kinds & (detected | declared),
+        "is routed as having no round-trip obligation, but a fixture produces one",
+    ),
+    "unnameable": lambda kinds, detected, declared: (
+        kinds & (detected | declared),
+        "is routed as having no round-trip obligation, but a fixture produces one",
+    ),
+}
+
+#: Derived, never hand-written — see above.
+_ROUTES = tuple(_ROUTE_OBLIGATIONS)
+
+#: ``kind -> (route, reason)`` for EVERY IR kind. The reason is documentation and nothing
+#: reads it; the route decides which corpus must contain the kind, and is validated against
+#: `_ROUTES`. Fail-closed against the IR itself, so a new kind cannot arrive unclassified.
+_FIDELITY_ROUTE = {
+    # Detected: reachable by emitting a model the detectors built from a part.
+    "hole": ("detected", "plate+hole, and as a pattern member"),
+    "pattern": ("detected", "hole pattern (linear) and grid pattern"),
+    "boss": ("detected", "boss"),
+    "step": ("detected", "turned shaft"),
+    "step_level": ("detected", "stepped"),
+    "slot": ("detected", "slot"),
+    "pocket": ("detected", "underside pocket / top pocket"),
+    "pocket_pattern": ("detected", "pocket pattern"),
+    "slot_pattern": ("detected", "slot pattern"),
+    "pad": ("detected", "pad"),
+    "plate": ("detected", "plate"),
+    "chamfer": ("detected", "chamfer"),
+    "fillet": ("detected", "fillet"),
+    "flat": ("detected", "flat"),
+    "groove": ("detected", "groove"),
+    "rotational": ("detected", "turned shaft"),
+    "envelope": ("detected", "every fixture carries one"),
+    # Declared: nothing detects one, so emitting a detected model cannot reach it.
+    "authored_dimension": ("declared", "an imported AP242 or hand-written measurement"),
+    # Aspects: carry no geometry to lose, and no declarative feature line to round-trip.
+    "control_frame": ("aspect", "GD&T; carries no DimParameter"),
+    "datum_ref": ("aspect", "GD&T; carries no DimParameter"),
+    "finish": ("aspect", "surface finish; carries no DimParameter"),
+    "note": ("aspect", "free text"),
+    # Also declared: `_raw_pmi_line` SERIALISES every raw record as `sheet.add(PmiFeature(...))`,
+    # so it is an emitted declaration with exactly the fidelity obligation `authored_dimension`
+    # has. Routing it `unnameable` said the opposite, and the AP242 test only greps the source
+    # for `sheet.add(PmiFeature(` without executing it — so a lossy change to `_raw_pmi_line`
+    # stayed green while the machinery claimed every emitted kind was covered (review of
+    # 9aac6d2). "Raw fallback" describes the API's quality, not an exemption from fidelity.
+    "pmi": ("declared", "raw AP242, emitted as sheet.add(PmiFeature(...))"),
+}
+
+
+class TestTheEmitBranchesBothWays:
+    """The FALSE side of each condition #962 added, exercised directly.
+
+    Detection does not produce every combination — a through hole whose depth was not measured,
+    a linear array with no recorded direction — so the corpora reach only one side of these
+    branches and codecov reports them as partials. Constructing the feature is more honest than
+    contriving a solid that happens to detect the other way, and it says what the branch is FOR.
+    """
+
+    def _hole(self, **kw):
+        from draftwright.model import Frame, HoleFeature
+
+        base = dict(frame=Frame((0.0, 0.0, 0.0), "z"), diameter=8.0, through=True, depth=None)
+        return HoleFeature(**{**base, **kw})
+
+    def test_a_through_hole_with_no_measured_depth_emits_none(self):
+        from draftwright.sheet_emit import _hole_line, _member_hole_str
+
+        assert "depth=" not in _hole_line(self._hole())
+        assert "depth=" not in _member_hole_str(self._hole())
+
+    def test_a_through_hole_with_a_measured_depth_emits_it(self):
+        from draftwright.sheet_emit import _hole_line, _member_hole_str
+
+        assert "depth=12" in _hole_line(self._hole(depth=12.0))
+        assert "depth=12" in _member_hole_str(self._hole(depth=12.0))
+
+    @pytest.mark.parametrize("kind", ["pocket_pattern", "slot_pattern"])
+    def test_a_linear_recess_array_with_no_direction_omits_it(self, kind):
+        """`direction` is optional on the IR, and a member array assembled without one must
+        not emit `direction=None` — declare would reject it."""
+        import dataclasses
+
+        from draftwright.sheet_emit import _feature_line
+
+        part_model = detect_part_model(
+            self._recess_array(blind=kind == "pocket_pattern"),
+        )
+        original = next(f for f in part_model.features if f.kind == kind)
+        assert original.direction, "the fixture must normally carry a direction"
+        line = _feature_line(dataclasses.replace(original, direction=None))
+        assert "direction=" not in line
+
+    @pytest.mark.parametrize("kind", ["pocket_pattern", "slot_pattern"])
+    def test_a_grid_recess_array_with_no_angle_omits_it(self, kind):
+        """The other side of the falsy-zero guard. Detection always reports an angle for a
+        grid (0.0 for an unrotated one), so only `is not None` TRUE is reachable from a part —
+        but `angle` is optional on the IR and `angle=None` must not be emitted."""
+        import dataclasses
+
+        from draftwright.sheet_emit import _feature_line
+
+        model = detect_part_model(self._grid_array(blind=kind == "pocket_pattern"))
+        original = next(f for f in model.features if f.kind == kind)
+        assert original.pattern == "grid" and original.angle is not None
+        assert "angle=" not in _feature_line(dataclasses.replace(original, angle=None))
+
+    @pytest.mark.parametrize("kind", ["pocket_pattern", "slot_pattern"])
+    def test_a_grid_recess_array_emits_its_true_angle(self, kind):
+        """The TRUE side of the falsy-zero guard, on the two branches an xfail hides.
+
+        `pocket_pattern` and `slot_pattern` grids are xfailed for #969, and a whole-test xfail
+        absorbs ANY failure in that test — so a second, unrelated corruption of these branches
+        would sit behind the known transposition unnoticed (review of the xfail conversion).
+        The angle is unaffected by #969, so it can be asserted here, outside the xfail, and a
+        wrong angle fails for its own reason.
+        """
+        from draftwright.sheet_emit import _feature_line, _n
+
+        model = detect_part_model(self._grid_array(blind=kind == "pocket_pattern"))
+        original = next(f for f in model.features if f.kind == kind)
+        assert original.angle == 0.0, "the fixture must detect an unrotated grid"
+        line = _feature_line(original)
+        assert "angle=0" in line, line
+        # ...and every other field these branches write. #969 is a mismatch in how `declare`
+        # INTERPRETS grid/rows/cols — the emitter writes them verbatim — so what the line says
+        # is fully assertable here, outside the xfail. Without this, corrupting `grid[0]` was
+        # absorbed as an expected failure (review of round 10's fix).
+        assert f"count={original.count}" in line
+        assert 'kind="grid"' in line
+        assert f"grid=({_n(original.grid[0])}, {_n(original.grid[1])})" in line, line
+        assert f"rows={original.rows}" in line
+        assert f"cols={original.cols}" in line
+
+    @staticmethod
+    def _grid_array(*, blind):
+        from build123d import Box, Pos
+
+        cutter = Box(12, 14, 6) if blind else Box(24, 8, 40)
+        part = Box(160, 140, 20)
+        for i in range(3):
+            for j in range(2):
+                part -= Pos((i - 1) * 40, (j - 0.5) * 45, 7 if blind else 0) * cutter
+        return part
+
+    @staticmethod
+    def _recess_array(*, blind):
+        from build123d import Box, Pos
+
+        cutter = Box(10, 12, 6) if blind else Box(30, 8, 40)
+        part = Box(30 if blind else 60, 30 * 6, 20)
+        for i in range(4):
+            part -= Pos(0, (i - 1.5) * 30, 7 if blind else 0) * cutter
+        return part
+
+
+class TestTheDeclaredModelMatchesTheDetectedOne:
+    """Model fidelity, not just drawing fidelity (#962, epic #964).
+
+    `TestRoundTripParity` compares the DRAWINGS an emitted script and a direct build produce.
+    That is necessary and it is not sufficient: #962 was an emitted pocket reconstructed at
+    the wrong depth, and annotation-set parity passed throughout because the callout is placed
+    from the projected geometry rather than from the declared frame. The only signal was an
+    incidental lint divergence, which fired because `coverage.py::pocket_owner` happens to
+    match on location — luck, not coverage.
+
+    So this compares the models: emit a detected model, run the script, and check the model it
+    declares field for field against the one it came from.
+    """
+
+    #: Fields that legitimately differ, with the reason. An exemption is a claim that a script
+    #: need not reproduce something, so each one is argued AND checked below — a bare skip
+    #: list would let a real divergence hide behind a plausible sentence.
+    _EXEMPT = {
+        ("hole", "members"): "a single hole's member list is exactly its own frame origin",
+        ("plate", "frame"): "detection fills a plate's frame with the PART centroid, so it "
+        "carries no per-plate information and nothing reads it",
+    }
+
+    def _exemption_holds(self, original, rebuilt, field):
+        """Prove the exemption rather than trusting it. Returns False to fail the test."""
+        if (original.kind, field) == ("plate", "frame"):
+            # The proof: detection sets `Frame(bbox.center(), axis)` for EVERY plate
+            # (`detect._convert_plate`), so two plates in one part get identical origins and
+            # the field cannot distinguish them. The slab's real position is axis/lo/hi/u/v,
+            # which this test compares like any other field. If detection ever starts filling
+            # this in meaningfully, `_exempt_plate_origin_is_the_part_centroid` fails and the
+            # exemption has to be re-argued.
+            return original.frame.axis == rebuilt.frame.axis
+        if (original.kind, field) == ("hole", "members"):
+            # Only for a lone hole: a PATTERN's members carry positions the frame cannot,
+            # so the exemption must not silently cover that case.
+            return (
+                original.count == 1
+                and tuple(rebuilt.members) == ()
+                and tuple(map(tuple, original.members)) == (tuple(original.frame.origin),)
+            )
+        return False
+
+    @staticmethod
+    def _corpus():
+        from build123d import Box, Cylinder, Pos
+
+        def rows(cutter, z, n=4, pitch=30.0, w=30.0):
+            part = Box(w, pitch * (n + 2), 20)
+            for i in range(n):
+                part -= Pos(0, (i - (n - 1) / 2) * pitch, z) * cutter
+            return part
+
+        def grid(cutter, z, nx=3, ny=2, px=40.0, py=45.0):
+            part = Box(160, 140, 20)
+            for i in range(nx):
+                for j in range(ny):
+                    part -= Pos((i - (nx - 1) / 2) * px, (j - (ny - 1) / 2) * py, z) * cutter
+            return part
+
+        return {
+            # The #962 fixture: a recess in the UNDERSIDE, whose depth-axis position is the
+            # coordinate the emitter dropped. A top-face pocket hides the bug — its synthesised
+            # origin happens to be near zero.
+            "underside pocket": Box(120, 80, 16) - Pos(-35, 0, -8) * Box(30, 20, 10),
+            "top pocket": Box(80, 60, 20) - Pos(0, 0, 14) * Box(30, 20, 14),
+            # A THROUGH cut, so it detects as a slot rather than a pocket. The first version
+            # of this fixture was named "slot" and detected as a pocket — coverage theatre of
+            # exactly the kind `_EXPECTED_KINDS` now makes impossible (#967 review).
+            "slot": Box(80, 60, 12) - Pos(10, 0, 0) * Box(30, 8, 40),
+            # A hole PATTERN. Its absence is why the oracle missed `_member_hole_str`
+            # dropping a through member's depth — the same bug one level down from the one
+            # this PR started with.
+            "hole pattern": Box(200, 80, 20)
+            - Pos(-60, 0, 0) * Cylinder(4, 40)
+            - Pos(-20, 0, 0) * Cylinder(4, 40)
+            - Pos(20, 0, 0) * Cylinder(4, 40)
+            - Pos(60, 0, 0) * Cylinder(4, 40),
+            "pocket pattern": rows(Box(10, 12, 6), z=7),
+            # Grid variants. They do NOT round-trip — #969 transposes the array — so they
+            # carry a strict xfail rather than sitting outside the corpus, which keeps the
+            # DESIRED equality as the assertion and still executes the grid emit branches.
+            "pocket grid": grid(Box(12, 14, 6), z=7),
+            "slot grid": grid(Box(24, 8, 40), z=0),
+            # GRID variants. The linear ones above leave the grid branches of
+            # `pocket_pattern`/`slot_pattern` unexecuted — which CI's coverage gate caught,
+            # not the review. Both detect angle=0.0, so they also pin the falsy-zero guard
+            # on the paths the hole grid does not reach.
+            "slot pattern": rows(Box(30, 8, 20), z=0, w=60),
+            "plate+hole": Box(80, 50, 8) - Pos(-20, 0, 0) * Cylinder(4, 20),
+            # Two slabs. Exempted-and-unchecked in the first cut, which was wrong: the review
+            # showed `PlateFeature.frame.origin` really does change. It is not semantic — see
+            # `_exemption_holds` — but that had to be PROVEN rather than asserted (#967 r2).
+            "plate": Box(80, 50, 8) + Pos(-36, 0, 29) * Box(8, 50, 50),
+            # A GRID pattern. Every other pattern fixture is linear, and the coverage ratchet
+            # is kind-level, so deleting the grid emit branches passed all 29 tests (#967 r2).
+            "grid pattern": Box(160, 120, 20)
+            - Pos(-45, -30, 0) * Cylinder(4, 40)
+            - Pos(0, -30, 0) * Cylinder(4, 40)
+            - Pos(45, -30, 0) * Cylinder(4, 40)
+            - Pos(-45, 30, 0) * Cylinder(4, 40)
+            - Pos(0, 30, 0) * Cylinder(4, 40)
+            - Pos(45, 30, 0) * Cylinder(4, 40),
+            "boss": Box(80, 60, 12) + Pos(0, 0, 12) * Cylinder(10, 8),
+            "turned shaft": Cylinder(15, 20) + Pos(0, 0, 17.5) * Cylinder(10, 15),
+            "stepped": Box(40, 12, 40) - Pos(10, 0, 20) * Box(20, 12, 20),
+            # The machined kinds. Excused in the first two cuts as carrying "no position to
+            # lose" — false: every one of them emits `at=`, and a review mutation moved a
+            # chamfer from (38,23,0) to (38,23,1) with all six chamfer tests still passing
+            # (#967 r3). Writing a third exemption I could not defend was the wrong answer;
+            # these are the same fixtures the mirror corpus already uses.
+            "chamfer": _chamfered_corner(bd_chamfer, 4),
+            "fillet": _chamfered_corner(bd_fillet, 3),
+            "flat": Cylinder(10, 30) - Pos(10, 0, 0) * Box(10, 40, 40),
+            "groove": Cylinder(10, 40) - (Cylinder(10, 4) - Cylinder(8, 4)),
+            "pad": Box(80, 60, 10) + Pos(0, 0, 10) * Box(30, 20, 4),
+        }
+
+    #: Fixtures whose round trip is a KNOWN defect, as STRICT xfails. Strict because an
+    #: assertion that the models merely DIFFER — which this was first — stays green if a later
+    #: change produces a DIFFERENT wrong answer, and because fixing the defect then XPASSes and
+    #: forces the marker's removal and promotion into the normal corpus (reviews of 9aac6d2).
+    _KNOWN_BAD = {
+        "pocket grid": "#969 — detector/declare grid convention mismatch transposes the array",
+        "slot grid": "#969 — as pocket grid",
+    }
+
+    #: …and the subset whose LINT also diverges. Only the pocket grid's does: a transposed
+    #: blind recess array lands where the coverage lint notices, a through-cut one does not.
+    #: Marking both would XPASS on the slot grid, which strictness correctly rejects — an
+    #: xfail has to name the failure that actually happens, not the one that might.
+    _KNOWN_BAD_LINT = {"pocket grid": _KNOWN_BAD["pocket grid"]}
+
+    def _cases(_corpus=_corpus, _bad=None, _default=_KNOWN_BAD):  # noqa: N805 — class-body
+        # Bound through defaults, and a plain loop rather than a comprehension: a
+        # comprehension gets its own scope that cannot see class-body names, so
+        # `_KNOWN_BAD[name]` inside one raises NameError at import.
+        _bad = _default if _bad is None else _bad
+        cases = []
+        for name in sorted(_corpus()):
+            bad = _bad.get(name)
+            marks = [pytest.mark.xfail(strict=True, reason=bad)] if bad else []
+            cases.append(pytest.param(name, marks=marks))
+        return cases
+
+    #: What each fixture is FOR. A fixture that stops detecting its kind stops testing the
+    #: path it was added for, silently — the failure `TestTheDimensionMirror._EXPECTED_KINDS`
+    #: exists for, repeated here because this corpus made the same mistake (#967 review).
+    _EXPECTED_KINDS = {
+        "underside pocket": {"pocket"},
+        "top pocket": {"pocket"},
+        "slot": {"slot"},
+        "pocket pattern": {"pocket_pattern"},
+        "slot pattern": {"slot_pattern"},
+        "pocket grid": {"pocket_pattern"},
+        "slot grid": {"slot_pattern"},
+        "hole pattern": {"pattern"},
+        "grid pattern": {"pattern"},
+        "plate+hole": {"hole"},
+        "plate": {"plate"},
+        "boss": {"boss"},
+        "turned shaft": {"rotational", "step"},
+        "stepped": {"step_level"},
+        "chamfer": {"chamfer"},
+        "fillet": {"fillet"},
+        "flat": {"flat"},
+        "groove": {"groove"},
+        "pad": {"pad"},
+    }
+
+    def test_the_corpus_names_every_fixture_it_carries(self):
+        assert set(self._corpus()) == set(self._EXPECTED_KINDS)
+
+    @pytest.mark.parametrize("name", sorted(_corpus()))
+    def test_the_corpus_detects_what_it_claims(self, name):
+        kinds = {f.kind for f in detect_part_model(self._corpus()[name]).features}
+        expected = self._EXPECTED_KINDS[name]
+        assert expected <= kinds, f"{name} detects {sorted(kinds)}, missing {sorted(expected)}"
+
+    #: The DECLARED route: models nothing detects, so they cannot be reached by emitting a
+    #: detected part. Each is `name -> a callable returning (part, model)`.
+    @staticmethod
+    def _declared_corpus():
+        from build123d import Box
+
+        from draftwright import Sheet
+
+        def measured_dimension():
+            part = Box(40, 20, 10)
+            sheet = Sheet(part, title="T", number="N").auto_dimensions()
+            sheet.measured_dimension(
+                kind="linear",
+                value=40,
+                label="40",
+                dominant_axis="X",
+                ref_bbox=(-20, -10, -5, 20, 10, 5),
+                ref_pts=[(-20, 0, 0), (20, 0, 0)],
+                upper_tol=0.1,
+                lower_tol=0.0,
+            )
+            return part, sheet.model()
+
+        def raw_pmi():
+            import dataclasses
+
+            from draftwright.builder import detect_part_model
+            from draftwright.model import Frame, PmiFeature
+
+            part = Box(60, 40, 20)
+            model = detect_part_model(part)
+            record = PmiFeature(
+                frame=Frame((1.0, 2.0, 3.0), "z"),
+                pmi_kind="linear",
+                value=60.0,
+                label="60",
+                dominant_axis="X",
+                ref_bbox=(-30.0, -20.0, -10.0, 30.0, 20.0, 10.0),
+                ref_pts=((-30.0, 0.0, 0.0), (30.0, 0.0, 0.0)),
+            )
+            return part, dataclasses.replace(model, features=[*model.features, record])
+
+        return {"measured dimension": measured_dimension, "raw pmi": raw_pmi}
+
+    @pytest.mark.parametrize("route", sorted(_ROUTE_OBLIGATIONS))
+    def test_each_obligation_actually_depends_on_the_corpora(self, route):
+        """The handlers are functions, so test them as functions — with inputs chosen to make
+        a handler that ignores its corpora fail.
+
+        The eighth instance of this PR's recurring defect was `kinds - detected` mutated to
+        `kinds - kinds`: the route survived, its classification survived, and every coverage
+        claim silently required nothing (#967 r8). Nothing above could catch that, because
+        `_ROUTE_OBLIGATIONS` was both the specification and its own enforcement. This is the
+        independent check — it does not consult the corpora at all, it asks whether the
+        handler's answer CHANGES with them.
+        """
+        obligation = _ROUTE_OBLIGATIONS[route]
+        kinds = {"probe"}
+        satisfied = {"probe"} if route in ("detected", "declared") else set()
+        violating = set() if route in ("detected", "declared") else {"probe"}
+
+        happy, _why = obligation(kinds, satisfied, satisfied)
+        assert not happy, f"{route}: reports an offender when its obligation IS met"
+
+        sad, why = obligation(kinds, violating, violating)
+        assert sad == kinds, (
+            f"{route}: does not report an offender when its obligation is NOT met — the "
+            "handler ignores the corpora it claims to enforce"
+        )
+        assert why, f"{route}: reports offenders with no explanation"
+
+    def test_every_route_has_an_obligation(self):
+        """A route only exists because a handler imposes something. Validating against a
+        separately-maintained list of names was the seventh instance of this defect: a route
+        could be added there, used, and enforce nothing (#967 r7)."""
+        used = {r for r, _why in _FIDELITY_ROUTE.values()}
+        assert used <= set(_ROUTE_OBLIGATIONS), (
+            f"{sorted(used - set(_ROUTE_OBLIGATIONS))} imposes no obligation — add a handler "
+            "to _ROUTE_OBLIGATIONS saying what the route requires, or use an existing route"
+        )
+
+    def test_every_ir_kind_has_a_route(self):
+        """Fail-closed against the IR, not against another table. A new feature kind cannot
+        arrive without someone deciding how its round trip is proven."""
+        from draftwright.model import ir as _ir
+
+        kinds = {
+            value.kind
+            for value in vars(_ir).values()
+            if isinstance(value, type) and isinstance(getattr(value, "kind", None), str)
+        }
+        assert kinds == set(_FIDELITY_ROUTE), (
+            "an IR kind was added or removed — classify it in _FIDELITY_ROUTE: which corpus "
+            f"proves its round trip? (missing {sorted(kinds - set(_FIDELITY_ROUTE))}, "
+            f"stale {sorted(set(_FIDELITY_ROUTE) - kinds)})"
+        )
+
+    def test_every_routed_kind_is_observed_in_the_corpus_its_route_names(self):
+        """The obligation itself. A kind routed `detected` must appear in the detected corpus
+        and a `declared` one in the declared corpus — no exemption list, and no phrase that
+        can be edited to make the requirement disappear."""
+        detected = set()
+        for part in self._corpus().values():
+            detected |= {f.kind for f in detect_part_model(part).features}
+        declared = set()
+        for build in self._declared_corpus().values():
+            _part, model = build()
+            declared |= {f.kind for f in model.features}
+
+        for route, obligation in _ROUTE_OBLIGATIONS.items():
+            kinds = {k for k, (r, _why) in _FIDELITY_ROUTE.items() if r == route}
+            offenders, why = obligation(kinds, detected, declared)
+            assert not offenders, f"{sorted(offenders)} {why}"
+
+    @pytest.mark.parametrize("name", sorted(_declared_corpus()))
+    def test_every_declared_feature_survives_its_own_emit(self, name):
+        """The declared route, with the SAME comparator as the detected one. Previously this
+        lived in another class and compared four fields of seven, which is how a 1 mm shift in
+        every reference point went unnoticed (#967 r4)."""
+        part, model = self._declared_corpus()[name]()
+        src = emit_sheet_script(model, "part", "s", title="T", number="N")
+        ns: dict = {"part": part}
+        exec(compile(src[: src.index("sheet.export(")], "<emit>", "exec"), ns)  # noqa: S102
+        rebuilt = ns["sheet"].model()
+
+        # The emitter SYNTHESISES an envelope when the overall height would otherwise be
+        # unnameable under an authored set. That is a real extra feature, not a comparison
+        # artefact — it is the "synthesised-envelope workaround" #946 exists to delete — so it
+        # is named here rather than absorbed by a loose comparison. Anything else appearing is
+        # a failure.
+        extra = [f.kind for f in rebuilt.features][len(model.features) :]
+        assert set(extra) <= {"envelope"}, f"{name}: unexpected synthesised features {extra}"
+        assert [f.kind for f in rebuilt.features][: len(model.features)] == [
+            f.kind for f in model.features
+        ], name
+        for original, back in zip(model.features, rebuilt.features):
+            assert _structurally_equal(original, back), (
+                f"{name}: {original.kind} came back different:\n  from {original}\n  to   {back}"
+            )
+
+    def test_exempt_plate_origin_is_the_part_centroid(self):
+        """The premise behind the `("plate", "frame")` exemption, asserted separately so the
+        exemption rests on a checked fact rather than a sentence. Two plates in one part must
+        share an origin, and it must be the part's bbox centre — that is what makes the field
+        a placeholder rather than a position."""
+        model = detect_part_model(self._corpus()["plate"])
+        plates = [f for f in model.features if f.kind == "plate"]
+        assert len(plates) == 2, "the fixture must carry two slabs for this to mean anything"
+        centre = model.bbox.center()
+        for plate in plates:
+            assert plate.frame.origin == pytest.approx((centre.X, centre.Y, centre.Z)), (
+                "a plate's frame is no longer the part centroid — it may now carry real "
+                "information, so the fidelity exemption must be re-argued"
+            )
+
+    @pytest.mark.parametrize("name", _cases(_bad=_KNOWN_BAD_LINT))
+    def test_the_script_lints_the_same_as_the_direct_build(self, name):
+        """Critique parity, which epic #964 makes part of the round-trip contract. It is also
+        how #962 was noticed at all — the drawings matched and only the lint differed."""
+        from unittest.mock import patch
+
+        from draftwright import Sheet, build_drawing
+
+        part = self._corpus()[name]
+        direct = build_drawing(part, title="T", number="N")
+        src = emit_sheet_script(detect_part_model(part), "part", "s", title="T", number="N")
+        captured: dict = {"part": part}
+        with patch.object(
+            Sheet, "export", lambda self, stem=None: captured.setdefault("dwg", self.build())
+        ):
+            exec(compile(src, "<emit>", "exec"), captured)  # noqa: S102
+
+        def issues(dwg):
+            # (code, severity) as a sorted multiset. `by_code` alone compares COUNTS, so two
+            # drawings could agree on every code while disagreeing on how serious each is —
+            # and epic #964 asks for code AND severity parity (review of 9aac6d2). Message
+            # text is deliberately excluded: it embeds labels and measurements, so comparing
+            # it would fail on presentation rather than on critique.
+            return sorted((i.code, i.severity) for i in dwg.lint())
+
+        assert issues(captured["dwg"]) == issues(direct), (
+            f"{name}: the script's drawing lints differently from the direct build\n"
+            f"  script: {issues(captured['dwg'])}\n  direct: {issues(direct)}"
+        )
+
+    @pytest.mark.parametrize("name", _cases())
+    def test_every_declared_feature_matches_its_detected_original(self, name):
+        import dataclasses
+
+        part = self._corpus()[name]
+        detected = detect_part_model(part)
+        src = emit_sheet_script(detected, "part", "s", title="T", number="N")
+        ns: dict = {"part": part}
+        exec(compile(src[: src.index("sheet.export(")], "<emit>", "exec"), ns)  # noqa: S102
+        declared = ns["sheet"].model()
+
+        by_kind_detected = [f for f in detected.features if f.kind != "authored_dimension"]
+        by_kind_declared = [f for f in declared.features if f.kind != "authored_dimension"]
+        assert [f.kind for f in by_kind_declared] == [f.kind for f in by_kind_detected], (
+            f"{name}: the script declares a different set of feature kinds"
+        )
+
+        for original, rebuilt in zip(by_kind_detected, by_kind_declared):
+            for field in dataclasses.fields(original):
+                want = getattr(original, field.name)
+                got = getattr(rebuilt, field.name)
+                if _structurally_equal(want, got):
+                    continue  # agrees; an exemption is not consulted unless it is needed
+                assert (original.kind, field.name) in self._EXEMPT, (
+                    f"{name}: {original.kind}.{field.name} came back as {got!r}, "
+                    f"not {want!r} — the script declares a different feature from the one "
+                    "it was generated from"
+                )
+                assert self._exemption_holds(original, rebuilt, field.name), (
+                    f"{name}: {original.kind}.{field.name} is exempt because "
+                    f"{self._EXEMPT[(original.kind, field.name)]}, but that does not hold "
+                    "here — the exemption is covering a real divergence"
+                )
