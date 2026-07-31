@@ -1201,6 +1201,7 @@ class TestRoundTripParity:
         direct = build_drawing(step_file=str(step), title="PART")
         scripted = _drawing_from_generated_script(step, tmp_path, monkeypatch)
         assert _annotation_signature(scripted) == _annotation_signature(direct)
+        return scripted, direct
 
     def test_prismatic_plate_parity(self, tmp_path, monkeypatch):
         self._parity(_plate(), tmp_path, monkeypatch)
@@ -1226,6 +1227,48 @@ class TestRoundTripParity:
     def test_counterbore_section_parity(self, tmp_path, monkeypatch):
         part = Box(80, 60, 20) - Pos(0, 0, 0) * Cylinder(8, 40) - Pos(0, 0, 8) * Cylinder(14, 20)
         self._parity(part, tmp_path, monkeypatch)
+
+    def test_grooved_shaft_parity(self, tmp_path, monkeypatch):
+        """A groove between two steps (#953). The emitted script did not merely diverge here —
+        it RAISED: the #631 span guard walks step spans only, so the groove's 4 mm read as an
+        unmeasured interior gap and the declared model was refused. `build_drawing(shaft)`
+        drew the same model happily, so the engine was rejecting its own detector's output the
+        moment that output was declared rather than detected.
+
+        Signature parity alone would also be satisfied by two identically BLANK drawings, so
+        this pins the content on both sides as well — including the part that is still wrong.
+        This shaft's shoulders sit 4 mm apart, which fails the legibility gate, which drops the
+        whole step chain; the overall height was already suppressed at compile time on the
+        premise that chain would convey it, so nothing states the 60 mm. That is #955, it
+        predates this fix and affects the detected path identically, and it is asserted here
+        rather than glossed: when #955 lands this test must fail and be updated."""
+        from build123d import Align
+
+        shaft = Cylinder(12, 60, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        shaft -= Pos(0, 0, 30) * (
+            Cylinder(12, 4, align=(Align.CENTER, Align.CENTER, Align.MIN))
+            - Cylinder(9, 4, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        )
+        scripted, direct = self._parity(shaft, tmp_path, monkeypatch)
+
+        for dwg, which in ((scripted, "scripted"), (direct, "direct")):
+            names = {n for n, _ in dwg.iter_annotations()}
+            labels = {lab for _, o in dwg.iter_annotations() if (lab := getattr(o, "label", None))}
+            # Non-degenerate: the groove and the OD are drawn, so parity is over real content.
+            assert any(n.startswith("m_groove") for n in names), (which, names)
+            assert "4 WIDE × ø18" in labels, (which, labels)
+            assert "ø24" in labels, (which, labels)
+            # The #955 gap, stated: no height, and lint says so on both paths. These four
+            # assertions are expected to fail when #955 lands — that is deliberate. Replace
+            # them with the height's presence then, and check parity still holds; do not
+            # relax them, or the fixture stops describing the drawing it produces. (Asserting
+            # only the lint codes would not decouple this: they change when #955 lands too.)
+            gap = f"{which}: #955 fixed? see the note above — update, don't relax."
+            assert "dim_height" not in names, (gap, names)
+            assert "60" not in labels, (gap, labels)
+            codes = dwg.lint_summary()["by_code"]
+            assert codes.get("axial_length_missing") == 1, (gap, codes)
+            assert codes.get("step_dim_dropped") == 1, (gap, codes)
 
     def test_title_block_and_layout_aspects_round_trip(self, tmp_path, monkeypatch):
         # #474: a generated sheet script carrying drawn_by/tolerance/scale/page must reproduce the

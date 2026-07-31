@@ -59,6 +59,7 @@ from draftwright.fonts import PLEX_MONO
 from draftwright.model import (
     Datum,
     Feature,
+    GrooveFeature,
     PartModel,
     StepFeature,
     build_pmi_features,
@@ -345,21 +346,48 @@ def _assemble(
             rot = build_rotational_feature(a)
             if rot is not None:
                 pm = replace(pm, features=[*pm.features, rot])
-        # A z step declares a segment of a z-turned profile; the height ladder then suppresses
-        # the overall height on the premise the step-length chain conveys it (from_model
-        # render_height_ladder). That premise holds only if the declared steps span the part's
-        # FULL z-extent — a boss, or even a stepped boss on a plate, declared via .step()
-        # leaves the bulk unspanned, so suppression silently drops the overall height (#631).
-        # Guard on that exact condition rather than a classifier proxy (is_rotational / prof
-        # both have blind spots): raise when the z-steps don't reach both ends of the part.
+        # A z step declares a segment of a z-turned profile. `.step()` on a BOSS — an external
+        # cylinder on a prismatic part — is a misuse of the verb, and the symptom is that the
+        # declared steps leave the bulk of the part unspanned (#631). This is a verb-misuse
+        # diagnostic, not a guarantee that the height is dimensioned: whether the approved
+        # measurements actually reach the page is settled downstream and reported by lint
+        # (`axial_length_missing`). Guard on the tiling condition rather than a classifier
+        # proxy (is_rotational / prof both have blind spots).
         z_steps = [f for f in pm.features if isinstance(f, StepFeature) and f.frame.axis == "z"]
         if pm.orientation == "z" and z_steps:
             tol = 1e-3 * max(a.z_size, 1.0)  # small absolute float epsilon, floored
-            # The step lengths convey the overall height only if the steps TILE the z-extent
-            # contiguously — a single reach to each end isn't enough (an interior gap would
-            # still leave height unconveyed). Walk the spans low→high, extending coverage.
+            # Tiling means the segments run end to end — a single reach to each end isn't
+            # enough, since an interior gap is a stretch of part no declared step describes.
+            # Walk the spans low→high, extending coverage.
+            # A GROOVE counts as one of those segments (#953): it is machined INTO the turned
+            # profile, so a shaft that has one is still a turned profile, which is the only
+            # thing this guard is asking. Without it the emitted script for any grooved shaft
+            # RAISED — the detector produces exactly this model (step, groove, step) and the
+            # direct build draws it, so the engine rejected its own detector's output the
+            # moment that output was declared rather than detected. Grooves are the only
+            # detected feature that splits the chain: a chamfered or filleted shoulder leaves
+            # the two step spans meeting (checked), and a bore or cross-hole carves no axial
+            # interval. #631's own repro still raises.
+            # What this does NOT do is verify the declaration against the solid, and it never
+            # did: `.step(diameter=20, length=48, at=…)` fabricating one full-extent segment
+            # already defeats it on its own, groove or no groove (checked). Declared spans are
+            # the author's statement of intent, which ADR 0011 takes at face value rather than
+            # re-deriving, so this catches the honest mistake #631 reported — declaring the
+            # boss you can see and getting a worse drawing — not a fabricated coverage claim.
+            # Hardening it into a real verb-domain check is #956.
+            # NOT claimed here: that the resulting drawing dimensions the height. On this very
+            # fixture the step chain drops at placement (crowded shoulders) and the height,
+            # suppressed at compile time on the premise the chain conveys it, is then conveyed
+            # by nothing — identically on the detected path. That is a real defect, tracked
+            # separately (#955); raising here would not fix it, only hide it from one of the
+            # two front doors.
             spans = sorted(
-                (min(p0[2], p1[2]), max(p0[2], p1[2])) for f in z_steps for (p0, p1) in [f.span]
+                [(min(p0[2], p1[2]), max(p0[2], p1[2])) for f in z_steps for (p0, p1) in [f.span]]
+                + [
+                    (f.frame.origin[2] - f.width / 2, f.frame.origin[2] + f.width / 2)
+                    for f in pm.features
+                    if isinstance(f, GrooveFeature) and f.frame.axis == "z"
+                ]
             )
             covered = a.bb.min.Z
             for lo, hi in spans:
