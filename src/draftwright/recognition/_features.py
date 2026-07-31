@@ -41,6 +41,7 @@ from OCP.GeomAbs import (
 )
 from OCP.TopAbs import TopAbs_Orientation
 
+from draftwright._geometry import plane_axes
 from draftwright.recognition._record import Record
 from draftwright.recognition.countersinks import CounterSink
 
@@ -734,12 +735,24 @@ class LinearArray(Record):
 class RectGrid(Record):
     """A fully-populated rectangular grid of identical holes (an N×M lattice).
 
-    ``rows``×``cols`` holes sit on a regular rectangular lattice with
-    ``row_pitch`` spacing along the first lattice axis and ``col_pitch`` along
-    the second; every lattice position is occupied (``rows * cols == len(holes)``).
-    ``angle`` is the first axis's orientation in degrees within the holes'
-    opening plane, normalised to ``[0, 90)``. ``center`` is the world point at
-    the grid centroid (opening plane).
+    ``rows``×``cols`` holes sit on a regular rectangular lattice; every lattice
+    position is occupied (``rows * cols == len(holes)``). ``center`` is the world
+    point at the grid centroid (opening plane).
+
+    The lattice convention is shared with ``model.declare``, which reconstructs a
+    declared grid from these very fields (#969): **columns** are spaced
+    ``col_pitch`` apart along the lattice's first basis direction and **rows**
+    ``row_pitch`` apart along the second, and ``angle`` is the COLUMN direction's
+    orientation in degrees within the holes' opening plane, measured in the
+    :func:`~draftwright._geometry.plane_axes` frame and normalised to ``[0, 180)``.
+
+    ``[0, 180)`` and not ``[0, 90)``: the lattice is unchanged by a half-turn (its
+    cell set is symmetric about ``center``, so the basis sign carries no
+    information) but a QUARTER-turn swaps rows for columns, which these fields
+    distinguish. Note the first basis is the SHORTEST pairwise vector rather than
+    anything world-aligned, so a grid may legitimately come back with its rows and
+    columns named the other way round — what is fixed is that each count keeps its
+    own pitch, and that the fields describe the same lattice.
 
     A rectangular *ring* / perimeter (holes only around the edge, interior
     empty) is not a grid — it is reported as its constituent edge
@@ -802,21 +815,54 @@ def _spec_key(h):
     return HoleSpec.from_hole(h)
 
 
+def _project_out(w, *directions):
+    """*w* with every direction in *directions* (unit, mutually orthogonal) removed, renormalised."""
+    for d in directions:
+        k = sum(p * q for p, q in zip(w, d, strict=True))
+        w = tuple(p - k * q for p, q in zip(w, d, strict=True))
+    n = math.hypot(*w)
+    return tuple(c / n for c in w)
+
+
 def _plane_uv(axis):
-    """Two unit vectors spanning the plane perpendicular to *axis*."""
-    ax, ay, az = axis
-    ref = (0.0, 0.0, 1.0) if abs(az) < 0.9 else (1.0, 0.0, 0.0)
-    ux = ay * ref[2] - az * ref[1]
-    uy = az * ref[0] - ax * ref[2]
-    uz = ax * ref[1] - ay * ref[0]
-    n = math.hypot(ux, uy, uz)
-    u = (ux / n, uy / n, uz / n)
-    v = (
-        ay * u[2] - az * u[1],
-        az * u[0] - ax * u[2],
-        ax * u[1] - ay * u[0],
-    )
-    return u, v
+    """Two orthonormal vectors spanning the plane perpendicular to *axis*.
+
+    Seeded from the shared :func:`~draftwright._geometry.plane_axes` basis for *axis*'s
+    dominant component — the very frame ``model.declare`` lays a declared pattern out in, so a
+    grid angle measured here means the same thing there (#969) — then Gram-Schmidt'd against
+    the *actual* axis so the result is exactly perpendicular to it whatever the axis is.
+
+    Seed-and-orthogonalise rather than a near-axis special case: a threshold wide enough to
+    absorb real STEP noise is also wide enough to return a basis that is NOT perpendicular to
+    the normal it was given, which silently distorts every projected pitch (Codex review of
+    #970 — a 0.999 cosine cutoff let a 2.5°-off normal through). An exactly axis-aligned axis
+    reproduces the canonical basis unchanged, and a noisy one lands imperceptibly beside it,
+    with no cutoff for real geometry to sit near.
+
+    Deliberately NOT made right-handed about *axis*: ``(0, 0, -1)`` and ``(0, 0, 1)`` return the
+    same pair, because the IR records a pattern's axis as a LETTER. A frame that flipped with a
+    sign declaration cannot express would mirror the angle back through the waist.
+
+    **Scope.** The seed follows *axis*'s dominant component, so the frame does jump a quarter
+    turn across a dominant-component tie (``(1, 1-ε, 0)`` → ``(1-ε, 1, 0)``). That is not a gap
+    between the two halves of the waist: :func:`~draftwright._geometry.plane_axes` and
+    ``detect._pattern_feature``'s axis LETTER are chosen by the same rule, so the frame and the
+    letter turn together, and `test_the_frame_and_the_ir_axis_letter_agree` pins it. What such
+    an axis does not have is a faithful declared counterpart at all — an oblique pattern is
+    flattened into its dominant plane by the letter, whatever frame it was found in. The
+    projection here stays geometrically honest (unforeshortened pitches, so the lattice is
+    recognised correctly), but the round trip through the IR is lossy for a genuinely oblique
+    pattern. That is a pre-existing limit of the letter-only IR, not something this function can
+    fix; it is #971 (Codex review of #970, round 3).
+    """
+    n = math.hypot(*axis)
+    a = tuple(c / n for c in axis)
+    u0, v0 = plane_axes(a)
+    # `u0`/`v0` span the plane of the DOMINANT component, so neither is parallel to `a` and
+    # neither projection can collapse: `a`'s component along the third axis is the largest of
+    # the three, hence at least 1/√3.
+    u = _project_out(u0, a)
+    return u, _project_out(v0, a, u)
 
 
 def _as_bolt_circle(holes, pts):
@@ -1030,8 +1076,26 @@ def _rect_grid(members, pts, make):
         cells.append((ci, cj))
     if len(set(cells)) != n:
         return None
-    rows = max(c[0] for c in cells) + 1
-    cols = max(c[1] for c in cells) + 1
+    # `u1` is the FIRST lattice basis and `u2` the orthogonal one; the cell index along each
+    # is `ci`/`cj`. Which of those is a "row" is a naming choice, and this recogniser made the
+    # opposite one to `declare._pattern_members`, which lays COLUMNS along its first local
+    # direction and ROWS along the second, reading `rp, cp = grid`. Feeding one into the other
+    # transposed every declared grid array (#969) — invisible on the hole path, which emits
+    # explicit `members=`, and exposed by pocket/slot arrays, which recompute.
+    #
+    # Detection now follows declaration, per the decision on #969: columns vary along the first
+    # basis, rows along the second, and the pitch tuple is `(row_pitch, column_pitch)`. Note
+    # `u1` is the SHORTEST pairwise vector, not "X" — so this is a consistent local-lattice
+    # convention, not a world-axis one, and holds for a rotated grid.
+    #
+    # Hence the angle is reduced modulo 180°, not 90°. `angle` names the COLUMN direction, and
+    # a grid is invariant under a half-turn (the cell set is symmetric about its centre) but
+    # NOT under a quarter-turn — a quarter-turn swaps the roles of rows and columns. Folding to
+    # [0, 90) discarded exactly that distinction, so whenever the shortest basis was the
+    # original ROW direction the rebuilt lattice came back transposed in place: same angle,
+    # swapped counts and pitches, different point set (Codex review of #970).
+    cols = max(c[0] for c in cells) + 1
+    rows = max(c[1] for c in cells) + 1
     if rows < 2 or cols < 2 or max(rows, cols) < 3 or rows * cols != n:
         return None
     center = tuple(sum(c) / n for c in zip(*(h.location for h in members), strict=True))
@@ -1039,9 +1103,9 @@ def _rect_grid(members, pts, make):
         tuple(members),
         rows,
         cols,
-        round(l1, 2),
         round(l2, 2),
-        round(math.degrees(math.atan2(u1[1], u1[0])) % 90.0, 2),
+        round(l1, 2),
+        round(math.degrees(math.atan2(u1[1], u1[0])) % 180.0, 2),
         center,
     )
 
