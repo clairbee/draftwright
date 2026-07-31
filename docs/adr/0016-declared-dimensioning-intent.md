@@ -21,11 +21,14 @@
 > to check the flag failed sixteen times, so the mark became content renderers never
 > receive. That was #923's work, not scheduling.
 >
-> **Phase 4 (the emitter dimension-mirror) has not shipped and is not blocked on the
-> recompose either.** Its blocker is that emitted features have no names, so a
-> `dimension(...)` line in a generated script would address a feature by position and
-> break the moment a feature line is commented out — the documented editing workflow.
-> `emit_sheet_script` refuses an authored model rather than emit that. Tracked as **#922**.
+> **Phase 4 (the emitter dimension-mirror) SHIPPED in #922** (this paragraph previously said
+> it had not, and stayed stale past the fact — #957 review round 3). Its blocker was that
+> emitted features had no names, so a `dimension(...)` line in a generated script would have
+> addressed a feature by position and broken the moment a feature line was commented out —
+> the documented editing workflow. #931/#932 removed positional addressing from the artefact,
+> so the emitter now binds a name per feature and writes the declarations honestly; it no
+> longer refuses an authored model. **Phase 6 (retire `--style imperative`) landed in #940** —
+> see "One generated output" below for what shipped and where it departed from the plan.
 
 ## Amendment 1 — the compiled-plan boundary (2026-07-29)
 
@@ -899,6 +902,23 @@ ladders, off-axis `locate`, the machined-callout kinds, pocket / slot patterns, 
 comments — the two styles are capability-equivalent and it is **retired** (deprecation
 warning first, removal at 0.4.0 with the other compat exits, #720).
 
+**Landed 2026-07-31 (#940), with one deliberate departure.** "Deprecation warning first"
+assumed the surface could keep working while callers moved off it. It could not: the point of
+the change is that a second emitter stops existing, and an emitter kept alive to emit a
+warning is still a second emitter. So both entry points *fail* rather than warn —
+`generate_script` raises with the replacement in the message, `--style imperative` errors with
+its own text rather than the generic bad-value branch — and the stubs themselves exit at 0.4.0
+with #720 as planned. The gate was met as **coverage** parity per this section, not
+line-for-line: the four regressions asserted only against the imperative script (#555, #881,
+#889, #133) were retargeted and hold as full annotation-set parity.
+
+Retiring it also exposed the cost of the "untested" classification in the mirror-coverage
+roster. Pocket- and slot-pattern scripts had been emitting `pocket(...)` / `slot(...)` member
+templates without importing them, so they raised `NameError` on their first feature line — a
+kind marked untested turned out to be a kind that was broken. Every geometric kind is now in
+the corpus that *executes* what it emits, which is what makes "per kind" a checkable claim
+rather than a maintained list.
+
 Parity is a hard gate — retiring it earlier would regress the parts whose dimensions only
 the imperative reconstruction can express. Two things follow: the low-level `Drawing` verbs
 (`at`, `place_dim`, `items`, `view_bounds`) stop being a *generated* surface and remain a
@@ -1073,7 +1093,10 @@ second with the single-source-of-truth of the first — over the identified set,
 - **`--style imperative` retires once the declarative mirror reaches its coverage**, leaving
   one generated output. The low-level `Drawing` verbs stay a hand-use API but stop being a
   generated surface (ADR 0001 §3), and the generated file deliberately loses its
-  raw-coordinate escape hatch.
+  raw-coordinate escape hatch. **Done** (#940, 2026-07-31; ADR 0001 Amendment 2). The lost
+  escape hatch cost one real capability — the imperative file's raw `build_drawing(...)`
+  call let a reader add any engine kwarg by editing it — so `detail_view` became a `Sheet`
+  argument in the same change rather than disappearing from the generated surface.
 - **The view / section surface is explicitly NOT decided here.** Accepting this ADR commits
   to the dimension layer only.
 - Extends ADR 0011 (declare features) to declare *dimensioning intent*; extends ADR 0012
@@ -1128,7 +1151,11 @@ second with the single-source-of-truth of the first — over the identified set,
    is neither identical nor coincident (a pattern's per-hole locations *and* its pitch).
 6. **Retire `--style imperative`** once the mirror reaches its reconstruction coverage
    (rotational, the ladders, off-axis `locate`, machined callouts, pocket / slot patterns),
-   leaving the declarative script as the single generated output.
+   leaving the declarative script as the single generated output. **Landed** (#940). The
+   gate was met as annotation-set parity per kind, not textual similarity: the coverage
+   regressions asserted only against the imperative script (#555, #881, #889, #133) were
+   retargeted onto the Sheet script and hold as full parity, and every part family in the
+   round-trip corpus emits, runs and lints clean through it.
 
 ## Open questions
 

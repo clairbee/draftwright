@@ -6,13 +6,13 @@ queues and resolves detail requests like the auto pass); the remaining xfails
 capture the still-open gaps — side-drilled location dims and rotational furniture.
 """
 
-import runpy
 from pathlib import Path
 
 import pytest
 from build123d import Align, Axis, Box, Cylinder, Pos, Rot, Rotation, chamfer, export_step, fillet
 
-from draftwright import build_drawing, generate_script
+from draftwright import build_drawing
+from draftwright.sheet_emit import generate_sheet_script
 
 # Characterisation with executable acceptance criteria for the known direct/script gaps
 # (#707 umbrella; #661 details; #426 reconstruction convergence). The strict xfails below
@@ -65,33 +65,38 @@ def crowded_step(tmp_path):
     return path
 
 
-def _run_generated_script(step, tmp_path, name, *, scale=None, page=None, detail_view=None):
-    """Execute an emitted script with the same build settings as its direct peer.
+def _exec_sheet_script(source, path):
+    """Run an emitted Sheet script's *source* and return the Drawing it builds.
 
-    ``generate_script`` does not yet expose ``detail_view``. Because the generated file is
-    explicitly an editable surface, inject that setting into its ``build_drawing`` call when
-    a parity fixture needs it. This keeps the comparison inputs equal without changing the
-    production emitter merely to enable a characterization test.
+    Intercepts `Sheet.export` to capture the Drawing rather than writing a PDF, the same way
+    `test_sheet_emit`'s round-trip parity does. Takes the source rather than the file so a
+    test can edit the script the way a user would before running it.
     """
-    script = Path(
-        generate_script(
-            str(step),
-            out=str(tmp_path / name),
-            scale=scale,
-            page=page,
-        )
-    )
+    from unittest.mock import patch
+
+    from draftwright import Sheet
+
+    captured = {}
+    with patch.object(
+        Sheet, "export", lambda self, stem=None: captured.setdefault("dwg", self.build())
+    ):
+        exec(compile(source, str(path), "exec"), {})
+    return captured["dwg"]
+
+
+def _run_generated_script(step, tmp_path, name, *, scale=None, page=None, detail_view=None):
+    """Execute an emitted script with the same build settings as its direct peer."""
+    py = generate_sheet_script(str(step), out=str(tmp_path / name), scale=scale, page=page)
+    source = Path(py).read_text(encoding="utf-8")
     if detail_view is not None:
-        source = script.read_text(encoding="utf-8")
-        anchor = "    page=PAGE,\n"
-        assert source.count(anchor) == 1, "generated build_drawing call changed"
-        source = source.replace(anchor, anchor + f"    detail_view={detail_view!r},\n")
-        script.write_text(source, encoding="utf-8")
-    return runpy.run_path(str(script))["dwg"]
+        anchor = "sheet = Sheet(part,"
+        assert source.count(anchor) == 1, "generated Sheet(...) call changed"
+        source = source.replace(anchor, f"sheet = Sheet(part, detail_view={detail_view!r},")
+    return _exec_sheet_script(source, py)
 
 
 def _scripted_drawing(part, tmp_path, name, **build_settings):
-    """Round-trip *part* through the actual generated imperative script."""
+    """Round-trip *part* through the actual generated Sheet script."""
     step = tmp_path / f"{name}.step"
     export_step(part, str(step))
     return step, _run_generated_script(step, tmp_path, name, **build_settings)
@@ -220,9 +225,11 @@ def _machined_callouts(dwg):
 def test_generated_script_reproduces_machined_callouts(tmp_path):
     """Machined-feature callout parity (#148): a pocket/fillet/flat/chamfer/groove is a Leader
     callout, not a linear Dimension (its IR params carry no span), so the emitted script could
-    not route it through ``dimension()``. The reconstruction had NO callout verb for these
-    kinds, so ``_feature_listing`` emitted nothing and every machined callout was silently
-    dropped from the script's drawing — contradicting its own "never silently dropped" contract.
+    not route it through ``dimension()``. The imperative emitter had NO callout verb for these
+    kinds, so it emitted nothing and every machined callout was silently dropped from the
+    script's drawing — contradicting its own "never silently dropped" contract. That emitter
+    is gone (#940); the parity claim carries over to the Sheet script, which is what this
+    now runs.
 
     A chamfered block with a floored pocket exercises TWO kinds (four ``C6`` chamfer leaders +
     one pocket) that place identically on both paths (roomy, so no layout-driven drop
@@ -273,11 +280,17 @@ def test_generated_script_reproduces_groove_callout(tmp_path):
 
 @pytest.mark.timeout(240)
 def test_generated_script_machined_callout_is_per_feature(tmp_path):
-    """Editable-script contract (Codex #811): commenting ONE machined callout line drops
-    exactly that feature, not the whole kind. Two separated pockets on a roomy block emit two
-    ``dwg.callout(f)`` lines; removing the first must leave exactly the second pocket's callout.
-    The pre-#811 whole-kind renderer redrew BOTH pockets from the single surviving intent, so
-    this fails on that approach — the ``only=`` per-feature subset is what makes it pass.
+    """Editable-script contract (Codex #811): dropping ONE feature from the script drops
+    exactly that feature's callout, not the whole kind. The pre-#811 whole-kind renderer
+    redrew BOTH pockets from the single surviving intent, so this fails on that approach.
+
+    Migrated from the imperative script to the Sheet script (#940). The edit is different
+    because the surfaces are: the imperative script had one ``dwg.callout(f)`` line per
+    feature, while the Sheet script binds a NAME per feature (``pocket1 = sheet.pocket(…)``)
+    and dimensions it by that name. So dropping a feature means dropping its declaration and
+    the lines referring to it — and the script's own header promises that forgetting the
+    latter fails loudly rather than silently retargeting onto the neighbour. Both halves of
+    that promise are checked here.
     """
     part = Box(160, 90, 30) - Pos(-40, 0, 12) * Box(24, 20, 8) - Pos(40, 0, 12) * Box(24, 20, 8)
     step = tmp_path / "two_pockets.step"
@@ -286,24 +299,34 @@ def test_generated_script_machined_callout_is_per_feature(tmp_path):
     direct = build_drawing(str(step))
     assert len(_machined_callouts(direct)) == 2  # guard: both pockets drawn on the direct path
 
-    script = Path(generate_script(str(step), out=str(tmp_path / "two_pockets")))
-    baseline = runpy.run_path(str(script))["dwg"]
-    assert len(_machined_callouts(baseline)) == 2  # the unedited script reproduces both
+    script = Path(generate_sheet_script(str(step), out=str(tmp_path / "two_pockets")))
+    source = script.read_text(encoding="utf-8")
+    assert len(_machined_callouts(_exec_sheet_script(source, script))) == 2  # unedited: both
 
-    # Comment out the FIRST pocket callout line only, then re-run the edited script.
-    lines = script.read_text(encoding="utf-8").splitlines()
-    for idx, ln in enumerate(lines):
-        if ln.strip() == "dwg.callout(f)":
-            indent = ln[: len(ln) - len(ln.lstrip())]
-            lines[idx] = f"{indent}# {ln.strip()}"
-            break
-    else:
-        raise AssertionError("generated script has no dwg.callout(f) line to comment out")
-    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    edited = runpy.run_path(str(script))["dwg"]
+    def _comment(text, predicate):
+        out, hits = [], 0
+        for ln in text.splitlines():
+            if predicate(ln):
+                out.append(f"# {ln}")
+                hits += 1
+            else:
+                out.append(ln)
+        return "\n".join(out) + "\n", hits
 
-    # Exactly one pocket survives — per-feature only=, not a whole-kind redraw.
-    assert len(_machined_callouts(edited)) == 1
+    # Drop the first pocket's DECLARATION only, leaving its dimension lines behind. The
+    # generated header says a line naming a commented-out feature fails loudly; hold it to
+    # that, since a silent retarget onto pocket2 is exactly the #811 failure in another guise.
+    orphaned, hits = _comment(source, lambda ln: ln.startswith("pocket1 = "))
+    assert hits == 1, "generated script has no pocket1 declaration"
+    with pytest.raises(NameError, match="pocket1"):
+        _exec_sheet_script(orphaned, script)
+
+    # Now the whole edit: the declaration and every line naming it.
+    edited, hits = _comment(source, lambda ln: ln.startswith("pocket1 = ") or "pocket1," in ln)
+    assert hits >= 2, "expected the declaration plus its dimension lines"
+
+    # Exactly one pocket survives — per-feature, not a whole-kind redraw.
+    assert len(_machined_callouts(_exec_sheet_script(edited, script))) == 1
 
 
 @pytest.mark.timeout(240)

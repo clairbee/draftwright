@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 from build123d import Box, Cylinder, Pos, Shape, export_step
+from build123d import chamfer as bd_chamfer
+from build123d import fillet as bd_fillet
 
 from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.declare import hole as _declare_hole
@@ -949,36 +951,6 @@ class TestCli:
         src = open(tmp_path / "g.py", encoding="utf-8").read()
         assert "from draftwright import Sheet" in src and "sheet.hole(" in src
 
-    def test_imperative_style_still_available(self, tmp_path):
-        # the imperative reconstruction is still reachable via an explicit --style imperative
-        from typer.testing import CliRunner
-
-        from draftwright.cli import app
-
-        step = tmp_path / "plate.step"
-        export_step(_plate(), str(step))
-        r = CliRunner().invoke(
-            app, [str(step), "--script", "--style", "imperative", "--out", str(tmp_path / "g")]
-        )
-        assert r.exit_code == 0, r.output
-        assert (
-            "from draftwright import Sheet" not in open(tmp_path / "g.py", encoding="utf-8").read()
-        )
-
-    def test_imperative_with_object_spec_is_rejected(self, tmp_path, monkeypatch):
-        # imperative reads a STEP file, not a module:attr object → a clear error, not import_step noise
-        from typer.testing import CliRunner
-
-        from draftwright.cli import app
-
-        (tmp_path / "climod.py").write_text(_SOURCE_MODULE, encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
-        r = CliRunner().invoke(app, ["climod:bracket", "--script", "--style", "imperative"])
-        assert r.exit_code != 0
-        # rich wraps the error panel at the (CI-narrow) console width, so the phrase can straddle
-        # a bordered line — normalise ANSI + box borders + whitespace before the substring check
-        assert "--style sheet" in _norm(r.output)
-
     def test_sheet_style_embeds_title_block_and_layout_flags(self, tmp_path):
         # #474: the Sheet DSL now carries --drawn-by/--tolerance/--scale/--page, so the sheet path
         # forwards them into the generated Sheet(...) constructor (no more inert-flag warning).
@@ -1064,32 +1036,6 @@ class TestCli:
         assert f"sheet.export({str(tmp_path / 'g')!r})" in src
         assert "formats=" not in src
 
-    def test_format_is_forwarded_into_the_imperative_script(self, tmp_path):
-        # #709: the imperative flavour honours --format too, via the modern dict export.
-        from typer.testing import CliRunner
-
-        from draftwright.cli import app
-
-        step = tmp_path / "plate.step"
-        export_step(_plate(), str(step))
-        r = CliRunner().invoke(
-            app,
-            [
-                str(step),
-                "--script",
-                "--style",
-                "imperative",
-                "-f",
-                "svg,dxf",
-                "--out",
-                str(tmp_path / "g"),
-            ],
-        )
-        assert r.exit_code == 0, r.output
-        src = (tmp_path / "g.py").read_text(encoding="utf-8")
-        assert "_formats = ('svg', 'dxf')" in src
-        assert "paths = dwg.export(_stem, formats=_formats)" in src
-
     def test_bad_style_is_rejected(self, tmp_path):
         from typer.testing import CliRunner
 
@@ -1099,6 +1045,35 @@ class TestCli:
         export_step(_plate(), str(step))
         r = CliRunner().invoke(app, [str(step), "--script", "--style", "bogus"])
         assert r.exit_code != 0
+
+    def test_the_retired_imperative_style_says_so(self, tmp_path):
+        """#940: `--style imperative` was a working flag last release, so it gets its own
+        message rather than falling into the generic bad-value branch. The flag survives with
+        one value; a script passing `--style sheet` keeps working, which is why it wasn't
+        deleted outright."""
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        step = tmp_path / "plate.step"
+        export_step(_plate(), str(step))
+        r = CliRunner().invoke(app, [str(step), "--script", "--style", "imperative"])
+        assert r.exit_code != 0
+        out = _norm(r.output)
+        assert "retired" in out and "--style sheet" in out
+        # ...and it is a distinct message, not the generic one a typo gets.
+        generic = CliRunner().invoke(app, [str(step), "--script", "--style", "bogus"])
+        assert _norm(generic.output) != out
+
+    def test_the_retired_imperative_emitter_explains_itself(self):
+        """The Python-level counterpart: `generate_script` is in `draftwright.__all__`, so a
+        caller who upgrades hits a stub with the replacement in it rather than an
+        AttributeError on a name that was public last release (#940; the stub exits at 0.4.0
+        with #720)."""
+        import draftwright
+
+        with pytest.raises(NotImplementedError, match="generate_sheet_script"):
+            draftwright.generate_script("part.step")
 
     def test_module_spec_routes_to_the_live_object(self, tmp_path, monkeypatch):
         # `draftwright climod:bracket --script --style sheet` → detect off the imported object
@@ -1131,6 +1106,30 @@ class TestCli:
         py = tmp_path / "g.py"
         exec(compile(open(py, encoding="utf-8").read(), str(py), "exec"), {})
         assert (tmp_path / "g.pdf").exists()  # #702: Sheet.export defaults to PDF
+
+
+def _chamfered_corner(op, size):
+    """A plate with ONE vertical corner edge chamfered or filleted — `op` is build123d's
+    `chamfer` or `fillet`. Same edge selection the per-kind emit tests use, so the corpus
+    and those tests describe the same geometry."""
+    from build123d import Axis, Box
+
+    part = Box(80, 50, 8)
+    e = part.edges().filter_by(Axis.Z).sort_by(lambda x: x.center().X + x.center().Y)[-1]
+    return op(e, size)
+
+
+def _linear_recess_row(cutter, *, z, n=4, pitch=30.0, width=30.0):
+    """A block with *n* identical recesses in a row — a pocket array when the cutter is
+    blind, a slot array when it breaks through. Shaped after the recognisers' own fixtures
+    (`test_pocket_pattern_recognition` / `test_slot_pattern_recognition`), because a
+    pattern fixture that detects as N separate features tests nothing it claims to."""
+    from build123d import Box, Pos
+
+    part = Box(width, pitch * (n + 2), 20)
+    for i in range(n):
+        part -= Pos(0, (i - (n - 1) / 2) * pitch, z) * cutter
+    return part
 
 
 def _annotation_signature(dwg):
@@ -1269,6 +1268,17 @@ class TestRoundTripParity:
             codes = dwg.lint_summary()["by_code"]
             assert codes.get("axial_length_missing") == 1, (gap, codes)
             assert codes.get("step_dim_dropped") == 1, (gap, codes)
+
+    def test_pocket_pattern_parity(self, tmp_path, monkeypatch):
+        """#957 review: the emitted script named `pocket` without importing it, so a
+        four-pocket array produced a file that raised NameError on its first feature line —
+        a capability the imperative emitter had and #940 would have deleted without
+        replacing. Full parity, executed, not a source-text check."""
+        self._parity(_linear_recess_row(Box(10, 12, 6), z=7), tmp_path, monkeypatch)
+
+    def test_slot_pattern_parity(self, tmp_path, monkeypatch):
+        """The same defect on the slot verb (#957 review)."""
+        self._parity(_linear_recess_row(Box(30, 8, 20), z=0, width=60), tmp_path, monkeypatch)
 
     def test_title_block_and_layout_aspects_round_trip(self, tmp_path, monkeypatch):
         # #474: a generated sheet script carrying drawn_by/tolerance/scale/page must reproduce the
@@ -1601,6 +1611,50 @@ class TestAuthoredSetRoundTrips:
             "the regenerated script draws a different set from the model it came from"
         )
 
+    def test_a_measured_dimension_round_trips_through_the_emitted_script(self):
+        """The `authored_dimension` kind, executed (#957 review round 2).
+
+        It is the one IR kind the detection corpus cannot reach — nothing detects an
+        imported AP242 measurement or a hand-written `measured_dimension`, so it has to
+        round-trip through the DECLARED route instead. It also has no referential form:
+        it carries its own value, label, tolerances and reference points, so what must
+        survive emit-and-re-run is that materialised content, not a role name.
+        """
+        from draftwright import Sheet, build_drawing
+
+        def authored(part):
+            sheet = Sheet(part, title="T", number="N").auto_dimensions()
+            sheet.measured_dimension(
+                kind="linear",
+                value=40,
+                label="40",
+                dominant_axis="X",
+                ref_bbox=(-20, -10, -5, 20, 10, 5),
+                ref_pts=[(-20, 0, 0), (20, 0, 0)],
+                upper_tol=0.1,
+                lower_tol=0.0,
+            )
+            return sheet.model()
+
+        part = Box(40, 20, 10)
+        model = authored(part)
+        direct = build_drawing(part, model=model, number="N")
+        src = emit_sheet_script(model, "part", "authored", title="T", number="N")
+        assert "sheet.measured_dimension(" in src
+        regenerated = self._run(src, part)["sheet"].build()
+
+        assert {n for n, _ in regenerated.iter_annotations()} == {
+            n for n, _ in direct.iter_annotations()
+        }
+        # The materialised content, not just the annotation name: a re-run that dropped the
+        # tolerance would still match on names alone.
+        feat = next(
+            f
+            for f in self._run(src, part)["sheet"].model().features
+            if f.kind == "authored_dimension"
+        )
+        assert (feat.value, feat.label, feat.upper_tol, feat.lower_tol) == (40, "40", 0.1, 0.0)
+
     def test_the_authored_set_is_not_silently_widened_to_the_planner_set(self):
         """The specific regression the old refusal existed to prevent: emitting
         `auto_dimensions()` for an authored model restores every omitted dimension."""
@@ -1756,6 +1810,24 @@ class TestTheDimensionMirror:
             # purpose — a disconnected profile is a separate, unrelated defect (#943).
             "turned shaft": Cylinder(15, 20) + Pos(0, 0, 17.5) * Cylinder(10, 15),
             "bored flange": Cylinder(40, 8) - Cylinder(8, 20),
+            # The two PATTERN kinds whose members are nested constructor calls
+            # (`pocket_pattern(pocket(...), …)`). They were classified "untested" under
+            # #948 and were in fact BROKEN — the emitted script named `pocket`/`slot`
+            # without importing them, so it raised NameError on its first feature line
+            # (#957 review). This corpus executes what it emits, so carrying them here is
+            # what makes that class of defect impossible to reintroduce quietly.
+            "pocket pattern": _linear_recess_row(Box(10, 12, 6), z=7),
+            "slot pattern": _linear_recess_row(Box(30, 8, 20), z=0, width=60),
+            # The machined kinds (#957 review round 2). Each already had a fixture proving
+            # it EMITS its verb; none had one proving the emitted script RUNS and draws the
+            # same drawing. That is the gap round 1 turned into a NameError, so the answer
+            # is the same: the fixtures move to the corpus that executes, and the coverage
+            # roster stops saying "untested".
+            "chamfer": _chamfered_corner(bd_chamfer, 4),
+            "fillet": _chamfered_corner(bd_fillet, 3),
+            "flat": Cylinder(10, 30) - Pos(10, 0, 0) * Box(10, 40, 40),  # D-shaft
+            "groove": Cylinder(10, 40) - (Cylinder(10, 4) - Cylinder(8, 4)),  # circlip groove
+            "plate": Box(80, 50, 8) + Pos(-36, 0, 29) * Box(8, 50, 50),  # base + upright
         }
 
     @staticmethod
@@ -1781,6 +1853,13 @@ class TestTheDimensionMirror:
         "boss": {"boss"},
         "turned shaft": {"rotational", "step"},
         "bored flange": {"rotational"},
+        "pocket pattern": {"pocket_pattern"},
+        "slot pattern": {"slot_pattern"},
+        "chamfer": {"chamfer"},
+        "fillet": {"fillet"},
+        "flat": {"flat"},
+        "groove": {"groove"},
+        "plate": {"plate"},
     }
 
     @pytest.mark.parametrize("name", sorted(_corpus()))
@@ -1989,14 +2068,14 @@ _KIND_MIRROR_COVERAGE = {
     "envelope": "corpus",
     "rotational": "corpus",
     "pmi": "unnameable — raw AP242, emitted as sheet.add(PmiFeature(...)) (ADR 0016)",
-    "chamfer": "untested — no corpus fixture detects one (#948)",
-    "fillet": "untested — no corpus fixture detects one (#948)",
-    "flat": "untested — no corpus fixture detects one (#948)",
-    "groove": "untested — no corpus fixture detects one (#948)",
-    "plate": "untested — no corpus fixture detects one (#948)",
-    "pocket_pattern": "untested — no corpus fixture detects one (#948)",
-    "slot_pattern": "untested — no corpus fixture detects one (#948)",
-    "authored_dimension": "untested — the measured_dimension path (#948)",
+    "chamfer": "corpus",
+    "fillet": "corpus",
+    "flat": "corpus",
+    "groove": "corpus",
+    "plate": "corpus",
+    "pocket_pattern": "corpus",
+    "slot_pattern": "corpus",
+    "authored_dimension": "corpus (declared route — nothing detects one)",
     "control_frame": "aspect — carries no DimParameter, so nothing to mirror",
     "datum_ref": "aspect — carries no DimParameter, so nothing to mirror",
     "finish": "aspect — carries no DimParameter, so nothing to mirror",
@@ -2052,12 +2131,38 @@ class TestTheMirrorCoversTheCompiledSet:
     """
 
     @pytest.mark.parametrize("name", sorted(TestTheDimensionMirror._corpus()))
-    def test_every_approved_dimension_has_a_line(self, name):
-        model = detect_part_model(TestTheDimensionMirror._corpus()[name])
+    def test_no_corpus_fixture_falls_back_to_auto_dimensions(self, name):
+        """The corpus is the load-bearing proof of the #940 per-kind gate, so it must not be
+        able to go green while a kind stops being mirrored.
+
+        `auto_dimensions()` is the emitter's fallback for a model it cannot express as
+        declarations. A drawing built from it reproduces the automatic one BY CONSTRUCTION,
+        so the parity test below passes either way, and the completeness guard used to SKIP
+        exactly when the fallback kicked in — the two tests covering for each other rather
+        than catching it (#957 review round 3, found by mutating `_mirrored_requests` to
+        drop chamfer groups: parity stayed green, the guard skipped).
+
+        Every fixture here mirrors today. If one legitimately cannot, it does not get to
+        fail quietly: give it its own named exemption with the reason, the way
+        `_KIND_MIRROR_COVERAGE` does for unnameable kinds."""
         from draftwright.sheet_emit import _is_mirrorable
 
-        if not _is_mirrorable(model):
-            pytest.skip(f"{name} falls back to auto_dimensions() — #945")
+        part = TestTheDimensionMirror._corpus()[name]
+        model = detect_part_model(part)
+        assert _is_mirrorable(model), f"{name}: the emitter cannot mirror this model"
+        src = emit_sheet_script(model, "part", "s", title="T", number="N")
+        assert "sheet.auto_dimensions()" not in src, (
+            f"{name}: the emitted script fell back to auto_dimensions(), so it declares no "
+            "editable dimension set — the corpus would still pass parity, which is the hole"
+        )
+        assert "sheet.dimension(" in src, f"{name}: no dimension declarations emitted"
+
+    @pytest.mark.parametrize("name", sorted(TestTheDimensionMirror._corpus()))
+    def test_every_approved_dimension_has_a_line(self, name):
+        model = detect_part_model(TestTheDimensionMirror._corpus()[name])
+        # No mirrorability skip: `test_no_corpus_fixture_falls_back_to_auto_dimensions`
+        # makes a non-mirrorable corpus fixture a failure, so reaching here unmirrorable
+        # would be that test's job to report, not this one's to tolerate (#957 r3).
         missing = unmirrored_dimensions(model)
         assert not missing, (
             f"{name}: the compiler approved {missing} and the script declares no line for "

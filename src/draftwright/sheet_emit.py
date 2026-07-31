@@ -872,9 +872,18 @@ def emit_sheet_script(
     # otherwise be unnameable under the mirrored (authored) set. BEFORE the import scan, since
     # a synthesised envelope needs `EnvelopeFeature` imported like a detected one.
     model, _synth_env = mirror_model(model)
+    # Every constructor a member template can name has to be listed here. The pattern verbs
+    # take their member as a nested `hole(...)` / `pocket(...)` / `slot(...)` call — declare
+    # rejects `members=` and recomputes the layout — so the member constructor is a name the
+    # generated file uses, and a missing entry is a NameError on the first line that runs
+    # (#957 review; pocket/slot patterns were emitting unrunnable scripts).
     model_imports = set()
     if any(f.kind in ("hole", "pattern") for f in model.features):
         model_imports.add("hole")
+    if any(f.kind == "pocket_pattern" for f in model.features):
+        model_imports.add("pocket")
+    if any(f.kind == "slot_pattern" for f in model.features):
+        model_imports.add("slot")
     if any(f.kind == "envelope" for f in model.features):
         model_imports.update(["EnvelopeFeature", "Frame"])
     if any(f.kind == "pmi" for f in model.features):
@@ -1087,8 +1096,8 @@ def generate_sheet_script(
     formats: Sequence[str] = ("pdf",),
 ) -> str:
     """Write a declarative ``Sheet``-DSL script for *step_file* (a STEP path or a build123d
-    object). Returns the path to the generated ``.py``. The mode-3 declarative counterpart of
-    :func:`draftwright.builder.generate_script` (which emits the imperative reconstruction).
+    object). Returns the path to the generated ``.py``. **The** script emitter, since #940
+    retired the imperative one it used to sit alongside.
 
     ``tolerance``/``drawn_by``/``scale``/``page`` are the title-block / layout aspects (#474):
     when non-default they are emitted into the generated ``Sheet(...)`` so a re-run reproduces
