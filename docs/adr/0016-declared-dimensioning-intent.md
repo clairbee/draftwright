@@ -1157,6 +1157,53 @@ second with the single-source-of-truth of the first — over the identified set,
    retargeted onto the Sheet script and hold as full parity, and every part family in the
    round-trip corpus emits, runs and lints clean through it.
 
+## Amendment 3 — the parameter id is the canonical spelling; the bare role was a second granularity (2026-07-31)
+
+`dimension(feature, role)` accepted two spellings, and they were never synonyms. The bare role
+(`"bore"`) selects **every** parameter carrying it; the parameter id (`"bore.diameter"`) selects
+one. On a role with a single parameter the difference is invisible, which is why it went
+unremarked for the whole epic. On `step` it is not:
+
+```
+dimension(step, "step")           ->  ø30  AND  20
+dimension(step, "step.length")    ->  20
+```
+
+That is a direct contradiction of this ADR's own rule. An authored set means *omission is
+suppression*; a spelling that quietly declares a measurement the author did not name is the
+mirror image of it, and nothing reported that it had happened.
+
+**Decision.** The parameter id is canonical.
+
+- A bare role naming more than one measurement is **refused**, naming them. The existing
+  ambiguity check compared `discriminator`, so it never fired here.
+- A bare role naming exactly one is deprecated (warns, expires 0.4.0 with #720) and
+  **normalised** to the id before it is stored — so an emitted script no longer changes dialect
+  with how its source model was authored.
+- `DimensionParameterId` (`model/ir.py`) types the authoring verbs as a `Literal` of the canonical
+  spellings — named for what it holds, ids rather than roles, as is the handles'
+  `dimension_ids()` discovery method — which is how this codebase already spells a closed
+  string vocabulary (`ParamKind`,
+  `Axis`, `pmi=`, `severity=`). Bare roles are deliberately absent: listing them would recommend
+  the thing being retired. `Role` above it stays `str` — the IR must remain open to new
+  detectors; only what a *caller* may name is closed.
+- **Discriminated parameters are named in full, like every other.** `grid_pitch.length.row`
+  and `.col` resolve on their own; the id already carries the variant, so nothing extra is
+  needed to reach one. An earlier cut of this amendment made `grid_pitch` an exception — the
+  bare role plus `axis=` — and that exception was the defect: `dimension_ids()`, which the generated
+  script tells readers to call, listed a spelling `dimension()` then refused as ambiguous
+  (#965 review). Removing the exception is what makes "the parameter id is canonical" true
+  without a footnote. The bare role with `axis=` still resolves, for scripts already written
+  that way, and an `axis=` contradicting the id is refused rather than silently preferred.
+  The family refusal compares undiscriminated ids, so it does not fire on variants of one
+  measurement.
+
+**Not closed by this.** Normalisation happens at the `Sheet` facade. A hand-built
+`RequestedDimension` through `build_drawing(model=…)` still carries whatever spelling it was
+given, so the raw-IR route can still put a bare role into an emitted script. The planner accepts
+both, so this is a spelling preference rather than a validity rule — which is why it sits at the
+facade and not on the IR type. Worth revisiting if the raw route grows users.
+
 ## Open questions
 
 - *(The naming decision itself is settled — see "One name, one contract": `dimension` is

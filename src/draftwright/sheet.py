@@ -46,11 +46,12 @@ import math
 import warnings
 from collections.abc import MutableSequence
 from dataclasses import replace
+from typing import TYPE_CHECKING, overload
 
 from draftwright.analysis import _solids_body
 from draftwright.builder import _coerce_model, build_drawing, detect_part_model
 from draftwright.fits import fit_class
-from draftwright.model import Feature
+from draftwright.model import DimensionParameterId, Feature
 from draftwright.model import boss as _boss
 from draftwright.model import chamfer as _chamfer
 from draftwright.model import control_frame as _declare_control
@@ -228,7 +229,51 @@ class _FeatureView(MutableSequence):
         return [e[1] for e in self._entries] == list(other)
 
 
-class _Hole:
+class _Nameable:
+    """`dimension_ids()` for a declared-feature handle — the measurements it can be asked for.
+
+    Named for what it returns. An earlier cut called this `roles()` and the alias below
+    `DimensionRole`, which described neither: both carry parameter IDS, and the bare role is
+    the deprecated family spelling they deliberately exclude (#965 review). Both names were
+    new, so renaming cost nothing here and would have been a compat burden a release later.
+    The `role` PARAMETER keeps its name — it predates this change, so moving it would break
+    keyword callers; it exits with the other 0.4.0 renames (#720, #966).
+
+    The runtime answer to "what can I write here", and the reason the generated script can
+    point at something that works (#963/#965 review). A handle is not an IR `Feature`, so
+    `feature.parameters()` — the route the header first advertised — raises on one; the
+    working alternative went through a private index. Returns the CANONICAL spellings, so
+    what it lists is what `dimension()` wants: the parameter id for every measurement —
+    discriminated ones included, since their id carries the variant and resolves on its own —
+    plus `location` when this feature is eligible for one (which the planner decides, so it
+    cannot be read off the type).
+
+    Every entry must resolve. That is the whole contract, and it was broken once: this
+    listed a bare `"grid_pitch"` for a grid pattern, which `dimension()` then refused as
+    ambiguous, while the guard test passed because it reconstructed the expected answer
+    instead of calling this method (#965 review).
+    """
+
+    # Declared, not defined: every handle already implements these — `_i` as a token-resolved
+    # property — so a body here would be unreachable code the mixin does not need. Under
+    # TYPE_CHECKING because a bare `_i: int` is a WRITEABLE attribute, which a read-only
+    # property may not override.
+    _sheet: Sheet
+
+    if TYPE_CHECKING:
+
+        @property
+        def _i(self) -> int: ...
+
+    def dimension_ids(self) -> tuple[str, ...]:
+        feature = self._sheet.features[self._i]
+        names = {p.parameter_id for p in feature.parameters()}
+        if _location_role(feature) is not None:
+            names.add(_LOCATION_ROLE)
+        return tuple(sorted(names))
+
+
+class _Hole(_Nameable):
     """A fluent handle for one declared hole — through vs blind (which changes the callout),
     and the P2a ± tolerance on its bore ⌀."""
 
@@ -336,7 +381,7 @@ class _Hole:
         return self
 
 
-class _Dim:
+class _Dim(_Nameable):
     """A fluent handle for a declared dimension-bearing feature (a diameter / boss OD, or a
     turned step), carrying the P2a ``.tolerance`` aspect. ``default_kind`` is the parameter a
     bare ``.tolerance(...)`` targets — ``"diameter"`` for an OD, ``"length"`` for a step."""
@@ -432,7 +477,7 @@ class DimensionIntent:
         return getattr(self._sheet, name)
 
 
-class _Params:
+class _Params(_Nameable):
     """A fluent handle for a declared MULTI-parameter feature — a pocket
     (width/length/depth), slot (width/length) or envelope (width/height/depth) — whose
     parameters share a KIND but have distinct ROLES. ``.tolerance(..., on=role)``
@@ -765,8 +810,45 @@ class Sheet:
     #: intersection of what only a measured call can supply.
     _MEASURED_KEYWORDS = frozenset({"kind", "value", "label", "dominant_axis", "ref_pts"})
 
+    @overload
+    def dimension(
+        self, feature, role: DimensionParameterId, *, axis: str | None = ...
+    ) -> DimensionIntent: ...
+
+    @overload
+    def dimension(
+        self,
+        *,
+        kind: str,
+        value: float,
+        label: str,
+        dominant_axis: str,
+        ref_pts,
+        ref_bbox=...,
+        at=...,
+        axis: str | None = ...,
+        upper_tol: float | None = ...,
+        lower_tol: float | None = ...,
+        source: str = ...,
+        source_kind: str | None = ...,
+    ) -> _Params: ...
+
     def dimension(self, *args, **kw):
         """Transitional overload for the pre-#873 spelling of :meth:`measured_dimension`.
+
+        The two ``@overload`` stubs above are what an editor and mypy see. Without them the
+        runtime signature is ``(*args, **kw)`` — so the referential form, which is the whole
+        ADR 0016 authoring surface, offered no completion and no checking on the very verb
+        scripts are written in (#963). They also make the transitional dual shape legible:
+        one call form takes a feature and a role, the other restates a measurement.
+
+        They are **call-shape** overloads, not per-feature ones, and the difference matters
+        to anyone reading the completion list: ``feature`` is untyped and every feature gets
+        the same flat vocabulary, so an editor will offer ``pocket_width.length`` on a hole.
+        Narrowing that needs handle types that can express a per-feature vocabulary, which
+        `pocket()`, `slot()`, `pad()` and `envelope()` cannot today — they all return
+        `_Params`. The runtime resolver remains the authority; this is guidance, not a
+        complete static model of what a given feature carries (#965 review).
 
         A **transitional overload, not a deprecation wrapper**, because the name is *reused*
         rather than retired: ADR 0016 gives ``dimension`` the referential meaning — name a
@@ -789,7 +871,7 @@ class Sheet:
             return self.measured_dimension(*args, **kw)
         return self._authored_dimension(*args, **kw)
 
-    def _authored_dimension(self, feature, role: str, *, axis: str | None = None):
+    def _authored_dimension(self, feature, role: DimensionParameterId, *, axis: str | None = None):
         """`dimension(feature, role)` — declare one member of the COMPLETE authored set.
 
         Referential, like every ADR 0016 intent: it names a feature and a role and carries no
@@ -803,7 +885,12 @@ class Sheet:
         declared complete. A script that mixed the two would be saying "everything the planner
         chooses, plus these" and "only these" at once.
         """
-        token, target, discriminator = self._resolve_measurement(feature, role, axis, "dimension")
+        token, target, discriminator, role = self._resolve_measurement(
+            feature, role, axis, "dimension"
+        )
+        # The CANONICAL spelling is stored, not what was typed (#963). Otherwise a generated
+        # script's dialect depended on how its source model was authored — mirrored sets wrote
+        # parameter ids, hand-authored sets echoed back whatever the author used.
         self._authored.append({"token": token, "role": role, "discriminator": discriminator})
         return DimensionIntent(self, self._authored[-1])
 
@@ -1331,12 +1418,12 @@ class Sheet:
         self._authored_source = True
         return self
 
-    def add_dimension(self, feature, role: str, *, axis: str | None = None):
+    def add_dimension(self, feature, role: DimensionParameterId, *, axis: str | None = None):
         """Augment the planner's set with one more measurement (ADR 0016 / #872).
 
         *feature* is a declared-feature handle (what :meth:`hole`, :meth:`boss`, … return),
         an index into :attr:`features`, or the IR feature itself. *role* names the
-        measurement — ``"bore"``, ``"grid_pitch"``, … — and carries **no number**: the
+        measurement — ``"bore.diameter"``, ``"grid_pitch"``, … — and carries **no number**: the
         value is read from the geometry, so the size still lives in exactly one place.
 
         Returns a :class:`DimensionIntent`.
@@ -1349,7 +1436,7 @@ class Sheet:
         a silent coin toss between the row and column pitch is the kind of wrong a reader
         cannot see.
         """
-        token, _target, discriminator = self._resolve_measurement(
+        token, _target, discriminator, role = self._resolve_measurement(
             feature, role, axis, "add_dimension"
         )
         entry = {"token": token, "role": role, "discriminator": discriminator}
@@ -1407,7 +1494,9 @@ class Sheet:
                 "the source explicit so that omitting a dimension can mean something.)"
             )
 
-    def _resolve_measurement(self, feature, role: str, axis: str | None, verb: str):
+    def _resolve_measurement(
+        self, feature, role: DimensionParameterId, axis: str | None, verb: str
+    ):
         """Resolve ``(feature, role, axis)`` to ``(token, feature, discriminator)``, or raise.
 
         Shared by :meth:`add_dimension` and :meth:`dimension` — the two verbs ADDRESS a
@@ -1429,6 +1518,56 @@ class Sheet:
                 f"(it carries {sorted(roles)})"
             )
         matching = [p for p in params if role in (p.role, p.parameter_id)]
+        # ── canonical spelling: the parameter id (#963) ──────────────────────────────
+        # A role spelling ("bore") and a parameter id ("bore.diameter") both resolve, and
+        # they are not synonyms: the role selects EVERY parameter carrying it, the id selects
+        # one. On a role with a single parameter that difference is invisible, which is why it
+        # went unnoticed; on `step` it is not — `dimension(step, "step")` quietly declared both
+        # `step.length` and `step.diameter`. In an authored set, whose whole semantics is that
+        # omission means suppression, silently declaring an extra measurement is the mirror
+        # image of the rule. So the id is canonical, and a role that names more than one is now
+        # refused rather than resolved to a set the author did not ask for.
+        # Compare UNDISCRIMINATED ids. `grid_pitch.length.row` and `.col` are two variants of
+        # one measurement, told apart by `axis=` a few lines below — counting them as two
+        # would fire this refusal in place of that older, more useful error.
+        bases = sorted({f"{p.role}.{p.kind}" for p in matching})
+        bare = role not in {p.parameter_id for p in matching} and bool(matching)
+        if bare and len(bases) > 1:
+            raise ValueError(
+                f"{verb}({role!r}) names {len(bases)} measurements on this feature "
+                f"({', '.join(bases)}) — the role is the family, not one of them. Name the "
+                f"one you mean, or declare each."
+            )
+        # A DISCRIMINATED parameter is named by its full id like any other (#965 review). It
+        # was the one exception — the bare role plus `axis=` — which meant `dimension_ids()` listed a
+        # spelling that then raised "ambiguous", breaking the contract the generated header
+        # points people at. The id already carries the variant, so it is self-sufficient; the
+        # bare role keeps working with `axis=` because that is what older scripts wrote.
+        exact = next((p for p in matching if p.parameter_id == role), None)
+        if exact is not None and exact.discriminator:
+            if axis is not None and axis != exact.discriminator:
+                raise ValueError(
+                    f"{verb}({role!r}, axis={axis!r}): that id already names the "
+                    f"{exact.discriminator!r} variant"
+                )
+            return token, target, exact.discriminator, role
+        discriminated = any(p.discriminator for p in matching)
+        if bare and not discriminated:
+            warnings.warn(
+                f"{verb}({role!r}): name the measurement by its id, {bases[0]!r}. The bare "
+                "role is the family spelling and is deprecated (#963) — it is what let "
+                "`dimension(step, 'step')` declare two dimensions silently. Expires at 0.4.0.",
+                DeprecationWarning,
+                # `add_dimension` calls here directly; `dimension` goes through the
+                # transitional dispatcher AND `_authored_dimension`, so it is two frames
+                # further out. A shared constant pointed the warning at draftwright's own
+                # source instead of the caller's line (#965 review).
+                stacklevel=4 if verb == "dimension" else 3,
+            )
+        # A discriminated parameter keeps the BARE role: its full id carries the variant
+        # (`grid_pitch.length.row`), which `axis=` supplies separately, so normalising to the
+        # id here would hand the planner a spelling that matches no parameter.
+        canonical = bases[0] if (bare and not discriminated) else role
         discs = {p.discriminator for p in matching}
         if len(discs) > 1 and axis is None:
             raise ValueError(
@@ -1441,7 +1580,7 @@ class Sheet:
                 f"{verb}({role!r}, axis={axis!r}): this feature has no such "
                 f"variant ({sorted(d for d in discs if d)})"
             )
-        return token, target, axis
+        return token, target, axis, canonical
 
     def _replace_feature(self, index: int, feature) -> None:
         """Swap the frozen feature at *index* for an updated copy.
