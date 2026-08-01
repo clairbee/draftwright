@@ -1746,7 +1746,7 @@ class TestAuthoredSetRoundTrips:
         """
         from draftwright import build_drawing
 
-        # The same model `test_the_declared_route_reaches_the_kind_that_claims_it` checks the
+        # The same model `test_declared_kinds_are_reachable_and_emitted` checks the
         # roster against, so the route the roster names and the route proven to round-trip
         # cannot drift apart (#948).
         part, model = _declared_measurement_model()
@@ -2171,18 +2171,11 @@ def test_the_plan_surface_is_ratcheted():
     )
 
 
-#: Each route, mapped to what claiming it OBLIGES — as code, given the measured facts.
-#: Returns the kinds on that route which fail the obligation, plus how to say so.
+#: The route vocabulary. A value in `_KIND_MIRROR_COVERAGE` is one of these, optionally
+#: followed by ``" — <reason>"``.
 #:
-#: The vocabulary is DERIVED from this table (`_MIRROR_ROUTES` below), so a route cannot be
-#: spelled unless it requires something. That is the lesson `_ROUTE_OBLIGATIONS` paid seven
-#: review rounds for on #967, and not applying it here was this roster stopping one step
-#: short: `aspect` and `unnameable` passed the vocabulary check while obliging nothing, so any
-#: kind parked under either escaped verification entirely (Codex review of #973, round 2).
-#: The route vocabulary. A value is a route, optionally followed by ``" — <reason>"``.
-#:
-#: There is deliberately no `unnameable` route: `pmi` was its only member and is `declared` —
-#: the emitter serialises it and the generated script reconstructs it (#973 r3).
+#: Nothing enforces that a route has a check. Adding one here without writing its test
+#: would exempt every kind on it, silently — #974.
 _MIRROR_ROUTES = ("corpus", "declared", "aspect")
 
 
@@ -2197,16 +2190,15 @@ def _route_of(value: str) -> str:
 #: of this kind, so the round trip is exercised end to end (emit → run → compare signatures).
 #: Checked against the COMPILER, not against detection: recognising a feature that yields no
 #: approved dimension leaves the mirror untouched however cleanly it is recognised (#948).
-#: `"declared"` — nothing detects it, so it is reached through the declared route instead;
-#: `test_the_declared_route_reaches_the_kind_that_claims_it` builds that model and requires
-#: the emitter to write its line.
+#: `"declared"` — nothing detects it, so it is reached through the declared route instead.
+#: `test_declared_kinds_are_reachable_and_emitted` builds that model and requires the
+#: emitter to write its line; the premise that nothing detects it is a claim about the
+#: detectors that no test here checks.
 #: `"aspect"` — carries no DimParameter, so there is nothing for the mirror to reproduce.
-#: `"unnameable"` — no declarative verb, so the emitter falls back and says so; the kind
-#: cannot be mirrored by design until that verb exists.
 #:
-#: There is deliberately no "untested" route any more: #948 closed the last of them, and every
-#: route above now carries an obligation a test enforces. Re-introducing one would mean adding
-#: it to `_MIRROR_ROUTES` and saying, in the open, that it requires nothing.
+#: No `"unnameable"` route: `pmi` was its only member and is `declared` — the emitter
+#: serialises it and the generated script reconstructs it (#973 r3). No `"untested"` route
+#: either; #948 closed the last of them.
 _KIND_MIRROR_COVERAGE = {
     "hole": "corpus",
     "pattern": "corpus",
