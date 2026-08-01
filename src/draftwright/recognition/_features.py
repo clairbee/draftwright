@@ -848,12 +848,13 @@ def _plane_uv(axis):
     between the two halves of the waist: :func:`~draftwright._geometry.plane_axes` and
     ``detect._pattern_feature``'s axis LETTER are chosen by the same rule, so the frame and the
     letter turn together, and `test_the_frame_and_the_ir_axis_letter_agree` pins it. What such
-    an axis does not have is a faithful declared counterpart at all — an oblique pattern is
-    flattened into its dominant plane by the letter, whatever frame it was found in. The
-    projection here stays geometrically honest (unforeshortened pitches, so the lattice is
-    recognised correctly), but the round trip through the IR is lossy for a genuinely oblique
-    pattern. That is a pre-existing limit of the letter-only IR, not something this function can
-    fix; it is #971 (Codex review of #970, round 3).
+    an axis does not have is a faithful declared counterpart at all — an oblique pattern
+    would be flattened into its dominant plane by the letter, whatever frame it was found
+    in. The projection here stays geometrically honest (unforeshortened pitches, so the
+    lattice IS recognised correctly), and #971 settled what happens next: `model/detect.py`
+    refuses to build a `PatternFeature` for a non-principal axis, so the members stay
+    ordinary holes rather than a lattice in the wrong plane. Recognition still reports what
+    it finds — the limitation is the IR's, so the refusal lives at the adapter (ADR 0013).
     """
     n = math.hypot(*axis)
     a = tuple(c / n for c in axis)
