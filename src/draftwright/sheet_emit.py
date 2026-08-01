@@ -596,12 +596,6 @@ def mirror_model(model):
     return replace(model, features=[*model.features, env]), env
 
 
-#: The parameter an approved ladder is named by, where the two spellings differ. An
-#: `overall_height` ladder attached to an `EnvelopeFeature` is that envelope's `height`
-#: parameter — the ladder is a placement grouping, the parameter is what a script names.
-_LADDER_PARAMETER = {"overall_height": "height.length"}
-
-
 def unmirrored_dimensions(model) -> list[str]:
     """Dimensions the COMPILER approved that no emitted line would name.
 
@@ -640,26 +634,24 @@ def unmirrored_dimensions(model) -> list[str]:
             parameter_id.split(".")[0],
         ) in requested
 
+    # ONE interpreter, the same one the emitter serialises (#946). This used to walk
+    # `plan.groups`, `plan.locations` and `plan.ladders` itself, with its own copy of the
+    # ladder→parameter mapping — so the completeness GATE re-derived the compiler's answer
+    # even after the emitter stopped. A category the compiler grew would have been mirrored
+    # by `_mirrored_requests` and still reported missing here, or worse, the reverse.
+    #
+    # `model`, not `declared`: the synthesised envelope adds width and depth parameters the
+    # emitter deliberately omits, so compiling the mirror model would report them missing.
     missing: list[str] = []
-    plan = compile_dimensions(model)
-    for group in plan.groups:
-        feature = resolve_feature(group.ref)
-        missing += [
-            f"{feature.kind}.{d.parameter_id}"
-            for d in group.dims
-            if not _asked(feature, d.parameter_id)
-        ]
-    for approved in plan.locations:
-        feature = resolve_feature(approved.ref)
-        if feature is not None and (id(feature), "location") not in requested:
-            missing.append(f"{feature.kind}.location")
-    for ladder in plan.ladders:
-        feature = resolve_feature(ladder.ref) if ladder.ref is not None else None
+    for intent in compile_dimensions(model).addressable():
+        feature = resolve_feature(intent.ref)
         if feature is None:
+            # Model-level — the overall height of a part with no envelope feature. Only the
+            # synthesised envelope can name it, until #976 gives it a declarative target.
             if synthesised is None or (id(synthesised), "height.length") not in requested:
                 missing.append("(bounding box).overall_height")
-        elif not _asked(feature, _LADDER_PARAMETER.get(ladder.kind, f"{ladder.kind}.length")):
-            missing.append(f"{feature.kind}.{ladder.kind}")
+        elif not _asked(feature, intent.role):
+            missing.append(f"{feature.kind}.{intent.role}")
     return sorted(set(missing))
 
 
@@ -675,7 +667,7 @@ def _is_mirrorable(model) -> bool:
     return not unmirrored_dimensions(model)
 
 
-def _mirrored_requests(model, declared_envelope=None):
+def _mirrored_requests(declared, declared_envelope=None):
     """One `(feature, role)` per dimension the planner CHOSE — the mirror's content.
 
     Emitted per addressable UNIT, never per member: a `step_height` ladder and a rotational
@@ -687,38 +679,34 @@ def _mirrored_requests(model, declared_envelope=None):
     vanish from the regenerated script and could never be recovered by re-running it, and an
     unrelated layout change would silently rewrite version-controlled source.
     """
-    from draftwright.model.planner import plan_dimensions
-
-    out: list[tuple] = []
-    if declared_envelope is not None:
-        # The synthesised envelope exists ONLY to make the overall height nameable, so name
-        # its height and nothing else — its width and depth stay omitted exactly as the
-        # planner left them on a model that never declared an envelope (`mirror_model`).
-        out.append((declared_envelope, "height.length", None))
-    for group in plan_dimensions(model):
-        if declared_envelope is not None and group.feature is declared_envelope:
-            continue  # its height is named above; its width/depth stay omitted
-        for unit in group.units:
-            if all(d.suppressed for d in unit.members):
-                continue  # the planner did not choose it; the mirror must not add it
-            out.append((group.feature, str(unit.id), None))
-    # Locations come from the COMPILED set, not from `plan_locations`. The two differ, and
-    # the difference is exactly the positions that are compiled elsewhere: a slot's near-end
-    # offset and a side-drilled hole's, which measure from the bounding box rather than from
-    # `datum_xy` (#925). Walking the planner missed them, so a mirrored pad/slot part lost
-    # its position dim — the whole class of bug this mirror exists to prevent.
     from draftwright.model.compiled import compile_dimensions, resolve_feature
 
-    named: set[int] = set()
-    for approved in compile_dimensions(model).locations:
-        # One line per FEATURE, not per ref: coincident refs are deduplicated across
-        # features, and `dimension(f, "location")` is a per-feature unit (#883 is the
-        # per-member question, deliberately not answered here).
-        feature = resolve_feature(approved.ref)
-        if feature is None or id(feature) in named:
+    # ONE compiler result, serialised — not three sources reassembled (#946). This used to
+    # walk `plan_dimensions()` for parameters, `compile_dimensions().locations` for positions
+    # and a synthesised envelope for the overall height, with comments explaining which
+    # compiler fact each reconstructed. A category the compiler grew rendered correctly and
+    # vanished from generated scripts until someone extended this function;
+    # `RenderableDimensionPlan.addressable()` is now the single answer, and its `_ADDRESSABLE`
+    # roster is guarded so a new collection cannot skip it.
+    out: list[tuple] = []
+    for intent in compile_dimensions(declared).addressable():
+        feature = resolve_feature(intent.ref)
+        if feature is None:
+            # A model-level intent — the part's overall height, which belongs to no feature.
+            # The synthesised envelope is what makes it nameable; `mirror_model` supplies it.
+            if declared_envelope is None:
+                continue
+            out.append((declared_envelope, "height.length", None))
             continue
-        named.add(id(feature))
-        out.append((feature, "location", None))
+        if declared_envelope is not None and feature is declared_envelope:
+            # The synthesised envelope exists ONLY to make the overall height nameable, so
+            # name its height and nothing else — width and depth stay omitted exactly as the
+            # planner left them on a model that declared no envelope (`mirror_model`). The
+            # compiler reaches that height twice, as the ladder and as the parameter, and
+            # `addressable()` has already collapsed them to one intent.
+            if intent.role != "height.length":
+                continue
+        out.append((feature, intent.role, None))
     return out
 
 

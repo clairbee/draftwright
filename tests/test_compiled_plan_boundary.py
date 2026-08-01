@@ -1064,3 +1064,129 @@ class TestTheBoundaryIsLoadBearing:
         assert set(_PENDING_VALUE_CARRYING) == {"hc_", "pmi_"}, (
             "the pending list changed; update the ADR inventory in the same commit"
         )
+
+
+# ─── #946: one addressable result, and nothing outside it ────────────────────────────────
+
+
+def test_every_approved_collection_is_addressable():
+    """A new compiler-owned dimension category cannot skip generated scripts.
+
+    `RenderableDimensionPlan._ADDRESSABLE` names the fields `addressable()` walks, and
+    `sheet_emit._mirrored_requests` is a serialisation of that walk. Before #946 the emitter
+    assembled its answer from three sources, so a category the compiler grew rendered
+    correctly and stayed invisible to scripts until someone remembered to extend it — the
+    failure mode stated in the issue, one level up from where ADR 0016 Amendment 1 fixed it
+    for renderers.
+
+    This makes the roster fail closed: add a collection of approved content and it must be
+    walked, or excluded here on purpose with a reason. `diagnostics` is the one exclusion —
+    it is what was NOT approved and has its own contract.
+    """
+    import dataclasses
+
+    from draftwright.model.compiled import RenderableDimensionPlan
+
+    excluded = {"diagnostics": "what was NOT approved; #939's floor consumes it separately"}
+    roster = RenderableDimensionPlan._ADDRESSABLE
+    carried = {f.name for f in dataclasses.fields(RenderableDimensionPlan)}
+
+    unaccounted = carried - set(roster) - set(excluded)
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} carry compiled content that `addressable()` never walks, so "
+        "a script would silently omit them; add them to `_ADDRESSABLE` or exclude them here "
+        "with a reason"
+    )
+    # ...and the roster names REAL fields with REAL adapters. Comparing name sets alone let a
+    # listed-but-unimplemented field through: adding one only made `unaccounted` smaller, and
+    # a canary that added `"callouts"` with no adapter passed this test while `addressable()`
+    # would raise on the first call (#975 review, caught by canarying the guard itself).
+    invented = set(roster) - carried
+    assert not invented, f"{sorted(invented)} are in `_ADDRESSABLE` but are not plan fields"
+    missing_adapters = [
+        n for n in roster if not hasattr(RenderableDimensionPlan, f"_addressable_{n}")
+    ]
+    assert not missing_adapters, (
+        f"{missing_adapters} are rostered with no `_addressable_<name>` adapter, so "
+        "`addressable()` raises rather than walking them"
+    )
+    # And it runs — the roster is dispatched through, so this is what proves the wiring.
+    assert isinstance(RenderableDimensionPlan().addressable(), tuple)
+
+
+def test_the_emitter_reads_only_the_addressable_result():
+    """`_mirrored_requests` is a serialisation of ONE compiler result (#946 acceptance).
+
+    Checked structurally rather than behaviourally: the behavioural corpus already proves the
+    emitted set matches, and would keep passing if a second source were reintroduced that
+    happened to agree today. What must not come back is the ASSEMBLY.
+    """
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap
+
+    from draftwright import sheet_emit
+
+    tree = _ast.parse(textwrap.dedent(_inspect.getsource(sheet_emit._mirrored_requests)))
+    # Names the function actually USES, from the AST — not a substring search over the source,
+    # which matched the comment explaining what this replaced and so failed on its own history.
+    used = {n.id for n in _ast.walk(tree) if isinstance(n, _ast.Name)} | {
+        n.attr for n in _ast.walk(tree) if isinstance(n, _ast.Attribute)
+    }
+    assert "addressable" in used, "the mirror no longer reads the compiler's addressable set"
+    reassembled = used & {"plan_dimensions", "plan_locations", "locations", "units"}
+    assert not reassembled, (
+        f"`_mirrored_requests` reads {sorted(reassembled)} again — that is the three-source "
+        "assembly #946 replaced, and it is how a compiler-owned category goes missing"
+    )
+
+
+def test_the_completeness_gate_compiles_the_original_not_the_mirror_model():
+    """The `model` / `declared` asymmetry in `sheet_emit`, pinned directly (#975 review).
+
+    `_mirrored_requests` compiles the DECLARED mirror model, so a synthesised envelope can
+    supply a nameable `height.length`. `unmirrored_dimensions` compiles the ORIGINAL, because
+    the approved drawing content is what it checks — compiling the mirror model would treat
+    that envelope's width and depth as obligations the emitter deliberately never names.
+
+    Right today, and exactly the kind of invariant that survives a careless edit while the
+    corpus stays green: the flange fixtures cover it only as a consequence.
+    """
+    # The mirror corpus's `flange (no envelope feature)` — a part with no EnvelopeFeature that
+    # still gets an overall-height ladder, which is the only shape that reaches the synthesis.
+    # A plain turned body does NOT: its rotational OD conveys the height, so no ladder exists.
+    from build123d import Align, Axis
+
+    from draftwright.model.compiled import compile_dimensions, resolve_feature
+    from draftwright.sheet_emit import mirror_model, unmirrored_dimensions
+
+    part = Cylinder(21, 4)
+    for x in (-18, 18):
+        for y in (-18, 18):
+            part += Pos(x, y, 2) * Box(10, 10, 4, align=(Align.CENTER,) * 3)
+    part = part + Pos(0, 0, 2) * Cylinder(15.5, 12) + Pos(0, 0, 10) * Cylinder(12.5, 12)
+    part -= Cylinder(8, 30)
+    for x in (-18, 18):
+        for y in (-18, 18):
+            part -= Pos(x, y, 0) * Cylinder(2, 10)
+    model = detect_part_model(part.rotate(Axis.X, 90))
+    assert not any(f.kind == "envelope" for f in model.features), "fixture stopped proving this"
+
+    declared, synthesised = mirror_model(model)
+    assert synthesised is not None, "the fixture no longer exercises the synthesised envelope"
+
+    # Compiling the MIRROR model demands the synthesised envelope's width and depth...
+    roles = {
+        i.role
+        for i in compile_dimensions(declared).addressable()
+        if resolve_feature(i.ref) is synthesised
+    }
+    assert {"width.length", "depth.length"} <= roles, (
+        "the synthesised envelope no longer carries width/depth, so this test no longer "
+        "distinguishes the two models — re-point it at whatever now differs"
+    )
+    # ...which the emitter never names, so the gate must not ask for them.
+    assert unmirrored_dimensions(model) == [], (
+        "the completeness gate reports the synthesised envelope's width/depth as missing — "
+        "it is compiling the mirror model rather than the original"
+    )
