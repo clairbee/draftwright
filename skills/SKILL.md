@@ -17,8 +17,11 @@ to be installed in the execution environment.
 2. **Builder (`build_drawing`)** — the same pipeline, but it hands back a live
    `Drawing` you can edit before export.
 
-Requires `draftwright >= 0.1.9` and `build123d-drafting-helpers >= 0.10.1`.
+Requires `draftwright >= 0.4.0` and `build123d-drafting-helpers >= 0.14.1`.
 Install: `pip install draftwright`.
+
+(The old floor said 0.1.9, which cannot run this guide: none of the feature-backed
+verbs existed then, and the dotted parameter ids in Step 2 are new in 0.4.0.)
 
 **Design model (worth knowing before you edit):** the engine is *deterministic*
 — no AI inside it — and you refine a drawing by **stating domain intent**
@@ -79,13 +82,16 @@ Then verify (Step 3). For most parts you are done here.
 
 ## Step 2 — Customise with the Drawing builder
 
-`build_drawing(...)` returns a live `Drawing`. **Edit it in *domain* vocabulary
-— locate things with `features()`, add dimensions with `place_dim()`, choose a
-side and view.** You give *what* and *where on the part*; the engine decides the
-*offset, stacking, and strip slot* (placement is automatic and constraint-based).
-You still pass page-point endpoints, but you get them from `features()` or
-`dwg.at(...)` — you never compute offsets or pick a strip. Hand-building a raw
-`Leader` at `dwg.at(...)` coordinates is the escape hatch, not the default.
+`build_drawing(...)` returns a live `Drawing`. **Edit it in *domain* vocabulary —
+name a detected *feature* and the measurement you want; the engine decides the
+offset, stacking, and strip slot.** You give *what*, never *where on the page*:
+placement is automatic and constraint-based.
+
+Prefer the feature-backed verbs (`dimension` / `locate` / `callout` / `note` /
+`drop`) over the raw page-coordinate primitives. The low-level API (`place_dim`,
+`add`, `add_view`, the view-coordinate plumbing) is **deprecated** — see
+`docs/deprecations.md` — because a raw coordinate does not route through the
+layout solve, so it cannot be re-flowed when anything around it moves.
 
 ```python
 from draftwright import build_drawing
@@ -107,60 +113,99 @@ dwg.views                   # {"front","plan","side","iso"} → (visible, hidden
 dwg.draft / dwg.scale / dwg.page_w / dwg.page_h
 ```
 
-**Add a linear dimension with `place_dim`** — it allocates the offset and stacks
-clear of existing dims; you give two page-point endpoints and a side/view:
+**Add a dimension by naming a feature and a measurement** — the engine derives the
+value from the geometry and owns the placement:
 
 ```python
 # side ∈ {"above","below","left","right"}; view ∈ {"front","plan","side"}.
-p1 = dwg.at("front", 0, 0, 0)          # world → page point
-p2 = dwg.at("front", 40, 0, 0)
-dwg.place_dim(p1, p2, "above", "front", dwg.draft, name="dim_len")
+env  = next(f for f in dwg.model().features if f.kind == "envelope")
+hole = next(f for f in dwg.model().features if f.kind == "hole")
 
-dwg.remove("dim_od")                    # drop an automatic annotation by name
+dwg.dimension(env, "length", role="width", side="above", view="front")
+dwg.locate(hole)                         # locating dimensions for the feature
+dwg.callout(hole)                        # a ⌀ callout the auto-pass missed
+
+dwg.drop(hole)                           # stop dimensioning this feature
+
+name = next(iter(dwg.annotations()))     # names come from annotations(); they are
+dwg.remove(name)                         # engine-assigned, so don't guess one
 ```
 
-**Add a diameter callout on a hole the auto-pass missed** — locate it with
-`features()` and attach a `HoleCallout` (this is what the `feature_not_dimensioned`
-lint suggestion hands you verbatim — see the loop below):
+**Mind the two spellings.** On `Drawing.dimension` the second argument is the
+parameter *kind* (`"length"`, `"diameter"`) and `role=` discriminates between
+same-kind parameters — an envelope has three `length` params with roles `width` /
+`height` / `depth`, so `dimension(env, "length")` alone is ambiguous and raises,
+naming them. `feature.parameters()` returns `DimParameter` objects carrying
+`.kind` and `.role`, so `[(p.kind, p.role) for p in feature.parameters()]` is how
+to see what a feature accepts.
+
+On the `Sheet` facade the same measurement is one dotted **parameter id** —
+`"width.length"` — and `dimension_ids()` on a handle lists them. Use the id there
+rather than the bare family role (`"width"`): the bare spelling is deprecated,
+because it is what let a single call silently declare two dimensions.
+
+`place_dim(p1, p2, side, view, …)` still exists for raw page coordinates, but it is
+the **escape hatch of last resort** (ADR 0012) and is deprecated: it bypasses the
+layout solve, so nothing re-flows around it.
+
+**Add a diameter callout on a hole the auto-pass missed** — find the bore in the
+model IR and hand it to `callout()`. This is what the `feature_not_dimensioned`
+lint suggestion hands you (it emits `dwg.callout(f)` — say *what*, not *where*):
 
 ```python
-from build123d_drafting import HoleCallout, Leader
-
-for f in dwg.features("plan"):          # plan→Z holes, front→Y, side→X
-    if abs(f.diameter - 4.0) < 0.2:
-        callout = HoleCallout(f.diameter, count=f.count, through=f.through,
-                              depth=f.depth, draft=dwg.draft)
-        elbow = (f.page_pos[0] + 15, f.page_pos[1] + 10, 0)
-        dwg.add(Leader((*f.page_pos, 0), elbow, "", dwg.draft, callout=callout),
-                name="hole_4")
+for f in dwg.model().features:
+    if f.kind == "hole" and abs(f.diameter - 4.0) < 0.2:
+        dwg.callout(f)                   # engine picks the view, leader and elbow
 ```
 
-**Escape hatch** — only when no domain verb fits (e.g. a free-form note at an
-exact spot). Prefer the above; this couples you to page mechanics:
+**Free text** at a chosen point is `note()` — a domain verb, not an escape hatch:
 
 ```python
-from build123d_drafting import Leader
-dwg.add(Leader(tip=dwg.at("front", 10, 0, 5), elbow=(8, 40, 0),
-               label="ø4 BORE", draft=dwg.draft), "ldr_bore")
+dwg.note("ø4 BORE", dwg.at("front", 10, 0, 5), view="front")
 ```
 
 Then re-lint and export:
 
 ```python
 issues = dwg.lint()                       # list of LintIssue; [] when clean
-svg, dxf = dwg.export("drawings/bracket")
+paths = dwg.export("drawings/bracket", formats=("svg", "dxf", "pdf"))
+svg, dxf = paths["svg"], paths["dxf"]
 ```
+
+Pass `formats=` and read the `{format: path}` dict. Calling `export()` with no
+`formats` takes the legacy path and returns a `(svg, dxf)` tuple. That path is
+declared deprecated (v0.3.1) and slated for removal in 0.5.0 — but note it emits
+**no** `DeprecationWarning`, so nothing tells you at runtime that you are on it.
+See `docs/deprecations.md`.
 
 `make_drawing(...)` is exactly `build_drawing(...).export()`.
 
-**Add a section or auxiliary view** with `add_view()`:
+**Section views** come from the section verb rather than from projecting a view by
+hand. The two entry points are *not* equivalent:
 
 ```python
-look = dwg.look_at
-bottom = (look[0], look[1], look[2] - dwg.dist)
-vc = dwg.add_view("bottom", part, bottom, (0, 1, 0), (260.0, 60.0))
-px, py = vc.pp(world_x, world_y, world_z)
+from draftwright import Sheet
+
+# Sheet.section() FORCES a cut, wherever you point it.
+cut = Sheet.from_part(part, number="DWG-042").section().build()
+"section_aa" in cut.views                 # True
+# section(feature) cuts through that feature; section(at=y) at an explicit Y.
+
+# Drawing.section() adds only the AUTOMATIC A–A, which fires just for qualifying
+# hidden internal geometry (a counterbore, spotface, or blind bottom). It returns
+# the placed annotation names, or [] when no section is warranted — so on a plain
+# through-holed block it does nothing at all.
+dwg.section()
 ```
+
+Arbitrary **auxiliary** views have no public verb: `add_view()` was the way to
+project one and is deprecated, so a custom viewing direction is not currently part
+of the supported surface.
+
+`add_view()` and the view-coordinate plumbing (`set_view_coordinates`,
+`drop_view_coordinates`, and the `vc.pp(...)` projector) are **deprecated** (#817):
+view projection is engine plumbing, and hand-placed views do not participate in the
+compose-then-pack layout.
 
 ---
 
@@ -242,7 +287,7 @@ crit = dwg.lint_summary()
 for i in dwg.lint():
     print(i.severity, i.code, i.message)
     if getattr(i, "suggestion", None):
-        print("  fix:", i.suggestion)   # e.g. dwg.place_dim(...) / dwg.add_view(...)
+        print("  fix:", i.suggestion)   # e.g. dwg.callout(...) / dwg.dimension(...)
 
 # 3. Self-repair — auto-applies the mechanically-fixable issues (overlapping
 #    labels pushed apart, wrong-side dims flipped). Runs by default inside
@@ -256,8 +301,9 @@ dwg.pin(name)             # name from dwg.annotations(); dwg.unpin(name) to rele
 
 Codes are domain-meaningful (`feature_not_dimensioned`, `feature_count_mismatch`,
 `callout_dropped`, `location_ref_dropped`, `step_dim_dropped`, …), so a fix is
-always expressible through the domain API (`place_dim`, `features`, `add_view`),
-never the page-layout internals. Loop until `passed` (or the score plateaus).
+always expressible through the domain API (`dimension`, `locate`, `callout`,
+`features`), never the page-layout internals. Loop until `passed` (or the score
+plateaus).
 
 Coverage-only check, standalone:
 
