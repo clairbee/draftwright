@@ -22,7 +22,7 @@ def build_thumbwheel() -> Part:
     disc = Pos(1.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=5, height=2)
     journal = Pos(-1.6, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=2, height=3.2)
     tap = Pos(-3.2, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=0.8, height=8)
-    thread = Pos(15.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=1.5, height=20)
+    thread = Pos(1.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=1.5, height=20)
 
     body = boss + disc + journal + thread
     body = body - tap
@@ -61,7 +61,7 @@ def build_thumbwheel_features() -> ThumbwheelFeatures:
     disc = Pos(1.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=5, height=2)
     journal = Pos(-1.6, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=2, height=3.2)
     tap = Pos(-3.2, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=0.8, height=8)
-    thread = Pos(15.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=1.5, height=20)
+    thread = Pos(1.5, 0, 0) * Rot(0, 90, 0) * Cylinder(radius=1.5, height=20)
 
     body = boss + disc + journal + thread
     body = body - tap
@@ -73,9 +73,57 @@ def build_thumbwheel() -> Part:
 ```
 
 `--out ... --script` against a `module:attr` / `file.py:attr` spec needs a **zero-arg**
-callable (or an already-built object) — `build_thumbwheel_features` above qualifies as-is;
+callable returning a build123d `Shape` (or an already-built one) — so point it at
+`build_thumbwheel`, not `build_thumbwheel_features`: the latter returns a
+`ThumbwheelFeatures` dataclass and the resolver rejects it (`resolved to
+ThumbwheelFeatures, not a build123d Shape`);
 if your builder takes a `params` argument, point the spec at a small zero-arg factory
 instead of the parametrised function itself.
+
+## Generate the script first, then edit it
+
+You do not write the `Sheet` script below from scratch — you generate it and edit it. Point
+`--script` at the **Shape-returning** wrapper:
+
+```bash
+draftwright yourmodule:build_thumbwheel --script --out thumbwheel
+```
+
+That writes `thumbwheel.py`. `--script` emits the declarative `Sheet` flavour by default (the
+only one since 0.3 — `--style sheet` is the sole accepted value).
+
+What comes out — **verbatim, with feature and dimension lines elided where marked**:
+
+```python
+from yourmodule import build_thumbwheel as _obj
+part = _obj()
+
+sheet = Sheet(part, title='DRAWING', number='DWG-001')
+hole1 = sheet.hole(diameter=1.6, at=(0.8, 0, 0), axis="x").depth(8)   # ⌀1.6 blind 8
+step1 = sheet.step(diameter=3, length=5.3, at=(-5.85, 0, 0), axis="x")   # ⌀3 × 5.3 step
+step2 = sheet.step(diameter=4, length=3.7, at=(-1.35, 0, 0), axis="x")   # ⌀4 × 3.7 step
+# ... step3, step4, boss1 ...
+envelope1 = sheet.envelope()   # envelope 20 × 10 × 10
+
+sheet.authored_dimensions()
+sheet.dimension(hole1, "bore.diameter")
+sheet.dimension(hole1, "bore.depth")
+# ... twelve more dimension lines ...
+
+drawing = sheet.build()
+drawing.export('thumbwheel', formats=('pdf',))
+```
+
+`part` is rebound to your **live source**, not a frozen STEP. `authored_dimensions()` declares
+that this is the complete set, so commenting a `dimension(...)` line out drops exactly that
+dimension. `sheet.envelope()` reads the overall size off the part rather than restating it. The
+title defaults to `DRAWING` — pass `--title` to set it.
+
+Honest, and a working starting point. But `diameter=4, length=3.7` are numbers *restated* from
+geometry you already have — change the journal in your source and the drawing quietly disagrees.
+Note too that the fused body detects as four `step`s: the silhouette is all detection can see
+once the objects are unioned. The rest of this doc is the edit that fixes both — swap each
+numbered line for the object it was measured from.
 
 ## Declaring the drawing by reference
 
