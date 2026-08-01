@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Removed (breaking)
+
+Compat surfaces whose documented removal target was 0.4.0 (#720, ADR 0005 §4 — every alias
+carries a tracking issue *and* a removal date, or the facade is permanent by accident):
+
+- **The seven `Drawing` compat aliases** — `_named` / `_anno_view` / `_pinned` /
+  `_build_issues`, and `_pattern_callouts` / `_patterned_holes` / `_dropped_callout_diams`.
+  These were private, and the public reads have existed since #699: use `dwg.registry`
+  (`in reg`, `names()`, `issues`, `pinned_names()`) and `dwg.coverage`, or the `Drawing` verbs
+  `annotations()` / `iter_annotations()` / `get_annotation()` / `view_of()`.
+  **Note the asymmetry.** A *read* — `dwg._named` — now raises `AttributeError`. A *write* —
+  `dwg._pinned = {...}` — does **not**: these were properties with setters, and `Drawing` has
+  no `__slots__`, so assignment now quietly creates an unrelated instance attribute that no
+  longer reaches the registry or coverage owner. Writes therefore fail silently rather than
+  loudly. Grep for `\._(named|anno_view|pinned|build_issues|pattern_callouts|patterned_holes|dropped_callout_diams)\b`
+  before upgrading; mutate through `registry.add()` / `pin()` / `record_issue()` /
+  `restore_issues()` and the `CoverageState` methods instead.
+- **The `draftwright.sheet_dsl` module** — an import alias for `draftwright.sheet` since the
+  #640 rename. Import `Sheet` from `draftwright` or `draftwright.sheet`.
+- **`generate_script`**, including its `draftwright.__all__` entry. It has raised since #940
+  retired the imperative emitter; it is now simply absent, so the failure is an `ImportError`
+  at the top of a script rather than a `RuntimeError` part-way through one. Use
+  `--script` / `emit_sheet_script`.
+- **The bespoke `--style imperative` error message.** `--style` itself is unchanged and still
+  accepts its sole value `sheet`; `imperative` is now an unrecognised value like any typo,
+  rather than one carrying its own explanation of the #940 retirement.
+
+Still deprecated, **not** yet removed: the bare dimension-role spellings
+(`dimension(f, "width")` for `"width.length"`) and the `Sheet.dimension(kind=…, value=…)`
+call shape. Both remain #720, and both warn.
+
 ### Fixed
 
 - **`sheet.envelope()` measured the file, not the part** (#977). An AP242 STEP import is a

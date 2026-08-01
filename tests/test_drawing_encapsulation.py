@@ -26,6 +26,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parent.parent / "src" / "draftwright"
 _ANNO_DIR = _SRC / "annotations"
 
@@ -182,8 +184,8 @@ def test_write_guard_catches_every_mutation_form():
     for snippet in (
         "dwg._part_model = m",
         "dwg._part_model: int = m",
-        "dwg._named += x",
-        "dwg._named |= x",
+        "dwg._intents += x",
+        "dwg._intents |= x",
         "del dwg._part_model",
         'setattr(dwg, "_part_model", m)',
         'delattr(dwg, "_part_model")',
@@ -196,7 +198,7 @@ def test_write_guard_catches_every_mutation_form():
         writes = _dwg_private_writes(ast.parse(snippet))
         assert writes, f"guard missed a mutation form: {snippet!r}"
     # A pure read must NOT register as a write (else every read is a false positive).
-    assert not _dwg_private_writes(ast.parse("use(dwg._named)"))
+    assert not _dwg_private_writes(ast.parse("use(dwg._intents)"))
     # #830 Path A: a call to one of the sanctioned LAYOUT-SEAM methods is exempt from the read scan
     # (the engine's only legitimate private-method calls) — and ONLY those two (#840 dropped
     # _drop_view_coordinates by making the detail view transactional).
@@ -237,6 +239,78 @@ def test_no_build_context_probing():
         "pass them in as parameters or on the PlacementContext (#639 / ADR 0005 §2):\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_the_expired_compat_aliases_stay_deleted():
+    """ADR 0005 §4's exit criterion, made executable (#720).
+
+    The seven ``Drawing`` alias properties that shadowed registry- and coverage-owned state
+    were deleted at their 0.4.0 removal date. Nothing prevented them coming back: the
+    ``_DRAWING_PRIVATES`` roster in ``test_private_test_attr_reads`` is a SUPERSET check, so
+    it kept passing with the deleted names still listed, and would keep passing if they were
+    reintroduced. §4 calls the deletion the migration's completion criterion — so assert the
+    absence, not merely the roster.
+
+    Reintroducing any of these recreates the two-ways-to-reach-one-state that ADR 0005 calls
+    "the disease". Read through the owners instead: ``dwg.registry`` and ``dwg.coverage``.
+
+    Checks a BUILT drawing, not just ``Drawing`` itself: they were class-level properties, but
+    the way they would come back is as ``self._named = …`` in ``__init__`` or a render pass, and
+    a class-only ``hasattr`` would not see that (Codex r3).
+    """
+    from build123d import Box
+
+    from draftwright import build_drawing
+    from draftwright.drawing import Drawing
+
+    gone = [
+        # registry-owned (ADR 0005 Step 2)
+        "_named",
+        "_anno_view",
+        "_pinned",
+        "_build_issues",
+        # coverage-owned (ADR 0005 Step 3)
+        "_pattern_callouts",
+        "_patterned_holes",
+        "_dropped_callout_diams",
+    ]
+    dwg = build_drawing(Box(30, 20, 10), number="X")  # a full build: __init__ AND every pass
+    back = sorted(n for n in gone if hasattr(Drawing, n) or hasattr(dwg, n))
+    assert not back, (
+        "deleted ADR 0005 §4 compat alias(es) are back on Drawing: "
+        f"{back}. Reach through dwg.registry / dwg.coverage instead (#720)."
+    )
+
+
+def test_the_deleted_modules_and_stubs_stay_deleted():
+    """The other half of the #720 exit, for symmetry with the alias guard above.
+
+    `sheet_dsl` and `generate_script` had tests asserting they were PRESENT (that importing the
+    shim worked, that the stub raised with a pointer). Deleting the surfaces deleted those tests
+    and left nothing in their place, so either could be restored without a targeted failure
+    (Codex r5). A deletion nobody asserts is a deletion that comes back.
+    """
+    import importlib
+
+    import draftwright
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("draftwright.sheet_dsl")  # the #640 rename alias
+
+    # The #940-retired emitter: gone from the package's lazy surface AND its owners, so the
+    # failure is an ImportError at the top of a script rather than mid-run.
+    #
+    # import_module, NOT `from draftwright import make_drawing` — the package re-exports a
+    # FUNCTION of that name which shadows the submodule, so the latter would assert about a
+    # function object and pass no matter what the module contained (caught by canary).
+    owners = [draftwright] + [
+        importlib.import_module(f"draftwright.{m}") for m in ("builder", "make_drawing")
+    ]
+    assert "generate_script" not in draftwright.__all__
+    for mod in owners:
+        assert not hasattr(mod, "generate_script"), (
+            f"the retired generate_script is back on {mod.__name__} (#720/#940)"
+        )
 
 
 def test_private_reads_are_a_documented_shrinking_allowlist():

@@ -17,9 +17,10 @@ and build-time metadata** — a single owner:
   feature must never be silent.
 
 `Drawing` delegates its annotation add/remove/pin/ownership/build-issue
-operations here and keeps ``items`` (the ordered render list); the four field
-names remain reachable as ``Drawing`` properties during the migration because
-tests and helpers still read through them (ADR 0005 §4).
+operations here and keeps ``items`` (the ordered render list). The four field
+names were reachable as ``Drawing`` properties during the migration; those
+aliases were deleted at their ADR 0005 §4 removal date (#720), so this class's
+own surface — ``in reg`` / :meth:`names` / :attr:`issues` — is the only way in.
 
 This module sits at the bottom of the import DAG — it depends on nothing in
 draftwright and carries no behaviour beyond the bookkeeping moved out of
@@ -205,6 +206,13 @@ class AnnotationRegistry:
     def reset_issues(self) -> None:
         """Drop all build issues (re-annotation starts from a clean slate)."""
         self._build_issues = []
+
+    def restore_issues(self, issues) -> None:
+        """Replace the recorded build issues with *issues* — the write half of the
+        :attr:`issues` read, for the transactional finalize rollback (#647). Kept
+        separate from :meth:`snapshot`/:meth:`restore` because those are identity-only:
+        repair undo rolls back annotations without discarding what the build found."""
+        self._build_issues = list(issues)
 
     def drop_issues(self, codes) -> None:
         """Drop recorded build issues whose ``code`` is in *codes* — e.g. when a
