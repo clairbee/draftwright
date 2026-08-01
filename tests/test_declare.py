@@ -1926,3 +1926,54 @@ def test_declared_step_levels_measure_the_part_not_the_pmi_geometry():
     assert (round(feat.frame.origin[0]), round(feat.frame.origin[1])) == (0, 0), (
         f"frame anchor {feat.frame.origin} is measured off the imported compound"
     )
+
+
+def test_the_declared_envelope_equals_the_detected_one():
+    """The property behind #977's three fixes, asserted directly instead of per-instance.
+
+    `declare.envelope()` claims to match the detector's prismatic envelope. It did not, twice
+    over and on different axes: it measured the raw compound (PMI geometry included, 1170 where
+    the part is 800) and it put the frame origin at `bb.min.Z` where the detector uses the
+    centre — a hand-declared envelope sitting a half-height below a detected one.
+
+    Both were invisible through the emitter, which bakes the detected values explicitly, so only
+    a hand-written `sheet.envelope()` was ever wrong — which is what the README shows. Comparing
+    the two paths is what makes the docstring's claim checkable rather than aspirational; each
+    fix was found by inspection, and this is what finds the next one.
+    """
+    import dataclasses
+    from pathlib import Path
+
+    from build123d import Box, Cylinder, Pos, import_step
+
+    from draftwright._geometry import _solids_body
+    from draftwright.model.declare import envelope as declare_envelope
+    from draftwright.model.detect import build_part_model
+
+    step = Path(__file__).parent / "fixtures" / "nist_ctc_01_asme1_ap203.stp"
+    cases = {
+        "STEP import (carries PMI geometry)": import_step(str(step)),
+        "plain solid": Box(80, 60, 10) - Pos(0, 0, 0) * Cylinder(4, 20),
+        "off-origin solid": Pos(15, -7, 3) * Box(40, 20, 12),
+    }
+    for name, obj in cases.items():
+        detected = next(
+            f for f in build_part_model(_solids_body(obj)).features if f.kind == "envelope"
+        )
+        declared = declare_envelope(obj)
+        # EVERY field, not just the two that were wrong. The name says equal, so it compares
+        # equal — `frame.axis`, `bbox_min` and `bbox_max` went unchecked in the first cut, and a
+        # property test that inspects a subset is the shape both earlier bugs hid in.
+        for f in dataclasses.fields(detected):
+            want, got = getattr(detected, f.name), getattr(declared, f.name)
+            if f.name == "frame":
+                assert want.axis == got.axis, f"{name}: frame axis {got.axis} != {want.axis}"
+                want, got = want.origin, got.origin
+            if isinstance(want, (int, float)) and not isinstance(want, bool):
+                assert abs(want - got) < 1e-6, f"{name}: {f.name} {got} != {want}"
+            elif isinstance(want, tuple) and want and isinstance(want[0], (int, float)):
+                assert all(abs(a - b) < 1e-6 for a, b in zip(want, got, strict=True)), (
+                    f"{name}: {f.name} {got} != {want}"
+                )
+            else:
+                assert want == got, f"{name}: {f.name} {got!r} != {want!r}"
