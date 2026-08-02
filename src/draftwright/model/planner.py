@@ -278,19 +278,24 @@ def _group_view(feature: Feature) -> str:
     return _END_ON.get(feature.frame.axis, "plan")
 
 
-def _square_footprint(model: PartModel) -> bool:
-    """In-plane width ≈ depth (within 5%) — a single overall dim suffices."""
-    size = model.bbox.size  # type: ignore[attr-defined]  # build123d BoundBox
-    w, d = float(size.X), float(size.Y)
-    return abs(w - d) <= max(w, d) * 0.05
-
-
 def _suppression(model: PartModel, feature: Feature, param: DimParameter):
     """Model-level suppression intent → ``(suppressed, reason)``. Decisions the
-    planner can make from the model alone (ISO 129 no-double-dimensioning):
-    a square footprint needs one overall dim, not width+depth; a turned part's
-    step-length chain already conveys the length (X) / height (Z), so the envelope
-    dim along the turning axis is redundant."""
+    planner can make from the model alone (ISO 129 no-double-dimensioning): a turned part's
+    step-length chain already conveys the length (X) / height (Z), so the envelope dim along
+    the turning axis is redundant, and its OD conveys the cross-axis extents.
+
+    **There is deliberately no square-footprint rule** (#997). One existed, suppressing the
+    depth whenever width ≈ depth, and it was wrong twice over. It used a *5%* window, so a
+    100 × 95 part was drawn showing `100` alone and read as 100 × 100. And even at exact
+    equality it left the part under-defined: orthographic projection is not a dimensional
+    constraint, so without ``□50`` / ``50 SQ`` nothing on the sheet says the second extent
+    equals the first. Two equal extents are still two independent facts.
+
+    Stating both is not the double-dimensioning ISO 129 warns about — that is about closing a
+    chain, not about two independent extents that happen to be equal. So a square part now
+    carries both, which is verbose but never ambiguous. Square notation is the optimisation
+    (#918); when it exists, a suppression rule can return *with* it, never instead of it.
+    """
     if feature.kind != "envelope":
         return False, None
     # A rotational part's OD already conveys its cross-axis extent(s); the envelope
@@ -302,14 +307,6 @@ def _suppression(model: PartModel, feature: Feature, param: DimParameter):
         od_perp = {"x": {"depth"}, "y": {"width"}, "z": {"width", "depth"}}[rot.frame.axis]
         if param.role in od_perp:
             return True, f"rotational OD ({rot.frame.axis}-axis) conveys this extent"
-    # Keep width as the single representative planar extent. Suppressing both
-    # width and depth made square parts lose their plan size entirely (#897).
-    if param.role in ("width", "depth") and _square_footprint(model):
-        has_profile = any(
-            f.kind == "step_level" and getattr(f, "shoulders", ()) for f in model.features
-        )
-        if not has_profile or param.role == "depth":
-            return True, "square footprint (single overall dim suffices)"
     if param.role == "width" and model.orientation == "x":
         return True, "X-turned (step-length chain conveys the length)"
     if param.role == "height" and model.orientation == "z":
