@@ -173,12 +173,15 @@ svg, dxf = paths["svg"], paths["dxf"]
 ```
 
 Pass `formats=` and read the `{format: path}` dict. Calling `export()` with no
-`formats` takes the legacy path and returns a `(svg, dxf)` tuple. That path is
-declared deprecated (v0.3.1) and slated for removal in 0.5.0 — but note it emits
-**no** `DeprecationWarning`, so nothing tells you at runtime that you are on it.
-See `docs/deprecations.md`.
+`formats` — or with the `svg=`/`dxf=` booleans — takes the legacy path and returns
+a `(svg, dxf)` tuple. Both are deprecated (v0.3.1) and removed in 0.5.0, and both
+warn from 0.4.0. See `docs/deprecations.md`.
 
-`make_drawing(...)` is exactly `build_drawing(...).export()`.
+`make_drawing(...)` is unaffected and does not warn: it still returns
+`(svg_path, dxf_path)`, and passes `formats=` internally to get them.
+
+`make_drawing(...)` is `build_drawing(...).export(formats=("svg", "dxf"))`, unpacked to a
+tuple — not a bare `.export()`, which is the deprecated shape above.
 
 **Section views** come from the section verb rather than from projecting a view by
 hand. The two entry points are *not* equivalent:

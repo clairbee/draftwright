@@ -756,8 +756,8 @@ def build_drawing(
 
     Same arguments as :func:`make_drawing`, but returns the live :class:`Drawing`
     so you can add or remove annotations and add section/auxiliary views before
-    calling :meth:`Drawing.export`. ``make_drawing(...)`` is exactly
-    ``build_drawing(...).export()``.
+    calling :meth:`Drawing.export`. ``make_drawing(...)`` is
+    ``build_drawing(...).export(formats=("svg", "dxf"))``, unpacked to a tuple.
 
     Args:
         auto_dims: pass ``False`` to skip the automatic dimensions,
@@ -937,11 +937,18 @@ def make_drawing(
     Returns:
         Tuple of ``(svg_path, dxf_path)`` for the generated files.
 
-    This is a thin wrapper: ``make_drawing(...)`` is ``build_drawing(...).export()``.
+    This is a thin wrapper: ``make_drawing(...)`` is
+    ``build_drawing(...).export(formats=("svg", "dxf"))``, unpacked to a tuple. Not a bare
+    ``.export()`` — that is the deprecated legacy shape and warns (#987).
     To add or remove annotations or add section/auxiliary views before export,
     call :func:`build_drawing` and use the returned :class:`Drawing`.
     """
-    svg_path, dxf_path = build_drawing(
+    # `formats=("svg", "dxf")` rather than a bare `.export()` (#987): the no-formats call is
+    # the deprecated legacy shape and now warns, and a warning raised from HERE would blame
+    # draftwright's own line for a call the caller never made — the #965 stacklevel lesson.
+    # This keeps make_drawing's documented `(svg_path, dxf_path)` return while leaving the
+    # legacy path with no internal callers, which is what lets it warn honestly.
+    _paths = build_drawing(
         step_file,
         out=out,
         title=title,
@@ -961,6 +968,6 @@ def make_drawing(
         frame=frame,
         projection=projection,
         zones=zones,
-    ).export()
-    assert svg_path is not None and dxf_path is not None  # export() writes both by default
-    return svg_path, dxf_path
+    ).export(formats=("svg", "dxf"))
+    assert isinstance(_paths, dict)  # formats=... always returns the {format: path} dict
+    return _paths["svg"], _paths["dxf"]
