@@ -211,6 +211,47 @@ class _IntentRouting:
     slot_pattern_ids: set
 
 
+#: Size scalars appended to a feature key when present, in this order. Position alone is not
+#: identity: two holes at ONE origin with different bores keyed the same, and that is exactly
+#: the coincident-dedup case where the ledger most needs to say which instance lost its
+#: location (Codex #996 r4). Rounded, so float noise from a rebuild does not change the key.
+_KEY_SCALARS = ("diameter", "depth", "width", "length", "radius")
+
+
+def feature_key(f) -> str | None:
+    """A stable, plain-data identity for a feature in the audit ledger (#996).
+
+    ``kind@(x,y,z)/axis`` plus whichever of :data:`_KEY_SCALARS` the feature carries. The type
+    name alone made two holes indistinguishable, so a diff of two builds could not say which
+    one lost a measurement, or whether a suppression had moved between instances (Codex r1).
+    Derived from the geometry, so it survives a rebuild that reorders the feature list — list
+    position would not.
+
+    **Its limit, stated rather than implied:** two features of one kind sharing an origin,
+    an axis *and* every scalar above are indistinguishable here. They are the same measurement
+    to the compiler, so nothing in the ledger could separate them — but a caller diffing builds
+    should know the key is a description, not a handle.
+    """
+    if f is None:
+        return None
+    kind = getattr(f, "kind", None) or type(f).__name__
+    frame = getattr(f, "frame", None)
+    if frame is None:
+        return kind
+    origin = getattr(frame, "origin", None)
+    axis = getattr(frame, "axis", "")
+    if origin is None:
+        return f"{kind}/{axis}" if axis else kind
+    x, y, z = (float(v) for v in (origin[0], origin[1], origin[2]))
+    sizes = [
+        f"{name}={float(v):.3f}"
+        for name in _KEY_SCALARS
+        if isinstance(v := getattr(f, name, None), (int, float))
+    ]
+    tail = ("[" + ",".join(sizes) + "]") if sizes else ""
+    return f"{kind}@({x:.3f},{y:.3f},{z:.3f})/{axis}{tail}"
+
+
 @dataclass
 class BuildState:
     """The build context a finished :class:`Drawing` carries (ADR 0005 §2 / #639).
@@ -242,6 +283,13 @@ class BuildState:
     ann_box_cache: dict = dataclasses_field(default_factory=dict)
     trace: Any = None
     detail_view: bool = False
+    #: The compiler's :class:`~draftwright.model.compiled.Omission` records — every
+    #: measurement it considered and did not approve, with the rule that stopped it (#996).
+    #: The compiled plan was a local in the orchestrator: built, read by the renderers, and
+    #: dropped. So the one place recording WHY a dimension is absent did not outlive the
+    #: build, and absence had to be inferred from a finished sheet — which is how a wrong
+    #: suppression rule produced four issue reports before anyone found the rule (#997).
+    omissions: tuple = ()
 
     def clear_geometry_caches(self) -> None:
         """The one invalidation seam (finalize rollback): view edges + annotation
@@ -557,6 +605,41 @@ class Drawing:
         """Attach the built PartModel so ``model()`` and feature edits see it. Lets the
         orchestrator hand the model back without an ``annotations/`` attribute write (#639)."""
         self._build.part_model = model
+
+    def suppressions(self) -> list[dict]:
+        """Every measurement the compiler considered and did not approve, and why.
+
+        The **audit read** (#996). A finished drawing shows what was drawn; this shows what
+        was *not*, separated into the two cases that mean opposite things:
+
+        - ``authored`` — the script's own omission, under ADR 0016's rule that an authored
+          set means omission is suppression. Recoverable by adding a ``dimension(...)`` line.
+        - otherwise — a **planner rule** decided it, and ``reason`` names which.
+
+        The second is the one worth auditing. A rule that fires where it should not produces
+        a drawing that is silently under-defined and lints clean, which is how #997's square
+        rule generated four separate issue reports without any of them naming the cause. An
+        absent dimension is only defensible if something can say which rule removed it; this
+        is that something.
+
+        Returns plain dicts so a harness, a script or an LLM can diff two builds without
+        importing IR types. ``feature`` is a **stable key**, not just the type name: a bare
+        ``"HoleFeature"`` made two holes indistinguishable, so a diff could not say *which*
+        one lost its location, or whether a suppression had moved between instances (Codex
+        #996 r1). The key is ``kind@(x,y,z)/axis``, which survives a rebuild because it is
+        derived from the geometry rather than from list position.
+        """
+
+        return [
+            {
+                "feature": feature_key(o.feature),
+                "parameter_id": o.parameter_id,
+                "value": o.value,
+                "reason": o.reason,
+                "authored": o.authored,
+            }
+            for o in self._build.omissions
+        ]
 
     @property
     def solve_trace(self):

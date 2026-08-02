@@ -798,12 +798,17 @@ def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[
     for pd in plan_locations(model):
         feature = pd.feature
         span = pd.param.span
-        assert span is not None  # plan_locations always sets the datum → ref span
         if pd.suppressed:
+            # Before the span assert, deliberately: a suppressed entry records WHY a position
+            # is absent and needs no geometry. When the model has no `datum_xy` there is no
+            # datum → ref span to build one from, so requiring it here turned that diagnostic
+            # into an AssertionError — a silent hole replaced by a crash, which is worse for
+            # the caller it was meant to help (#996).
             omissions.append(
                 Omission(feature, pd.param.parameter_id, None, pd.reason or "suppressed")
             )
             continue
+        assert span is not None  # an APPROVED location always carries its datum → ref span
         axis = feature.frame.axis if feature is not None else None
         if isinstance(feature, PocketFeature) and axis != "z":
             # A non-Z pocket's two in-plane coordinates are drawn as TWO dims in its end-on
@@ -1057,5 +1062,47 @@ def compile_dimensions(
         groups=tuple(groups_out),
         ladders=tuple(ladders),
         locations=tuple(locations),
-        diagnostics=tuple(omissions + height_omissions + location_omissions + group_omissions),
+        diagnostics=_dedupe_omissions(
+            omissions, height_omissions, location_omissions, group_omissions
+        ),
     )
+
+
+def _dedupe_omissions(*sources: list[Omission]) -> tuple[Omission, ...]:
+    """Drop only the omissions two DIFFERENT compilers reported about one fact.
+
+    An authored set records the overall height twice — `_compile_overall_height`'s bespoke
+    branch and the general group traversal both notice it, since the envelope's `height`
+    parameter is in its group too. That duplication makes a consumer over-count suppressions
+    and a build-diff show churn that did not happen.
+
+    But a repetition *within* one source is not a duplicate. `_compile_off_axis_hole_locations`
+    deliberately emits one omission per member, and every member of a grouped hole shares the
+    same `HoleFeature` — so a naive key of (feature, parameter, reason) collapses four real
+    member facts into one and silently loses positions. Losing a real row is worse than the
+    duplicate it was meant to fix (Codex #996 r6).
+
+    Hence: cross-source only. Each source keeps its own repetitions; a key already seen in an
+    EARLIER source is dropped from a later one.
+    """
+
+    def key(o: Omission) -> tuple[int, str, object, str]:
+        # `value` is in the key deliberately. Two sources reporting one parameter with
+        # DIFFERENT values are not one fact reported twice — they are two compilers
+        # disagreeing, and an audit should surface that rather than silently keep whichever
+        # source happens to run first.
+        #
+        # ROUNDED, because these values carry real float jitter: an X-turned envelope reports
+        # its height as 20.000000000000007 by one route and 20.0 by another. Keying on the raw
+        # float would split a genuine duplicate back into two rows on noise, re-creating the
+        # over-reporting this function exists to remove. A disagreement that matters differs by
+        # far more than a micron.
+        v = round(o.value, 6) if isinstance(o.value, float) else o.value
+        return (id(o.feature), o.parameter_id, v, o.reason)
+
+    seen: set[tuple[int, str, object, str]] = set()
+    out: list[Omission] = []
+    for source in sources:
+        out += [o for o in source if key(o) not in seen]
+        seen |= {key(o) for o in source}
+    return tuple(out)

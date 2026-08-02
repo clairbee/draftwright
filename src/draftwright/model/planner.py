@@ -423,7 +423,30 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     """
     datum = next((d for d in model.datums if d.id == "datum_xy"), None)
     if datum is None:
-        return []
+        # No datum to measure from — but every otherwise-eligible feature still HAD a location
+        # to lose, so say so rather than returning nothing (#996, Codex r3).
+        #
+        # This bare `return []` broke the same guarantee as the edge-anchored pocket:
+        # `_check_authored_targets` accepts `dimension(hole, "location")` on feature
+        # eligibility alone, so an author could name a position, pass validation, and get
+        # neither the dimension nor a word about why. It bites a caller-supplied `PartModel`
+        # (ADR 0011), which `build_drawing` preserves verbatim — datums included, or not.
+        #
+        # Deliberately NOT fixed by defaulting a datum into model coercion: that would hide
+        # malformed compiler input behind a plausible drawing instead of reporting it.
+        return [
+            PlannedDimension(
+                param=DimParameter(kind="location", role=role, value=0.0, span=None, refs=()),
+                convention="location",
+                suppressed=True,
+                reason="no datum_xy in the model to measure the position from",
+                datum=None,
+                feature=f,
+            )
+            for f in model.features
+            for role in (location_role(f),)
+            if role is not None and location_datum(f) == "datum_xy"
+        ]
     dx, dy, dz = datum.at
     # (ref_point, role): role distinguishes a hole ref from a pattern ref — the
     # renderer's concentric-bore exclusion applies to holes only (a bolt circle on
@@ -431,6 +454,10 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     # (ref_point, role, source feature): the feature is carried so the renderer can
     # record provenance on the placed location dim (ADR 0010).
     refs: list[tuple[Point, str, Feature]] = []
+    # Features whose location a RULE declined before a reference point existed. They have no
+    # ref to plan from, so they cannot go through `refs`, but they were considered — and an
+    # audit that cannot see them reads their absence as "nothing was suppressed" (#996).
+    dropped: list[tuple[Feature, str, str]] = []
     for f in model.features:
         # Which features get a `datum_xy` position — including the orientation rule (the
         # hole/pattern/pad ladder is Z-normal; a pocket's two in-plane coordinates belong
@@ -450,8 +477,19 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
             elif f.members:
                 near = min(f.members, key=lambda m: (m[0] - dx) ** 2 + (m[1] - dy) ** 2)
                 refs.append((near, role, f))
+            else:
+                # A non-bolt-circle pattern with no members has no point to locate FROM.
+                # Recorded rather than skipped (#996): this feature passed the eligibility
+                # check two lines up, so its location was considered and then dropped.
+                dropped.append((f, role, "pattern has no members to locate from"))
         elif isinstance(f, PocketFeature):
             if f.edge_anchored:
+                # The pocket's position is conveyed by the edge it is anchored to, so no
+                # datum location is planned. A RULE decision, and it used to `continue`
+                # silently — so an authored `dimension(pocket, "location")` that
+                # `_check_authored_targets` had ACCEPTED produced nothing at all, with no
+                # diagnostic to say why (Codex #996 r2).
+                dropped.append((f, role, "edge-anchored; the edge conveys the position"))
                 continue
             # A recognised pocket frame may be anchored at an opening corner;
             # location furniture defines the in-plane centre, which is expressed
@@ -491,8 +529,35 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
         refs = kept
     unique: list[tuple[Point, str, Feature]] = []
     for r, role, feat in refs:
-        if not any(abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5 for u, _, _ in unique):
+        clash = next(
+            (u for u, _, _ in unique if abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5),
+            None,
+        )
+        if clash is None:
             unique.append((r, role, feat))
+        else:
+            # Record the rejection instead of dropping it silently (#996). This is a RULE
+            # deciding a measurement is redundant — the same category as the suppressions
+            # above — but it used to filter before the compiler saw the candidate, so no
+            # `Omission` existed and the audit could not see it. An audit that claims
+            # completeness while a suppression path is invisible is worse than none, because
+            # its silence reads as "nothing was suppressed" (Codex #996 r1).
+            omitted.append(
+                _plan(
+                    r,
+                    role,
+                    feat,
+                    suppressed=True,
+                    reason=(
+                        f"coincident with a location already dimensioned at "
+                        f"({clash[0]:.3f}, {clash[1]:.3f})"
+                    ),
+                )
+            )
+    omitted += [
+        _plan(feat.frame.origin, role, feat, suppressed=True, reason=why)
+        for feat, role, why in dropped
+    ]
     return [_plan(r, role, feat) for r, role, feat in unique] + omitted
 
 
