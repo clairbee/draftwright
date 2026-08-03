@@ -17,7 +17,10 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+if TYPE_CHECKING:
+    from draftwright.recognition import RecognitionResult
 
 # PEP 702 @deprecated. A `sys.version_info` guard (not try/except) so the type checker,
 # which targets the 3.10 floor, resolves the backport branch instead of `warnings.deprecated`
@@ -261,6 +264,7 @@ class BuildState:
     - ``analysis`` — the pipeline's :class:`Analysis` namespace.
     - ``part_model`` — the detected/declared ADR-0008 PartModel (read surface for
       semantic edits, #397).
+    - ``recognition`` — the ADR 0017 aggregate reused by model detection and critique.
     - ``view_edge_cache`` — lint's per-view edge bboxes, keyed on id(view shape)
       (helpers #143/#164).
     - ``ann_box_cache`` — lint's annotation bounding boxes (#602): identity- AND
@@ -278,6 +282,7 @@ class BuildState:
     """
 
     analysis: Analysis | None = None
+    recognition: RecognitionResult | None = None
     part_model: object | None = None
     view_edge_cache: dict = dataclasses_field(default_factory=dict)
     ann_box_cache: dict = dataclasses_field(default_factory=dict)
@@ -565,6 +570,16 @@ class Drawing:
         ones. ``None`` only on a bare, unbuilt ``Drawing``.
         """
         return self._part_model
+
+    def recognition(self) -> RecognitionResult | None:
+        """The ADR 0017 recognition inventory used to build this drawing.
+
+        This is the geometry-only evidence below the detected/declared :meth:`model` and
+        drafting policy.  It is an experimental, read-only result; ``None`` is possible only
+        for a bare ``Drawing`` that did not pass through :func:`build_drawing`.
+        """
+
+        return self._build.recognition
 
     # --- build-context compat properties (#639): one BuildState, thin views.
     # _part_model and the two caches are GETTER-ONLY by design (#691 review):
