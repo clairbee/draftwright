@@ -319,6 +319,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
                         tier,
                         ctx=ctx,
                         features={cname: s},
+                        measurements={cname: approved.id},  # #1002
                         trace=ctx.trace,
                         trace_label=f"slot_{side}",
                     ):
@@ -362,6 +363,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
                         tier,
                         ctx=ctx,
                         features={cname: _feat},
+                        measurements={cname: approved.id},  # #1002
                         trace=ctx.trace,
                         trace_label=f"slot_{_fsd}_fallthrough",
                     ):
@@ -397,6 +399,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
                     ),
                     on_place=lambda nm: None,
                     on_drop=_far_or_drop,
+                    measurement=approved.id,  # #1002
                     dedup=(
                         (vw[0], round(meas_proj(raw_lo), 1), round(meas_proj(raw_hi), 1))
                         if is_pos
@@ -509,6 +512,7 @@ def _location_candidate(
     distance,
     build,
     feature=None,
+    measurement=None,
     pinned=False,
     footprint=None,
 ):
@@ -543,6 +547,7 @@ def _location_candidate(
         priority=PRIORITY.MANDATORY if pinned else PRIORITY.AUTO,
         force=True,
         feature=feature,  # provenance (ADR 0010): the located hole/pattern
+        measurement=measurement,  # which of its measurements this is (#1002)
         footprint=footprint,  # analytical measure — no probe build (#602)
     )
 
@@ -594,7 +599,10 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
             continue
         # Provenance (ADR 0010): the located feature. `resolve_feature` is the sanctioned
         # seam for exactly this — the corridor's feature map keys drop()/annotations_of().
-        refs.append((rx, ry, resolve_feature(loc.ref)))
+        # `loc.id` rides along as the measurement identity (#1002): the compiler already
+        # minted it for this very entry, so the renderer records WHICH measurement it drew
+        # rather than leaving the audit to infer it from the annotation's name.
+        refs.append((rx, ry, resolve_feature(loc.ref), loc.id))
     if not refs:
         return 0
     pinned_set = set(pinned or ())
@@ -621,9 +629,15 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         for u in x_refs:
             if abs(r[0] - u[0]) < 0.5:
                 u[3] = u[3] or r[2] in pinned_set
+                # Collapsing coincident Xs into one dim must ACCUMULATE what it draws
+                # (#1002 r4): the survivor genuinely measures every collapsed feature's X.
+                if r[3] is not None and r[3] not in u[4]:
+                    u[4].append(r[3])
                 break
         else:
-            x_refs.append([r[0], r[1], r[2], r[2] in pinned_set])
+            x_refs.append(
+                [r[0], r[1], r[2], r[2] in pinned_set, [r[3]] if r[3] is not None else []]
+            )
     _x_drawable = {r[0] for r in x_refs if abs(r[0] - datum_x) * a.SCALE >= 1.0}
     _kept_x, _n_x_close = _legible_locations(_x_drawable, a.SCALE)
     if _n_x_close:
@@ -642,14 +656,25 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     # pass carving around the other and interleaving. No alternate view for a plan-X
     # location, so a corridor-blocked dim is force-kept (policy B), not relocated; only a
     # physically full strip drops (→ location_ref_dropped, escalates the hole table).
-    for i, (rx, ry, feat, pin_ref) in enumerate(sorted(x_refs, key=lambda r: abs(r[0] - datum_x))):
+    for i, (rx, ry, feat, pin_ref, mids) in enumerate(
+        sorted(x_refs, key=lambda r: abs(r[0] - datum_x))
+    ):
         if abs(rx - datum_x) * a.SCALE < 1.0:
             continue  # on the datum edge — nothing to dimension
         n += 1
         # A single X-location dim shared by two *distinct* features at this X belongs to
         # neither exclusively — leave it unowned so drop() cannot over-strip a sibling's
         # dimension and annotations_of never over-claims it (review #406, ADR 0010).
-        _xfeat = None if any(abs(o[0] - rx) < 0.5 and o[2] != feat for o in refs) else feat
+        _shared_x = any(abs(o[0] - rx) < 0.5 and o[2] != feat for o in refs)
+        _xfeat = None if _shared_x else feat
+        # The measurement does NOT follow the feature (#1002 r4). Feature-unowned is an
+        # ADR 0010 *ownership* rule — it stops drop(feature) stripping a sibling's dim. It
+        # says nothing about what the dim measures, and a shared dim measures BOTH features'
+        # X location. The first cut dropped the id here as though naming one feature were the
+        # only option; recording all of them is both true and exactly what the tuple-valued
+        # channel exists for (ADR 0016 / #886). Discarding it made the audit blind on an
+        # ordinary dedup path.
+        _xmid = tuple(mids)
         register_corridor(
             ctx,
             ("plan", "above"),
@@ -673,6 +698,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                     label=_fmt(_rx - datum_x),
                 ),
                 feature=_xfeat,
+                measurement=_xmid,
                 pinned=pin_ref,
                 footprint=lambda pos, _rx=rx, _ry=ry: dim_footprint(
                     (PX(datum_x), PY(_ry), 0),
@@ -694,9 +720,13 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         for u in y_refs:
             if abs(r[1] - u[1]) < 0.5:
                 u[3] = u[3] or r[2] in pinned_set
+                if r[3] is not None and r[3] not in u[4]:
+                    u[4].append(r[3])  # accumulate, as in the X loop (#1002 r4)
                 break
         else:
-            y_refs.append([r[0], r[1], r[2], r[2] in pinned_set])
+            y_refs.append(
+                [r[0], r[1], r[2], r[2] in pinned_set, [r[3]] if r[3] is not None else []]
+            )
     _y_drawable = {r[1] for r in y_refs if abs(r[1] - datum_y) * a.SCALE >= 1.0}
     _kept_y, _n_y_close = _legible_locations(_y_drawable, a.SCALE)
     if _n_y_close:
@@ -712,14 +742,18 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     # Cap the side-above strip below the iso view so Y-location dims never run under it
     # (the carve respects outer_limit); the dim_pitch_side dims are obstacles the carve
     # avoids structurally, retiring the old manual allocate(10.0) reservation + cursor.
-    if y_refs and any(SX(ry) + 10 > iso_x0 - 4 for _, ry, _feat, _pin in y_refs):
+    if y_refs and any(SX(ry) + 10 > iso_x0 - 4 for _, ry, _feat, _pin, _mids in y_refs):
         a.sv_zones.above.outer_limit = min(a.sv_zones.above.outer_limit, iso_y0 - 4)
-    for i, (rx, ry, feat, pin_ref) in enumerate(sorted(y_refs, key=lambda r: abs(r[1] - datum_y))):
+    for i, (rx, ry, feat, pin_ref, mids) in enumerate(
+        sorted(y_refs, key=lambda r: abs(r[1] - datum_y))
+    ):
         if abs(ry - datum_y) * a.SCALE < 1.0:
             continue
         n += 1
         # Shared-Y location dim → unowned (see the X loop; review #406).
-        _yfeat = None if any(abs(o[1] - ry) < 0.5 and o[2] != feat for o in refs) else feat
+        _shared_y = any(abs(o[1] - ry) < 0.5 and o[2] != feat for o in refs)
+        _yfeat = None if _shared_y else feat
+        _ymid = tuple(mids)  # every collapsed feature's Y — see the X loop (#1002 r4)
         register_corridor(
             ctx,
             ("side", "above"),
@@ -743,6 +777,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                     label=_fmt(_ry - datum_y),
                 ),
                 feature=_yfeat,
+                measurement=_ymid,
                 pinned=pin_ref,
                 footprint=lambda pos, _ry=ry: dim_footprint(
                     (SX(datum_y), SZ(a.bb.max.Z), 0),
@@ -1199,7 +1234,13 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
                 if thr:
                     label += f" {thr}"
                 name = f"m_dia_y{start_y + i}"
-                jobs.append((name, "front", vb, label, candidates))
+                # One ø callout stands for every step sharing this diameter, so it draws
+                # each of their diameter dims (#1002). Empty when a group planned none —
+                # recorded as unknown, which is the honest answer, not a guessed id.
+                mids = tuple(
+                    pd.id for gp in feature_groups for pd in gp.dims if pd.kind == "diameter"
+                )
+                jobs.append((name, "front", vb, label, candidates, mids))
                 covered_by_name[name] = dia
             placed += _leader_callout_pass(
                 dwg,
@@ -1308,7 +1349,7 @@ def _reroute_crossing_diameters(dwg, *, ctx) -> int:
             _pt(tip[ax], fb[rad] - gap),
             _pt(tip[ax], fb[rad + 2] + gap),
         )
-        feat = dwg.registry.feature_of(name)
+        ident = dwg.registry.identity_of(name)  # every axis, as a unit (#1002)
         old = dwg.remove(name)  # remove first so obstacles exclude the leader being replaced
         placed_it = False
         try:
@@ -1328,14 +1369,16 @@ def _reroute_crossing_diameters(dwg, *, ctx) -> int:
                 box = _anno_box(cand)
                 if box is None or not _within_page(box) or _box_hits(box, obstacles):
                     continue
-                ctx.place(cand, name, view="front", feature=feat)
+                ctx.place(cand, name, view="front")
+                dwg.registry.reapply(name, ident)  # the re-routed leader draws the same thing
                 rerouted += 1
                 placed_it = True
                 break
         except Exception:  # noqa: BLE001 — a re-route error must never lose the leader
             placed_it = False
         if not placed_it and dwg.get_annotation(name) is None:
-            ctx.place(old, name, view="front", feature=feat)  # restore (Phase-1 flags it)
+            ctx.place(old, name, view="front")  # restore (Phase-1 flags it)
+            dwg.registry.reapply(name, ident)
     return rerouted
 
 
@@ -1416,8 +1459,12 @@ def _corner_candidates(dwg, view, vb, members, reach, *, provenances=None):
 
 def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False) -> int:
     """Place one machined-feature leader callout per job (#637). A *job* is
-    ``(name, view, vb, label, candidates)`` where *candidates* yields ``(tip, elbow,
-    feature)`` lead positions to try in order. Places the first Leader whose label lands clear
+    ``(name, view, vb, label, candidates, measurement)`` where *candidates* yields ``(tip,
+    elbow, feature)`` lead positions to try in order and *measurement* is the tuple of
+    `DimensionId`s the callout's label draws — several, because these callouts are compound:
+    a pocket prints width × length × depth, a groove width × ⌀ (#1002 r3, which found the
+    whole machined-feature group recording nothing at all).
+    Places the first Leader whose label lands clear
     (:func:`_label_lands_clear`, with *geom_clear* passed through), attributed to that
     candidate's feature; if none of a job's candidates land, records ``<noun> callout … not
     placed`` as ``<drop_code>`` lint (never a silent drop). Obstacles are recomputed per job
@@ -1432,7 +1479,7 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     ev = trace.pass_event(f"{noun}_callouts") if trace is not None and jobs else None
     page = (a.margin, a.margin, a.PAGE_W - a.margin, a.PAGE_H - a.margin)
     n = 0
-    for name, view, vb, label, candidates in jobs:
+    for name, view, vb, label, candidates, measurement in jobs:
         obstacles = strip_obstacles(dwg, view=view, crossable=CROSSABLE_TYPES)
         tried = 0
         for tip, elbow, feature in candidates:
@@ -1441,8 +1488,15 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
             if _label_lands_clear(ldr, obstacles, vb, page, geom_clear=geom_clear):
                 # Compiled renderers carry opaque FeatureRefs so they cannot recover
                 # measurements from the source feature. Provenance is the one seam
-                # where the registry intentionally needs the source object itself.
-                ctx.place(ldr, name, view=view, feature=resolve_feature(feature))
+                # where the registry intentionally needs the source object itself —
+                # the measurements come down the job, from the planner (#1002).
+                ctx.place(
+                    ldr,
+                    name,
+                    view=view,
+                    feature=resolve_feature(feature),
+                    measurement=measurement,
+                )
                 if ev is not None:
                     ev["items"].append(
                         {
@@ -1522,6 +1576,7 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
                 vb,
                 _chamfer_label(pd.value_text, pd.value, ch) + _tol_suffix(pd.tolerance, draft),
                 _corner_candidates(dwg, view, vb, [ch], reach, provenances=[g.ref]),
+                (pd.id,),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="chamfer", drop_code="chamfer_dropped", ctx=ctx)
@@ -1598,6 +1653,9 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                     reach,
                     provenances=[g.ref for g, _ in ordered],
                 ),
+                # One `n× R` callout stands for EVERY collapsed member, so it draws all of
+                # their radii — the tuple storage exists for exactly this (#1002).
+                tuple(pd.id for _, pd in ordered),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
@@ -1668,6 +1726,7 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
                     reach,
                     provenances=[g.ref for g, _ in ordered],
                 ),
+                tuple(pd.id for _, pd in ordered),  # the grouped callout draws every member
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
@@ -1845,6 +1904,7 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
                     dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
                 _radial_candidates(dwg, view, vb, pk, reach, provenance=g.ref),
+                (wpd.id, lpd.id, dpd.id),  # width × length × depth, one callout (#1002)
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="pocket", drop_code="pocket_dropped", ctx=ctx)
@@ -1901,6 +1961,7 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
                     dsfx=_tol_suffix(dpd.tolerance, draft),
                 ),
                 _radial_candidates(dwg, view, vb, gr, reach, provenance=g.ref),
+                (wpd.id, dpd.id),  # one callout, two measurements (#1002)
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="groove", drop_code="groove_dropped", ctx=ctx)
@@ -1964,6 +2025,7 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
                 _radial_candidates(
                     dwg, view, vb, b, reach, rim=dia / 2 * a.SCALE, provenance=g.ref
                 ),
+                (dpd.id,),
             )
         )
     return _leader_callout_pass(
@@ -2026,6 +2088,7 @@ def render_boss_heights(dwg, plan, a, *, ctx) -> int:
                 on_drop=lambda _nm: None,
                 force=True,
                 feature=g.ref,
+                measurement=pd.id,
                 footprint=footprint,
             ),
         )
@@ -2149,12 +2212,17 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
         def _foot(pos, pa=pa, pb=pb, side=side, edge=edge, lbl=lbl):
             return dim_footprint(pa, pb, side, pos - edge, draft, lbl)
 
-        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=g.ref):  # noqa: B008
+        def _drop(nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=g.ref, mid=pd.id):  # noqa: B008
             # Opposite-strip fallthrough (mirrors the GD&T #481 pattern), DEFERRED to
             # ctx.post_drain so it runs after EVERY corridor has drained (#684 review):
             # a mid-drain carve could occupy a corner a later sibling's force candidate
             # needs; post-drain, carve_free_position sees all placed annotations.
-            def _retry(nm=nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=feat):
+            # `mid` is bound as a DEFAULT like every sibling here: `pd` is the enclosing
+            # loop's variable and these retries run post-drain, so reading it live would
+            # record the LAST plate's identity on every one of them (#1002).
+            def _retry(
+                nm=nm, val=val, lbl=lbl, view=view, stack=stack, alt=alt, feat=feat, mid=mid
+            ):
                 for view2, side2, strip2, axis2, qa, qb, edge2 in alt or ():
                     if strip2 is None:
                         continue
@@ -2180,7 +2248,7 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
                             or real[3] > page[3]
                         ):
                             continue
-                        ctx.place(dim, nm, view=view2, feature=feat)
+                        ctx.place(dim, nm, view=view2, feature=feat, measurement=mid)
                         return
                 ctx.record_issue(
                     "warning",
@@ -2214,6 +2282,7 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
                 on_drop=_drop,
                 force=True,
                 feature=g.ref,  # opaque provenance handle
+                measurement=pd.id,  # #1002
                 footprint=_foot,  # analytical measure — no probe build (#602)
             ),
         )
@@ -2236,7 +2305,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         return 0
     n = 0
 
-    def _queue(name, strip, view, tier, distance, build, footprint=None):
+    def _queue(name, strip, view, tier, distance, build, footprint=None, measurement=None):
         register_corridor(
             ctx,
             (view, "below"),
@@ -2252,6 +2321,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
                 on_drop=lambda _nm: None,
                 priority=_MANDATORY_OVERALL_PRIORITY,
                 force=True,
+                measurement=measurement,  # which envelope extent this is (#1002)
                 footprint=footprint,  # analytical measure — no probe build (#602)
             ),
         )
@@ -2278,6 +2348,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value_text: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
             ),
+            measurement=width.id,
         )
         n += 1
     depth = env.dim(role="depth")
@@ -2302,6 +2373,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value_text: dim_footprint(
                 (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
             ),
+            measurement=depth.id,
         )
         n += 1
     return n
@@ -2902,7 +2974,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     has_shoulders = plan.ladder("step_position") is not None
     short_rungs: list = []
 
-    # The chain, inner→outer: (name, page-z top, label, tier size, drop message).
+    # The chain, inner→outer: (name, page-z span, label, tier size, drop message, dim id).
     chain: list = []
     if rung_set is not None and rung_set.representative:
         (rep,) = rungs
@@ -2913,6 +2985,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 rep.final_label,
                 _SLOT_DIM_STEP,
                 "representative step-height dimension dropped (front-view right strip full)",
+                rep.id,
             )
         )
     elif rungs:
@@ -2956,6 +3029,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                     rung.final_label,
                     _SLOT_DIM_STEP,
                     "step-height dimension dropped (front-view right strip full)",
+                    rung.id,
                 )
             )
 
@@ -2969,12 +3043,13 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 height.final_label,
                 _SLOT_DIM_HEIGHT,
                 "overall height dimension dropped (front-view right strip full)",
+                height.id,
             )
         )
 
     names = [c[0] for c in chain]
     solved: dict[str, float] = {}
-    for k, (name, zbase, ztop, label, _tsize, drop_msg) in enumerate(chain):
+    for k, (name, zbase, ztop, label, _tsize, drop_msg, mid) in enumerate(chain):
 
         def _build(pos, name=name, zbase=zbase, ztop=ztop, label=label, k=k):
             base = edge2
@@ -3032,6 +3107,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 # than tying with them at 0 and losing on the generated key (#894).
                 priority=_PRINCIPAL_CHAIN_PRIORITY,
                 feature=step if name != "dim_height" else None,
+                measurement=mid,  # the rung's own compiled id (#1002)
                 footprint=_foot,
             ),
         )
@@ -3079,6 +3155,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 on_drop=_drop_left,
                 force=True,
                 feature=step,
+                measurement=rung.id,  # #1002
                 footprint=lambda pos, zbase=zbase, ztop=ztop, label=label: dim_footprint(
                     (left_edge, zbase, 0),
                     (left_edge, ztop, 0),
@@ -3201,6 +3278,7 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
                 force=True,
                 # The opaque provenance handle, passed straight through.
                 feature=ladder.ref,
+                measurement=rung.id,  # #1002
             ),
         )
         n += 1

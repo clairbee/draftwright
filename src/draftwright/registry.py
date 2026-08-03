@@ -30,6 +30,21 @@ draftwright and carries no behaviour beyond the bookkeeping moved out of
 from __future__ import annotations
 
 
+def _as_ids(measurement) -> tuple:
+    """Normalise a caller's *measurement* to a tuple of ids (#1002).
+
+    Renderers that draw exactly one measurement pass the bare `DimensionId` they already
+    hold; a compound renderer passes a sequence. Accepting both keeps the common call site
+    honest — ``measurement=pd.id`` — without the storage pretending the relationship is
+    one-to-one, which ADR 0016 says it is not.
+    """
+    if measurement is None:
+        return ()
+    if isinstance(measurement, (list, tuple)):
+        return tuple(m for m in measurement if m is not None)
+    return (measurement,)
+
+
 class AnnotationRegistry:
     """Single owner of annotation identity, ownership, pins, and build issues."""
 
@@ -42,6 +57,21 @@ class AnnotationRegistry:
         # so a repack/repair preserves provenance. Absent for part-level marks (title
         # block, section arrows) that belong to no single feature.
         self._anno_feature: dict = {}
+        # name -> the `DimensionId`s this annotation draws, as a TUPLE (#1002). One axis
+        # finer than _anno_feature, and the distinction is the point: a hole has a
+        # diameter, a depth and two locations, so knowing the FEATURE still does not say
+        # WHICH of its measurements an annotation is. Same `(feature, parameter)` key the
+        # compiler mints for the compiled plan and `Drawing.suppressions()` reports, so an
+        # annotation and a suppression become comparable without matching on names.
+        #
+        # A TUPLE rather than one id, from the start, because the relationship really is
+        # one-to-many: a compound hole callout renders bore diameter, depth, counterbore
+        # diameter and depth as ONE annotation, each independently suppressible. ADR 0016
+        # states this outright — the channel "has to become `name → tuple[DimensionId,
+        # ...]` before per-dimension resolution is possible at all" (#886). Storing one id
+        # would have to be widened again later, and worse, would make the audit's
+        # "exact when present" promise false for a callout's other measurements.
+        self._anno_measurement: dict = {}
         self._pinned: set = set()
         self._build_issues: list = []
 
@@ -70,6 +100,17 @@ class AnnotationRegistry:
     def feature_of(self, name):
         """The source IR feature *name* was rendered for, or ``None`` (#398)."""
         return self._anno_feature.get(name)
+
+    def measurement_of(self, name) -> tuple:
+        """The `DimensionId`s *name* draws, as a tuple — possibly empty (#1002).
+
+        Empty means *unknown*, never *measures nothing*: identity is threaded from the
+        renderers that hold an `ApprovedDimension`, and the rest answer empty. Which
+        renderers those are is enumerated and enforced by the ratchet in
+        `tests/test_audit_differential.py` rather than described here — the prose version of
+        that set was wrong when first written (Codex #1002 r1)."""
+        ids: tuple = self._anno_measurement.get(name, ())
+        return ids
 
     def names_for_feature(self, feature) -> list:
         """Every annotation name owned by *feature* (matched by value equality, so a
@@ -105,6 +146,7 @@ class AnnotationRegistry:
             "named": dict(self._named),
             "anno_view": dict(self._anno_view),
             "anno_feature": dict(self._anno_feature),
+            "anno_measurement": dict(self._anno_measurement),
             "pinned": set(self._pinned),
         }
 
@@ -116,10 +158,65 @@ class AnnotationRegistry:
         self._anno_view.update(snap["anno_view"])
         self._anno_feature.clear()
         self._anno_feature.update(snap.get("anno_feature", {}))
+        self._anno_measurement.clear()
+        self._anno_measurement.update(snap.get("anno_measurement", {}))
         self._pinned.clear()
         self._pinned.update(snap["pinned"])
 
-    def add(self, obj, name, view, feature=None):
+    def identity_of(self, name) -> dict:
+        """Every per-name identity axis bound to *name*, as one opaque restorable value.
+
+        A remove-then-re-add transaction (the callout re-route, the hole-table fallback, the
+        detail-view retry) has to put back everything the name carried. All three sites
+        hand-rolled that axis by axis, and every axis added since broke the sites nobody
+        updated: the hole-table fallback still restored view alone, losing the feature added
+        in #398; the detail-view retry carried view/feature/pin but not the measurement added
+        here (Codex #1002 r2). Reading and reapplying the axes as a UNIT, in the class that
+        owns them, is the only version of this a *fourth* axis cannot silently break.
+
+        The keys mirror the ``_anno_*`` map names on purpose — that is what lets
+        ``test_registry`` compare the two mechanically and fail when an axis is added without
+        being covered here.
+        """
+        return {
+            "view": self._anno_view.get(name),
+            "feature": self._anno_feature.get(name),
+            "measurement": self._anno_measurement.get(name, ()),
+            "pinned": name in self._pinned,
+        }
+
+    def reapply(self, name, identity) -> None:
+        """Rebind *identity* (from :meth:`identity_of`) to *name* — the write half.
+
+        Authoritative, not additive: an axis absent from *identity* is CLEARED, so a restore
+        can never leave *name* wearing metadata from whatever briefly held the slot.
+
+        Restores the pin too. :meth:`add` deliberately drops it, because a same-name add is a
+        fresh object that has not earned the user's pin (#89) — but a restore puts the SAME
+        object back, and dropping the user's ADR 0012 pin because an engine-internal fallback
+        round-tripped it is a bug. The detail-view retry already re-pinned by hand; this makes
+        the other two agree.
+        """
+        view, feature = identity.get("view"), identity.get("feature")
+        if view is not None:
+            self._anno_view[name] = view
+        else:
+            self._anno_view.pop(name, None)
+        if feature is not None:
+            self._anno_feature[name] = feature
+        else:
+            self._anno_feature.pop(name, None)
+        ids = _as_ids(identity.get("measurement"))
+        if ids:
+            self._anno_measurement[name] = ids
+        else:
+            self._anno_measurement.pop(name, None)
+        if identity.get("pinned"):
+            self._pinned.add(name)
+        else:
+            self._pinned.discard(name)
+
+    def add(self, obj, name, view, feature=None, measurement=None):
         """Register *obj* under *name* and record its owning *view* (and source *feature*).
 
         Returns the object previously registered under *name* (so the caller can
@@ -144,6 +241,15 @@ class AnnotationRegistry:
                 self._anno_feature[name] = feature
             else:
                 self._anno_feature.pop(name, None)
+            # Same rule again, and it matters MORE here (#1002): a stale measurement id is
+            # worse than none, because the audit trusts it as exact. A replacement under
+            # this name draws whatever the new caller says it draws — including nothing
+            # identifiable, which must clear the old ids rather than inherit them.
+            ids = _as_ids(measurement)
+            if ids:
+                self._anno_measurement[name] = ids
+            else:
+                self._anno_measurement.pop(name, None)
         return displaced
 
     def remove(self, name):
@@ -153,6 +259,7 @@ class AnnotationRegistry:
             self._pinned.discard(name)  # a removed name carries no pin (#89)
             self._anno_view.pop(name, None)
             self._anno_feature.pop(name, None)
+            self._anno_measurement.pop(name, None)
         return obj
 
     def clear(self, keep) -> dict:
@@ -164,6 +271,7 @@ class AnnotationRegistry:
         self._pinned &= keep_set  # drop pins for cleared names (#89)
         self._anno_view = {n: v for n, v in self._anno_view.items() if n in keep_set}
         self._anno_feature = {n: f for n, f in self._anno_feature.items() if n in keep_set}
+        self._anno_measurement = {n: m for n, m in self._anno_measurement.items() if n in keep_set}
         return kept_named
 
     # -- pins -----------------------------------------------------------------

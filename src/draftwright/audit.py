@@ -12,21 +12,44 @@ actually found: not from the four issue reports describing its symptoms, but fro
 
 ## What this cannot do, stated first
 
-A placed annotation carries **no measurement identity** — its name is an engine-assigned
-registry slot, not a handle on what it measures. Three consequences, all real:
+A placed annotation carries measurement identity only where the renderer recorded one
+(#1002) — otherwise its name is an engine-assigned registry slot, not a handle on what it
+measures. **Identity is partial, and every limit below is a consequence of where it is
+missing.** Which renderers record it is not described here in prose, because a prose
+description of that set has now been wrong TWICE: first it named only the direct-placing
+group while four compiled-plan renderers dropped their ids (Codex r1), then it listed a
+four-item exception set while the entire shared machined-feature renderer — chamfers,
+fillets, flats, pockets, grooves, boss diameters — recorded nothing (Codex r3). The prose
+was believable both times, which is the point.
 
-- **A replaced measurement can hide completely.** Move a hole and `m_locx0` goes from `70` to
-  `90`: a different measurement reused the slot, and this reports it as a *change*. Worse, if
-  the replacement happens to render the same label, **every result map is empty** — the
-  substitution is wholly invisible. So a clean diff does **not** establish that the
-  measurements were preserved; it establishes only that nothing observable at this resolution
-  moved (Codex #1001).
-- **A loss cannot be attributed to a suppression with confidence.** Feature provenance is
-  PARTIAL, not absent: ``registry.feature_of(name)`` returns the owning feature for a hole
-  callout, centre mark or location, and ``None`` for an envelope dim (measured). And even a
-  known feature does not identify *which* of its measurements an annotation is. So a candidate
-  explanation is a *hint*, never a verdict — though tightening it to feature identity where
-  provenance exists is a real improvement available today (#1002).
+The answer lives in `tests/test_audit_differential.py`, whose ratchet scans both placement
+paths (corridor candidates and direct `ctx.place`) across the whole `annotations/` package,
+and whose EXEMPT map IS the exception inventory — every entry carrying its reason, and a
+stale entry failing so the list cannot outlive the gaps it describes. Read that, not this
+paragraph. At the time of writing the gaps are hole callouts (legacy surface, #926), PMI
+(from STEP, never compiled), GD&T frames (not measurements), the direct-placing rotational
+group (#754), the turned step-length chain (#1004) and the pattern pitch/side-hole
+placers (#1005).
+
+Even where identity IS recorded, matching it across two builds is approximate. The ledger's
+key embeds the feature's origin and scalars, so it cannot join two builds that differ — the
+join uses `_correspondence` instead, which keeps the feature's KIND and drops its
+coordinates. Two features of one kind are therefore not separated: a same-count swap of one
+slot's width for another's is invisible (**#1006**). Multiplicity IS compared — as a multiset,
+so a grouped callout dropping a member is caught — but a like-for-like exchange is not.
+
+- **A replaced measurement hides where identity is unrecorded.** Move a hole and `m_locx0`
+  goes from `70` to `90`: a different measurement reused the slot. With identity recorded
+  that is caught and reported as ``measurements_substituted``. Without it the old hole
+  remains — and if the replacement renders the same label, **every result map is empty**. So
+  a clean diff still does not establish that the measurements were preserved; it establishes
+  that nothing observable at this resolution moved (Codex #1001).
+- **A loss is attributed only where identity exists, and only by kind.** Where identity is
+  recorded the join is on ``(feature kind, parameter_id)`` — precise enough to separate an
+  envelope's width from a slot's, not precise enough to separate two slots. Where it is not
+  recorded the loss reads "nothing claims it" whether or not a rule removed it: unknown,
+  deliberately, rather than guessed. The first cut inferred attribution from annotation
+  NAMES by substring and cancelled real alarms with unrelated suppressions.
 - **An unnamed annotation is invisible.** ``Drawing.annotations()`` returns only *named*
   annotations by contract, so anything placed without a name cannot be compared here at all.
 - **A hole callout's CONTENT is invisible; only its presence is seen.** It renders as a
@@ -34,9 +57,8 @@ registry slot, not a handle on what it measures. Three consequences, all real:
   the object. Measured: changing a bore from ⌀8 to ⌀12 produces an identical diff. So a lost
   callout is reported, and a callout that starts saying something different is not.
 
-Closing these needs stable MEASUREMENT identity on a placed annotation — feature provenance
-alone is not enough, and is in any case only partial today.
-Until then this is a **triage aid, not a proof** — and deliberately shaped so its weakest part
+Closing the rest needs the remaining renderers to record identity too (#754), and a callout to
+expose its own text. Until then this is a **triage aid, not a proof** — and shaped so its weakest part
 cannot silence its strongest: a candidate suppression annotates a loss, it never removes it.
 An earlier cut let a weak substring match cancel the alarm outright, so any newly-suppressed
 ``width.*`` excused every lost annotation whose name contained "width", across unrelated
@@ -47,6 +69,8 @@ nothing from the engine, so the thing it measures can never come to depend on it
 """
 
 from __future__ import annotations
+
+from collections import Counter
 
 #: Sheet FURNITURE — the annotation types that carry no measurement. Everything else counts.
 #:
@@ -80,6 +104,40 @@ def _rows(dwg) -> set[tuple]:
     return {(r["feature"], r["parameter_id"], r["reason"]) for r in dwg.suppressions()}
 
 
+def _correspondence(feature, parameter) -> tuple:
+    """The cross-build key: ``(feature KIND, parameter_id)``.
+
+    The full ledger key is ``(feature_key, parameter_id)``, and `feature_key` embeds the
+    feature's ORIGIN AND SCALARS — by design, so two holes in one drawing are distinct. That
+    makes it useless for comparing two DIFFERENT builds, which is the only thing this module
+    does: widen a box 40→50 and the envelope's key changes, so an exact join finds nothing
+    and every real suppression reads "nothing claims it" (Codex #1002 r1, reproduced).
+
+    The kind survives the perturbation; the parameter is already stable. Weaker than full
+    identity — two features of one kind share a key — but a weak key that MATCHES ACROSS
+    BUILDS beats an exact key that cannot. It is safe here precisely because attribution
+    only ever annotates a loss; nothing downstream cancels an alarm on it.
+    """
+    return (str(feature).split("@")[0], parameter)
+
+
+def _identities(dwg, name) -> Counter:
+    """Cross-build correspondence keys for everything *name* draws; empty if unrecorded.
+
+    A **multiset**, not a set (Codex #1002 r5). The whole reason the registry stores a tuple
+    is that one annotation can draw several measurements — a grouped ``4× R5`` fillet callout
+    draws four. Deduplicating them here threw that away: a grouped callout dropping from four
+    members to three keeps the same *distinct* key, so the change vanished and every result
+    map came back empty. The counts survive the cross-build key even though the coordinates
+    do not, so multiplicity is exactly the part of the tuple worth keeping.
+    """
+    if not hasattr(dwg, "measurement_keys"):
+        return Counter()
+    return Counter(
+        _correspondence(k["feature"], k["parameter_id"]) for k in dwg.measurement_keys(name)
+    )
+
+
 def diff_builds(before, after) -> dict:
     """Compare two finished drawings: what was drawn, and what the compiler declined.
 
@@ -96,10 +154,11 @@ def diff_builds(before, after) -> dict:
     - ``suppressions_gained`` / ``suppressions_lost`` — ledger rows as
       ``(feature, parameter_id, reason)``.
     - ``candidate_explanations`` — ``{lost name: [reason, ...]}``, a **hint** at which
-      newly-gained suppression might account for a loss, by parameter stem.
+      newly-gained suppression might account for a loss, joined on ``(feature kind,
+      parameter_id)`` where the renderer recorded identity, and absent where it did not.
 
-    The hint does not subtract from ``dimensions_lost``. An annotation carries no feature
-    identity, so the match cannot be trusted, and a weak match that cancels an alarm is worse
+    The hint does not subtract from ``dimensions_lost``. The join is by feature KIND, so it
+    cannot separate two features of one kind, and a weak match that cancels an alarm is worse
     than no match at all — it manufactures the confidence this epic exists to remove.
     """
     before_dims, after_dims = _measurements(before), _measurements(after)
@@ -111,12 +170,41 @@ def diff_builds(before, after) -> dict:
     gained_supp = sorted(after_rows - before_rows)
     lost_supp = sorted(before_rows - after_rows)
 
+    # A name present in BOTH builds that now draws a DIFFERENT measurement (#1002) — the
+    # module's worst blind spot closed. An annotation name is an engine-assigned slot, so a
+    # substitution under the same name (and, if the labels agree, under the same label)
+    # previously produced an entirely empty diff.
+    #
+    # Compared on the CORRESPONDENCE key, so a `width.length` on an envelope that merely got
+    # wider is not a substitution. An earlier cut compared the full ledger key and reported
+    # every envelope dim of every perturbed build as "reattributed" — three noise lines on a
+    # three-dimension drawing, in the one experiment this module exists to run.
+    #
+    # A hole's X and Y location dims share ONE id (`location.location`), because `location`
+    # is addressable per feature and per-member identity is still open (ADR 0016 / #883), so
+    # an X↔Y swap is invisible here. That is the compiler's addressing granularity, not a
+    # limit of this comparison.
+    substituted: dict[str, tuple] = {}
+    for name in set(before_dims) & set(after_dims):
+        b_ids, a_ids = _identities(before, name), _identities(after, name)
+        if b_ids and a_ids and b_ids != a_ids:
+            substituted[name] = (sorted(b_ids.elements()), sorted(a_ids.elements()))
+
+    # Attribution, on the cross-build correspondence key. The first cut matched a
+    # suppression's parameter stem against the annotation's NAME by substring, so a
+    # newly-suppressed `width.length` claimed every lost annotation whose name contained
+    # "width" — across unrelated features (Codex #1001 r1). The second joined on the exact
+    # ledger key, which cannot match across two builds at all (Codex #1002 r1). This joins
+    # on what the two builds genuinely share: the feature's kind and the parameter.
     candidates: dict[str, list[str]] = {}
     for name in lost:
+        idents = _identities(before, name)
+        if not idents:
+            continue  # unknown identity — no attribution rather than a guessed one
         hits = [
             reason
-            for _feature, parameter, reason in gained_supp
-            if parameter and str(parameter).split(".")[0] in name
+            for feature, parameter, reason in gained_supp
+            if _correspondence(feature, parameter) in idents
         ]
         if hits:
             candidates[name] = hits
@@ -125,6 +213,7 @@ def diff_builds(before, after) -> dict:
         "dimensions_lost": lost,
         "dimensions_gained": gained,
         "dimensions_changed": changed,
+        "measurements_substituted": substituted,
         "suppressions_gained": gained_supp,
         "suppressions_lost": lost_supp,
         "candidate_explanations": candidates,
@@ -147,6 +236,10 @@ def explain(diff: dict) -> list[str]:
         hint = candidates.get(name)
         why = f" — possibly: {'; '.join(hint)}" if hint else " — nothing claims it"
         out.append(f"LOST: {name} ({label}){why}")
+    # A name that silently changed what it measures is a measurement lost and another
+    # gained, disguised as neither (#1002) — so it ranks with the losses.
+    for name, (was, now) in sorted(diff.get("measurements_substituted", {}).items()):
+        out.append(f"SUBSTITUTED: {name} now draws {now}, was {was}")
     for feature, parameter, reason in diff["suppressions_gained"]:
         out.append(f"suppressed: {parameter} on {feature} — {reason}")
     for name, label in sorted(diff["dimensions_gained"].items()):
