@@ -297,7 +297,11 @@ def add_feature_location(
         rx, ry = _span(loc)[1][0], _span(loc)[1][1]
         # A rotational part's on-axis *hole* is located by the centreline, not a
         # position dim (matches render_locations); a pattern ref is never filtered.
-        if loc.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
+        if (
+            loc.role == HoleFeature.LOCATION_STEM
+            and a.is_rotational
+            and _concentric_with_axis(a, rx, ry)
+        ):
             continue
         # Coincident X (or Y) across this feature's own members → one dim, not a stack
         # of identical position dims (matches render_locations' x_refs/y_refs dedup).
@@ -577,7 +581,10 @@ def _approved_off_axis_holes(plan) -> list[_OffHole]:
     """
     holes: dict[tuple, _OffHole] = {}
     for entry in plan.locations:
-        if entry.role != "location_off_axis":
+        # Derived, not spelled: the role is a CONTRACT between the compiler that mints it
+        # and this filter that reads it. A literal here is a second owner — renaming the
+        # declaration would make every side-hole position dim vanish (#966).
+        if entry.role != HoleFeature.LOCATION_OFF_AXIS_STEM:
             continue
         assert entry.span is not None  # off-axis entries always carry datum → member
         member = entry.span[1]

@@ -87,7 +87,13 @@ from draftwright.layout import StripCandidate, plan_strip
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
 from draftwright.model.compiled import FeatureRef, resolve_feature
-from draftwright.model.ir import AUTHORED_DIMENSION_KINDS, HoleFeature, PatternFeature
+from draftwright.model.ir import (
+    AUTHORED_DIMENSION_KINDS,
+    HoleFeature,
+    PatternFeature,
+    PocketFeature,
+    SlotFeature,
+)
 
 
 def callout_from_spec(spec, draft, count) -> HoleCallout | None:
@@ -190,12 +196,17 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
     pocket_locations = {
         (loc.ref, loc.discriminator): loc
         for loc in plan.locations
-        if loc.role == "location_pocket" and loc.discriminator is not None
+        if loc.role == PocketFeature.LOCATION_STEM and loc.discriminator is not None
     }
     # A slot's own position dim — datum→near-end along its long axis. Compiled, not
     # computed from `a.bb`: it prints a number, so an authored set that does not name the
     # slot's location must not get one (#925).
-    slot_positions = {loc.ref: loc for loc in plan.locations if loc.role == "location_slot"}
+    # Derived, not spelled: the name is a CONTRACT between the compiler that mints it and
+    # this renderer that reads it, and until #966 neither end derived it — so renaming the
+    # declaration silently dropped every slot location dim rather than renaming it.
+    slot_positions = {
+        loc.ref: loc for loc in plan.locations if loc.role == SlotFeature.LOCATION_STEM
+    }
     draft = dwg.draft
     tier = draft.font_size + 2 * draft.pad_around_text
     views = {
@@ -595,7 +606,11 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         # filter). A pattern ref (role "location_pattern" — e.g. a bolt-circle
         # centre) is NOT filtered, even on the axis. A renderer-side filter only ever
         # REMOVES an approved entry (a drop), so it does not breach the boundary.
-        if loc.role == "location" and a.is_rotational and _concentric_with_axis(a, rx, ry):
+        if (
+            loc.role == HoleFeature.LOCATION_STEM
+            and a.is_rotational
+            and _concentric_with_axis(a, rx, ry)
+        ):
             continue
         # Provenance (ADR 0010): the located feature. `resolve_feature` is the sanctioned
         # seam for exactly this — the corridor's feature map keys drop()/annotations_of().

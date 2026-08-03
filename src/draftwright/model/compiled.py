@@ -901,20 +901,22 @@ def _compile_off_axis_hole_locations(
                 value = abs(member[index] - datum)
                 if omitted:
                     omissions.append(
-                        Omission(f, f"location_off_axis.{meas}", value, _AUTHORED_OMISSION)
+                        Omission(
+                            f, f"{f.LOCATION_OFF_AXIS_STEM}.{meas}", value, _AUTHORED_OMISSION
+                        )
                     )
                     continue
                 start = list(member)
                 start[index] = datum
                 approved.append(
                     ApprovedDimension(
-                        id=_dim_id(f, f"location_off_axis.{meas}"),
+                        id=_dim_id(f, f"{f.LOCATION_OFF_AXIS_STEM}.{meas}"),
                         value_text=_fmt(value),
                         value=value,
                         span=((start[0], start[1], start[2]), member),
                         ref=FeatureRef(f),
                         kind="length",
-                        role="location_off_axis",
+                        role=f.LOCATION_OFF_AXIS_STEM,  # the feature owns its name (#966)
                         discriminator=meas,
                         axis=f.frame.axis,
                     )
@@ -939,12 +941,18 @@ def _compile_slot_positions(model: PartModel) -> tuple[list[ApprovedDimension], 
     omissions: list[Omission] = []
     bb: Any = model.bbox
     for f in model.features:
-        if not isinstance(f, SlotFeature):
+        # Eligibility through `location_datum`, matching `_compile_off_axis_hole_locations`
+        # — a bare `isinstance` was a second, laxer answer to "is this locatable": it
+        # accepted a SlotFeature SUBCLASS, which inherits `LOCATION_STEM`, so the subclass
+        # minted its position under the parent's name while the planner (exact type)
+        # refused to plan one. The collision the declaration exists to prevent, reached by
+        # the one path that did not ask (Codex #1010 r4).
+        if not isinstance(f, SlotFeature) or location_datum(f) != "bbox":
             continue
         datum = float(getattr(bb.min, f.long_axis.upper()))
         value = f.lo - datum
         if authored_location_omitted(model, f):
-            omissions.append(Omission(f, "location_slot.length", value, _AUTHORED_OMISSION))
+            omissions.append(Omission(f, f"{f.LOCATION_STEM}.length", value, _AUTHORED_OMISSION))
             continue
         start = list(f.frame.origin)
         end = list(f.frame.origin)
@@ -952,13 +960,13 @@ def _compile_slot_positions(model: PartModel) -> tuple[list[ApprovedDimension], 
         end["xyz".index(f.long_axis)] = f.lo
         approved.append(
             ApprovedDimension(
-                id=_dim_id(f, "location_slot.length"),
+                id=_dim_id(f, f"{f.LOCATION_STEM}.length"),
                 value_text=_fmt(value),
                 value=value,
                 span=((start[0], start[1], start[2]), (end[0], end[1], end[2])),
                 ref=FeatureRef(f),
                 kind="length",
-                role="location_slot",
+                role=f.LOCATION_STEM,  # the feature owns its name (#966)
                 axis=f.long_axis,
             )
         )
