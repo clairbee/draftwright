@@ -15,15 +15,25 @@ Counted by code object (``conftest.counting_calls``) rather than by patching mod
 see that helper for why a binding-level spy cannot be trusted for this claim.
 """
 
+import inspect
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
-from build123d import Box, Cylinder, Pos, Rot
+from build123d import Align, Box, Cylinder, Pos, Rot
 from conftest import counting_calls
 
 import draftwright.recognition as recognition
 from draftwright import Sheet, build_drawing
 from draftwright.compose import _est_right_strip_depth, _n_right_strip_boss_heights
+from draftwright.linting.coverage import lint_prismatic_coverage
+from draftwright.recognition import (
+    RecognitionResult,
+    build_recognition_result,
+    project_step_shoulders,
+    recognise_risers,
+    step_level_zs,
+)
 from draftwright.recognition.result import DEFERRED, MIGRATED
 
 
@@ -103,8 +113,7 @@ def test_exporting_a_declared_drawing_pays_for_one_aggregate_and_no_more(tmp_pat
     assert first.get("recognise_holes") == 1, (
         "the first export's lint-and-log found no inventory to judge against"
     )
-    rescanned = {n: c for n, c in second.items() if n != "recognise_step_shoulders"}
-    assert not rescanned, f"a second export re-recognised {rescanned}"
+    assert dict(second) == {}, f"a second export re-recognised {dict(second)}"
 
 
 def test_a_detected_build_still_recognises_each_family_once():
@@ -125,10 +134,9 @@ def test_critique_on_a_declared_drawing_recognises_once_and_then_never_again():
     """A declared drawing has no inventory to judge against, so the first *explicit* physical
     lint builds one — once, and cached in the typed ``BuildState``.
 
-    ``recognise_step_shoulders`` is exempt: it is the ``CALLER_SPECIFIC_INPUT`` deferral, and
-    it rescans on every lint until #1025 splits it. Budgeting it is the honest form; a
-    lint-side memo to silence it would make critique a second recognition owner, which is what
-    ADR 0017 exists to remove.
+    No exemptions since #1025: the last family that rescanned per lint
+    (``recognise_step_shoulders``) split into evidence the aggregate owns plus a pure
+    projection, so repeated critique now recognises nothing at all.
     """
     _, sheet = _declared_plate_sheet()
     drawing = sheet.build()
@@ -145,9 +153,8 @@ def test_critique_on_a_declared_drawing_recognises_once_and_then_never_again():
         "the first physical lint of a declared drawing must obtain one aggregate — without it "
         "coverage judges against an empty inventory and reports every real feature as missing"
     )
-    rescanned = {n: c for n, c in later.items() if n != "recognise_step_shoulders"}
-    assert not rescanned, (
-        f"two further lints re-ran {rescanned} — the aggregate is supposed to be built once "
+    assert dict(later) == {}, (
+        f"two further lints re-ran {dict(later)} — the aggregate is supposed to be built once "
         "and reused, so a second scan is a cache that is not being hit"
     )
     # Counting alone would pass an implementation whose later lints reuse the aggregate and
@@ -347,3 +354,188 @@ def test_a_turned_model_reserves_no_boss_height_slots():
     sheet.step(c)
 
     assert _n_right_strip_boss_heights(sheet.build().model()) == 0
+
+
+def _rebated_block():
+    """A full-span step: one riser, one interior level, one shoulder to locate."""
+    return Box(60, 40, 20, align=(Align.MIN,) * 3) - Pos(30, 0, 10) * Box(
+        30, 40, 10, align=(Align.MIN,) * 3
+    )
+
+
+def test_lint_projects_the_shared_riser_evidence_and_rescans_nothing():
+    """#1025's headline: the last per-lint rescan is gone.
+
+    ``recognise_step_shoulders`` did a full face scan on every critique pass, because its
+    answer depended on the caller's level set and ADR 0015 forbids lint taking that from the
+    model. Splitting the scan (``recognise_risers``) from the filter
+    (``project_step_shoulders``) gives the aggregate something single-valued to own, and each
+    consumer projects. This is phase 0's third guard for epic #1018.
+    """
+    drawing = build_drawing(_rebated_block())
+
+    with _counting_every_family() as counts:
+        drawing.lint()
+        drawing.lint()
+
+    assert dict(counts) == {}, (
+        f"linting a built drawing recognised {dict(counts)} — critique is supposed to judge "
+        "against the build's inventory, not scan the solid again"
+    )
+
+
+def test_the_critique_rejects_an_assembled_shoulder_inventory():
+    """A completeness check must not accept an argument that can silence it.
+
+    ``lint_prismatic_coverage`` used to take ``step_zs=``, and it *fully determined* the
+    shoulder answer: ``step_zs=[]`` produced no shoulders, so ``missing_transitions`` was
+    structurally zero and ``unrecognised_defining_geometry`` could never fire. The engine
+    never passed that — ``Analysis.step_zs`` is a pure function of the solid — but a
+    false-negative door in a completeness check is the one place a clean absence is
+    indistinguishable from a clean part.
+
+    The signature half is necessary but NOT sufficient, which the first cut of this test got
+    wrong: asserting that a `recognition=` parameter exists says nothing about whether a
+    caller can narrow it. A duck-typed `SimpleNamespace(risers=(), step_levels=())` silenced
+    the check exactly as `step_zs=[]` had — the same door wearing a new parameter name (Codex
+    #1031 r1). So the behavioural half is the one with teeth: an assembled stand-in is
+    REJECTED.
+
+    **What this does NOT establish**, deliberately named rather than implied: the type check
+    proves neither provenance nor correspondence with *part*. A caller can still pass
+    ``build_recognition_result(some_other_solid)``, or construct a valid frozen result with
+    empty inventories, and this function will use it (Codex #1031 r2). That is true of every
+    injected inventory in the engine — `holes=`, `pockets=`, `pads=` — and is the accepted
+    cost of ADR 0008 Amdt 5 dependency injection, not something specific to this parameter.
+    Closing it needs an unforgeable association between an aggregate and its solid, which is
+    tracked separately (#1032); singling out this one parameter would be inconsistent and
+    would still not make the check fail-closed.
+
+    So the test is named for what it does: it rejects an ASSEMBLED inventory, which is the
+    accidental form. It does not claim to reject a mismatched genuine one.
+    """
+    params = inspect.signature(lint_prismatic_coverage).parameters
+    assert "step_zs" not in params, (
+        "lint_prismatic_coverage grew back a caller-supplied level set — that argument "
+        "decides the shoulder answer, so a caller passing [] silences the check entirely"
+    )
+    assert "step_shoulders" not in params, (
+        "the critique must recognise its own shoulder inventory rather than accept one"
+    )
+
+    part = _rebated_block()
+    empty_stand_in = SimpleNamespace(risers=(), step_levels=())
+    with pytest.raises(TypeError, match="RecognitionResult"):
+        lint_prismatic_coverage(part, [], features=(), recognition=empty_stand_in)
+
+    # And the real thing still works — the guard rejects impostors, not the parameter.
+    assert isinstance(
+        lint_prismatic_coverage(part, [], features=(), recognition=build_recognition_result(part)),
+        list,
+    )
+
+
+def test_the_two_consumers_project_the_same_evidence_differently():
+    """The split's whole point: one scan, two answers.
+
+    Model construction filters levels by plate and pocket ownership; critique must not (ADR
+    0015 — lint's inventory cannot come from the model). If the projection ignored its
+    ``levels`` argument, both would agree and the deferral this replaced would have been
+    pointless. A projection that discriminates is what makes one shared scan sufficient.
+    """
+    part = _rebated_block()
+    risers = recognise_risers(part)
+    assert risers, "fixture stopped producing riser evidence"
+
+    everything = project_step_shoulders(risers, levels=step_level_zs(part))
+    nothing = project_step_shoulders(risers, levels=[])
+    unrelated = project_step_shoulders(risers, levels=[999.0])
+
+    assert everything, "the real level set produced no shoulders"
+    assert nothing == [], "an empty level set must locate no shoulder"
+    assert unrelated == [], "a level no riser sits on must locate no shoulder"
+
+
+def test_a_two_stage_call_matches_the_old_one_stage_one_at_any_tolerance():
+    """The split must not change what a NON-default tolerance means.
+
+    The old `recognise_step_shoulders(part, levels=..., tol=t)` used one `t` for the geometric
+    gates and the level ties. Split naively, `recognise_risers(part, tol=0.1)` followed by a
+    bare `project_step_shoulders(...)` mixed 0.1 with the projection's own default — so a
+    riser 0.3 mm off a level was rejected before and accepted after (Codex #1031 r1). The
+    evidence carries the tolerance it was scanned with, so the natural two-stage call stays
+    equivalent.
+    """
+    part = _rebated_block()
+
+    for tol in (0.1, 0.5, 2.0):
+        risers = recognise_risers(part, tol=tol)
+        assert all(r.tol == tol for r in risers), "evidence lost the tolerance it was scanned with"
+        # The bare projection must behave as if it had been told `tol` explicitly.
+        assert project_step_shoulders(risers, levels=[10.4]) == project_step_shoulders(
+            risers, levels=[10.4], tol=tol
+        ), f"tol={tol}: the bare projection did not inherit the scan's tolerance"
+
+    # And the inheritance is load-bearing, not incidental: a level 0.3mm off is inside the
+    # loose scan's tolerance and outside the tight one's.
+    loose = project_step_shoulders(recognise_risers(part, tol=0.5), levels=[10.3])
+    tight = project_step_shoulders(recognise_risers(part, tol=0.1), levels=[10.3])
+    assert loose != tight, "fixture no longer distinguishes the two tolerances"
+
+
+def _turned_shaft_with_blind_bore():
+    """A Z-turned shaft whose blind-bore floor is a horizontal face level but NOT an OD
+    shoulder — so the two candidate ladders genuinely differ."""
+    part = Cylinder(20, 30) + Pos(0, 0, 30) * Cylinder(14, 30)
+    return part - Pos(0, 0, 45) * Cylinder(6, 30)
+
+
+def test_one_ladder_rule_serves_sizing_and_critique():
+    """Sizing and critique must converge on the SAME step ladder.
+
+    For a Z-turned part the ladder is the turned profile's shoulders, not the raw horizontal
+    face levels — that distinction exists because a blind bore's flat floor is a face level
+    and is emphatically not an OD shoulder. `_analyse` had that rule; critique derived its own
+    level set separately, so lint could project risers over a different ladder than the model
+    was sized from (Codex #1031 r3). `RecognitionResult.step_ladder` is now the one rule both
+    call.
+
+    The fixture is chosen so the two candidate sets actually differ; on an ordinary prismatic
+    part they coincide and this would assert nothing.
+    """
+    part = _turned_shaft_with_blind_bore()
+    rec = build_recognition_result(part)
+    bb = part.bounding_box()
+
+    ladder = rec.step_ladder(bb)
+    assert ladder != list(rec.step_levels), (
+        "fixture stopped exercising the divergence — the turned ladder and the raw face "
+        "levels coincide here, so this test would pass with the rule removed"
+    )
+    assert 30.0 not in ladder, "the blind-bore floor leaked into the turned ladder"
+    assert 30.0 in rec.step_levels, "fixture no longer produces the bore floor as a face level"
+
+    # And sizing goes through that same rule rather than re-deriving it. Asserted by counting
+    # the call, because on a turned part `step_zs` feeds only the strip reservation — there is
+    # no rendered rung to read the difference off, so a behavioural assertion here would be
+    # vacuous and would pass with the consolidation removed (verified: it did).
+    with counting_calls({"ladder": RecognitionResult.step_ladder}) as calls:
+        drawing = build_drawing(part)
+        sizing = dict(calls)
+        calls.clear()
+        drawing.lint()
+        critique = dict(calls)
+
+    assert sizing.get("ladder"), (
+        "the build never called RecognitionResult.step_ladder — sizing is deriving its own "
+        "ladder again, which is the drift this consolidation removes"
+    )
+    # Both consumers, asserted separately. Counting across the whole build satisfied the
+    # assertion from `_analyse`'s call alone, so critique could revert to the raw face levels
+    # and this guard would stay green — the regression it names, undetected (Codex #1031 r2).
+    assert critique.get("ladder"), (
+        "lint never called RecognitionResult.step_ladder — critique is projecting risers over "
+        "a different ladder than the model was sized from"
+    )
+    lengths = sorted(n for n in drawing.annotations() if n.startswith("m_steplen"))
+    assert len(lengths) == 2, f"expected one length per turned segment, got {lengths}"
