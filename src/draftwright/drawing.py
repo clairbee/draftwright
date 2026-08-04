@@ -82,7 +82,7 @@ from draftwright.linting import (
 from draftwright.projection import (
     project_view_geometry,
 )
-from draftwright.recognition import analyse_cylinders
+from draftwright.recognition import analyse_cylinders, build_recognition_result
 from draftwright.registry import AnnotationRegistry
 from draftwright.repair import repair_drawing
 
@@ -301,6 +301,22 @@ class BuildState:
         boxes together — a rolled-back drawing must re-measure everything."""
         self.view_edge_cache.clear()
         self.ann_box_cache.clear()
+
+    def ensure_recognition(self, part) -> RecognitionResult:
+        """The run's recognition aggregate, recognising *part* once if nothing has yet.
+
+        A declared build performs no recognition (ADR 0011 / #1022), so critique on that path
+        has no inventory to judge against and must produce one.  It is built **here**, in the
+        typed build state, and at most once per drawing: a lint-side or ``Drawing``-side memo
+        would make critique a second recognition owner, which is exactly what ADR 0017 exists
+        to remove (and what review of #1021 rejected).
+
+        On a detected build ``recognition`` is already filled by the builder, so this returns
+        it and recognises nothing.
+        """
+        if self.recognition is None:
+            self.recognition = build_recognition_result(part)
+        return self.recognition
 
 
 class Drawing:
@@ -575,8 +591,13 @@ class Drawing:
         """The ADR 0017 recognition inventory used to build this drawing.
 
         This is the geometry-only evidence below the detected/declared :meth:`model` and
-        drafting policy.  It is an experimental, read-only result; ``None`` is possible only
-        for a bare ``Drawing`` that did not pass through :func:`build_drawing`.
+        drafting policy.  It is an experimental, read-only result.
+
+        ``None`` for a bare ``Drawing`` that did not pass through :func:`build_drawing`, and
+        for a **declared** build that has not yet been critiqued — that path recognises
+        nothing (ADR 0011 / #1022) and only builds an aggregate when something asks for
+        physical critique.  So ``None`` here means "nothing has needed recognition yet", never
+        "this part has no features".
         """
 
         return self._build.recognition
@@ -2629,11 +2650,19 @@ class Drawing:
         return repair_drawing(self, max_iter)
 
     # -- output ---------------------------------------------------------------
-    def lint(self):
+    def lint(self, *, physical: bool = True):
         """Lint all annotations against all views; returns the list of issues.
 
         When :attr:`part` is set, also runs :func:`lint_feature_coverage`.
         Build-time drops recorded via :meth:`_record_build_issue` are included.
+
+        ``physical=False`` asks for the **placement** critique only — geometry/standards
+        checks over what is on the sheet — and skips the feature-coverage half that needs a
+        recognition inventory of the solid. That is what the repair loop wants (it acts on
+        ``dim_inside_part`` and nothing else, ADR 0002), and on a declared build it is the
+        difference between exporting a drawing and recognising the part to no purpose
+        (#1022). The default stays the full critique: a caller asking "is this drawing
+        right?" means both halves.
         """
         # Drawable area (page minus the standard margin), passed explicitly to
         # lint_drawing for bounds checks — draftwright owns linting now and no
@@ -2673,7 +2702,7 @@ class Drawing:
                     view_edge_cache=self._view_edge_cache,
                     ann_box_cache=self._ann_box_cache,
                 )
-        if self.part is not None:
+        if self.part is not None and physical:
             # Reuse the single feature inventory from the build (#244) when present,
             # so lint does not re-detect holes/patterns/turned-steps; fall back to
             # detecting when there is no analysis (a manually-built Drawing, or lint
@@ -2682,16 +2711,44 @@ class Drawing:
             holes: list | None
             patterns: list | None
             bosses: list | None
+            pads: list | None
+            pockets: list | None
+            step_zs: list | None
             prof_kw: dict
-            if a is not None:
+            if a is not None and a.recognition is not None:
                 cyls = a.cyls
                 holes, patterns, bosses = a.holes, a.patterns, a.bosses
+                pads, pockets, step_zs = a.pads, a.pockets, a.step_zs
+                prof_kw = {"prof": a.prof}
+            elif a is not None:
+                # A DECLARED build recognised nothing (#1022), so `a.holes` and friends are
+                # empty because nothing looked — not because the part has none. Feeding that
+                # emptiness to coverage would report every real hole as uncovered, so critique
+                # recognises here instead: once per drawing, owned by BuildState.
+                rec = self._build.ensure_recognition(self.part)
+                cyls = rec.cylinders
+                holes = list(rec.holes)
+                patterns = list(rec.hole_patterns)
+                bosses = list(rec.bosses)
+                pads = list(rec.pads)
+                pockets = list(rec.pockets)
+                # NOT `a.step_zs`: that is declaration-sourced on this path, and critique
+                # taking its inventory from the model is what ADR 0015 forbids — it would
+                # make lint blind to exactly the geometry a sparse declaration omitted, which
+                # is the case `unrecognised_defining_geometry` exists to report. The
+                # aggregate's geometry-sourced ladder is the right answer, and reading it here
+                # rather than passing `None` is what stops coverage rescanning it every lint.
+                step_zs = list(rec.step_levels)
+                # `a.prof` IS declaration-sourced, and here that is right rather than a
+                # shortcut: axial critique judges the declared profile's dimensioning, so a
+                # declared turned part keeps it without the aggregate.
                 prof_kw = {"prof": a.prof}
             else:
                 if self._cyl_cache is None:
                     self._cyl_cache = analyse_cylinders(self.part)
                 cyls = self._cyl_cache
                 holes = patterns = bosses = None
+                pads = pockets = step_zs = None
                 prof_kw = {}
             issues += lint_feature_coverage(
                 self.part,
@@ -2730,11 +2787,11 @@ class Drawing:
                 self.part,
                 self,
                 assembly=self.assembly,
-                pads=a.pads if a is not None else None,
-                pockets=a.pockets if a is not None else None,
+                pads=pads,
+                pockets=pockets,
                 bbox=a.bb if a is not None else None,
                 features=getattr(model, "features", ()) if model is not None else (),
-                step_zs=a.step_zs if a is not None else None,
+                step_zs=step_zs,
             )
             # Reverse direction (#487): a DECLARED feature with no matching geometry (a stale
             # phantom callout). Only for a caller-supplied model — detection can't over-declare.
@@ -2880,8 +2937,6 @@ class Drawing:
             if out.endswith("." + _ext):
                 out = out[: -(len(_ext) + 1)]
                 break
-        self._lint_and_log()
-
         # Normalise ONCE, here, before anything reads it. `formats` may be a one-shot iterable,
         # and the mixed-API warning below used to build its message with `tuple(formats)` —
         # which consumed a generator, leaving the export loop nothing to iterate: it warned
@@ -2899,6 +2954,17 @@ class Drawing:
                 raise ValueError(
                     f"unknown export format(s) {unknown}; choose from {self._EXPORT_FORMATS}"
                 )
+            # Beside the format check, not down at the PNG render: EVERY reason this call
+            # cannot succeed belongs before the work, or the "validate first" rule holds for
+            # whichever argument someone remembered (Codex #1029 r2).
+            if "png" in want and dpi <= 0:
+                raise ValueError(f"png export needs dpi > 0, got {dpi}")
+
+        # AFTER validation, for the same reason validation precedes the deprecation warning
+        # above: a call that is about to raise should not first do the work. On a declared
+        # drawing this critique builds the recognition aggregate (#1022), so a mistyped format
+        # used to scan the whole solid and only then report the typo.
+        self._lint_and_log()
 
         # `formats=` wins over the legacy booleans, which means `export(out, formats=("svg",),
         # svg=False)` writes the SVG the caller just switched off — silently, since the legacy
@@ -2951,8 +3017,6 @@ class Drawing:
 
         # --- formats=... → {format: path} (requested order); normalised + validated above ---
         assert want is not None  # formats is not None on this branch
-        if "png" in want and dpi <= 0:
-            raise ValueError(f"png export needs dpi > 0, got {dpi}")
         want_set = set(want)
         paths: dict[str, str] = {}
         # Intermediates — the SVG behind a PDF/PNG, the PDF behind a PNG — go to a temp dir when
