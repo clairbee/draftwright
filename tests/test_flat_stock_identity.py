@@ -44,6 +44,7 @@ def test_the_record_distinguishes_one_stock_from_two():
 
     assert len(dd) == 2 and len(lobes) == 2, "both fixtures should yield two flat records"
     assert {f.axis for f in dd} == {"z"} and {f.axis for f in lobes} == {"z"}
+    assert all(f.axis_aligned for f in [*dd, *lobes])
 
     assert len({f.axis_line for f in dd}) == 1, (
         "a double-D's two faces are one piece of stock — they must share an axis line, or the "
@@ -64,30 +65,24 @@ def test_a_double_d_still_gets_exactly_one_callout():
     assert not [i for i in dwg.lint() if i.code == "flat_dropped"]
 
 
-def test_two_parallel_lobes_are_two_definitions_and_a_lost_one_is_reported():
-    """The defect: the sheet used to carry one callout for two independent definitions, with
-    nothing saying so.
+def test_two_parallel_lobes_place_two_independent_definitions():
+    """Each stock needs its own placed A/F definition (#1034).
 
-    The engine now plans both. Placing them both is a corridor-capacity problem and is NOT
-    what this fix is about (#1034) — what matters here is that the second definition exists
-    and its loss is REPORTED rather than absorbed by a grouping key. A completeness failure
-    that is visible is the whole point; the previous behaviour was a clean-looking drawing
-    that was wrong.
+    The left lobe's flat is not on the aggregate plan-view boundary.  A single centre-out
+    candidate therefore leaves its label intersecting the aggregate view box even though
+    there is clear margin above it.  Removing the margin-escape candidates must make this
+    test fail with one placed callout plus one ``flat_dropped`` issue.
     """
     dwg = build_drawing(_two_parallel_lobes())
 
     callouts = sorted(n for n in dwg.annotations() if n.startswith("m_flat_"))
     dropped = [i for i in dwg.lint() if i.code == "flat_dropped"]
 
-    assert len(callouts) + len(dropped) == 2, (
-        f"two lobes are two A/F definitions; the drawing accounts for "
-        f"{len(callouts)} placed + {len(dropped)} reported. Before #1013 this was one "
-        "callout and no report — the second lobe simply vanished."
-    )
-    assert dropped, (
-        "the unplaced definition must be reported. Silently drawing one callout for two "
-        "lobes is the exact defect: a sheet that looks complete and is not"
-    )
+    assert len(callouts) == 2, f"two lobes need two placed A/F definitions, got {callouts}"
+    assert not dropped, f"available plan-view margin must prevent a placement drop: {dropped}"
+    assert not [
+        i for i in dwg.lint() if i.code in {"annotation_overlap", "leader_crosses_silhouette"}
+    ]
 
 
 def _coaxial_separated_stocks():
@@ -190,6 +185,7 @@ def test_slanted_stock_is_an_acknowledged_limitation_not_a_silent_wrong_answer()
         "a (0.707, 0, 0.707) axis is classified by its dominant component; if that changed, "
         "the slanted-identity reasoning in _axis_line needs rechecking"
     )
+    assert not flats[0].axis_aligned, "the renderer needs an explicit slanted-stock guard"
 
     dwg = build_drawing(slant)
     assert not [n for n in dwg.annotations() if n.startswith("m_flat_")], (
@@ -200,3 +196,10 @@ def test_slanted_stock_is_an_acknowledged_limitation_not_a_silent_wrong_answer()
     assert [i for i in dwg.lint() if i.code == "flat_dropped"], (
         "the slanted flat is neither drawn nor reported — that would be a silent omission"
     )
+
+    # The multi-stock fallback from #1034 must not defeat the guard merely because there are
+    # now two non-canonical stock groups (the adversarial counterexample to the first cut).
+    two_slants = slant + Pos(0, 60, 0) * slant
+    multi = build_drawing(two_slants)
+    assert not [n for n in multi.annotations() if n.startswith("m_flat_")]
+    assert len([i for i in multi.lint() if i.code == "flat_dropped"]) == 2

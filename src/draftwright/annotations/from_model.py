@@ -1492,6 +1492,36 @@ def _corner_candidates(dwg, view, vb, members, reach, *, provenances=None):
         yield (tip, elbow, owner)
 
 
+def _flat_candidates(dwg, view, vb, members, reach, *, provenances):
+    """Keep the established centre-out lead first, then try true margin escapes.
+
+    A flat is a corner feature on its own stock, but not necessarily on the aggregate view:
+    parallel stock can put an inner lobe well inside ``vb``.  The old single candidate moved
+    only *reach* from that lobe and left the label intersecting the aggregate silhouette.
+    ``_radial_candidates`` advances to the view boundary before adding the same reach, so its
+    fallbacks use available margin without changing the preferred placement of ordinary flats.
+    """
+    members = list(members)
+    provenances = list(provenances)
+    yield from _corner_candidates(
+        dwg,
+        view,
+        vb,
+        members,
+        reach,
+        provenances=provenances,
+    )
+    for member, provenance in zip(members, provenances):
+        yield from _radial_candidates(
+            dwg,
+            view,
+            vb,
+            member,
+            reach,
+            provenance=provenance,
+        )
+
+
 def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False) -> int:
     """Place one machined-feature leader callout per job (#637). A *job* is
     ``(name, view, vb, label, candidates, measurement)`` where *candidates* yields ``(tip,
@@ -1762,20 +1792,37 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
         # First-AUTHORED tolerance wins (planner/model order, not spatial — see the
         # fillet pass / render_diameters precedent, Codex review).
         tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
+        axis_aligned = all(g.facts.axis_aligned for g, _ in members)
+        if not axis_aligned:
+            # Slanted stock's two-coordinate axis_line is not canonical (#1036). It used to
+            # drop accidentally when alone but could render when several slanted stocks made
+            # the aggregate view large enough. An empty candidate set makes the unsupported
+            # state deterministic and still records one attributed flat_dropped outcome.
+            candidates = ()
+        else:
+            # The margin fallback is specifically for several independent pieces of aligned
+            # stock in the same aggregate view (#1034). Ordinary single/double-D stock keeps
+            # the established centre-out placement first and unchanged.
+            candidate_factory = (
+                _flat_candidates
+                if sum(key[0] == axis for key in collapse) > 1
+                else _corner_candidates
+            )
+            candidates = candidate_factory(
+                dwg,
+                view,
+                vb,
+                [g.facts for g, _ in ordered],
+                reach,
+                provenances=[g.ref for g, _ in ordered],
+            )
         jobs.append(
             (
                 f"m_flat_{axis}{gi}",
                 view,
                 vb,
                 _flat_label(members[0][1].value_text, _tol_suffix(tol, draft)),
-                _corner_candidates(
-                    dwg,
-                    view,
-                    vb,
-                    [g.facts for g, _ in ordered],
-                    reach,
-                    provenances=[g.ref for g, _ in ordered],
-                ),
+                candidates,
                 tuple(pd.id for _, pd in ordered),  # the grouped callout draws every member
             )
         )
