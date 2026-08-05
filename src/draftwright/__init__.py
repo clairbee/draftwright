@@ -32,6 +32,11 @@ _LAZY = {
     "PmiRecord": "draftwright.pmi",
     "extract_pmi": "draftwright.pmi",
     "choose_scale": "draftwright.compose",
+    # A warning category users are told to filter must be importable without reaching into a
+    # private module (#1043 review) — and without paying for the CAD kernel. It lives in the
+    # dependency-free `_warnings` leaf for that second reason: defined in `_core` it cost ~6 s
+    # to reach, and the pytest filterwarnings entry naming it paid that on every invocation.
+    "SoftDeprecationWarning": "draftwright._warnings",
 }
 
 
@@ -68,6 +73,7 @@ _sys.modules[__name__].__class__ = _DraftwrightModule
 
 
 if TYPE_CHECKING:  # static analysers / IDEs — no runtime import, no kernel cost
+    from draftwright._warnings import SoftDeprecationWarning
     from draftwright.builder import build_drawing, make_drawing
     from draftwright.compose import choose_scale
     from draftwright.drawing import Drawing, FeatureInfo
@@ -85,6 +91,7 @@ def __dir__():
 
 __all__ = [
     "Drawing",
+    "SoftDeprecationWarning",
     "FeatureInfo",
     "PmiRecord",
     "Sheet",
