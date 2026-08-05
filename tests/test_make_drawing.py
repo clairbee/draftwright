@@ -1371,6 +1371,30 @@ class TestIsoEmptyRect:
         g = _layout_geometry(20, 20, 20, 1.0, 297.0, 210.0, 120.0, None)
         assert g.iso_valid is True
 
+    def test_target_aspect_can_choose_a_wide_short_gap_over_the_largest_square(self):
+        from draftwright._core import _largest_empty_rect
+
+        drawable = (0.0, 0.0, 100.0, 100.0)
+        obstacles = [(40.0, 0.0, 100.0, 70.0)]
+
+        assert _largest_empty_rect(drawable, obstacles) == (0.0, 0.0, 40.0, 70.0)
+        assert _largest_empty_rect(drawable, obstacles, target_size=(60.0, 20.0)) == (
+            0.0,
+            70.0,
+            100.0,
+            100.0,
+        )
+
+    @pytest.mark.parametrize(
+        "target_size",
+        [(float("nan"), 1.0), (0.0, 1.0), (1.0, float("nan")), (1.0, 0.0)],
+    )
+    def test_target_aspect_requires_two_finite_positive_dimensions(self, target_size):
+        from draftwright._core import _largest_empty_rect
+
+        with pytest.raises(ValueError, match="finite positive dimensions"):
+            _largest_empty_rect((0.0, 0.0, 10.0, 10.0), [], target_size=target_size)
+
 
 class TestScaleMinimum:
     """An explicit scale below the legibility floor is honoured with a warning (#489);
@@ -5578,6 +5602,23 @@ class TestDetailView:
         assert "detail_caption" not in dwg.annotations()
         assert not any(n.startswith("dim_detail") for n in dwg.annotations())
 
+    def test_non_finite_requested_scale_is_rejected_before_geometry_work(self):
+        from types import SimpleNamespace
+
+        from draftwright._core import DetailRequest
+        from draftwright.annotations.sections import _render_detail
+
+        req = DetailRequest(axis="z", lo=0.0, hi=1.0, scale_needed=float("inf"), redraw=lambda: 1)
+
+        assert not _render_detail(
+            None,
+            SimpleNamespace(SCALE=1.0),
+            req,
+            "detail_a",
+            "A",
+            ctx=None,
+        )
+
     def test_crowded_shoulders_get_a_detail_view_when_requested(self):
         from draftwright._core import _legible_steps
 
@@ -5593,6 +5634,9 @@ class TestDetailView:
         assert any(n.startswith("dim_detail_a_step") for n in dwg.annotations())
         # Drawn at a larger scale than the sheet.
         assert dwg.coords("detail_a")._scale > a.SCALE
+        # The detail resolves against the sheet-scale iso. That orientation aid must not then
+        # grow into the defining detail after placement (#915).
+        assert dwg.coords("iso")._scale == pytest.approx(a.SCALE)
         # Absolute step heights use the part base as their datum. The detail
         # must include that datum so neither witness endpoint floats outside
         # the visible crop.
