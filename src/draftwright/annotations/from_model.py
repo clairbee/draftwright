@@ -137,7 +137,7 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
     )
 
 
-def _record_slot_drop(ctx, dwg, kind, idx, view, feat):
+def _record_slot_drop(ctx, dwg, kind, idx, view, feat, measurement=None):
     """Record a slot dim the layout could not place (#135).
 
     Info severity — a dim with no clear room is dropped as "place what fits",
@@ -152,6 +152,7 @@ def _record_slot_drop(ctx, dwg, kind, idx, view, feat):
         "info",
         f"{noun}_dim_dropped",
         f"{noun}{idx} {kind} dim not placed (no room beside the {view})",
+        measurement=measurement,
     )
     ctx.escalations.append(
         Escalation(kind=noun, view=view, feature=feat, reason=f"no room beside the {view}")
@@ -379,7 +380,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
                         trace_label=f"slot_{_fsd}_fallthrough",
                     ):
                         return  # placed on the opposite strip
-                    _record_slot_drop(ctx, dwg, _dw, idx, vw[0], _feat)
+                    _record_slot_drop(ctx, dwg, _dw, idx, vw[0], _feat, approved.id)
 
                 if vw[0] == "front":
                     ctx.post_drain.append(_retry)
@@ -441,7 +442,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
             ):
                 count += 1
             else:
-                _record_slot_drop(ctx, dwg, "width", i, name, s)
+                _record_slot_drop(ctx, dwg, "width", i, name, s, wpd.id)
         if lpd is not None:
             if _place(
                 s.long_axis,
@@ -455,7 +456,7 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
             ):
                 count += 1
             else:
-                _record_slot_drop(ctx, dwg, "length", i, name, s)
+                _record_slot_drop(ctx, dwg, "length", i, name, s, lpd.id)
         # Pads are located by the compiled location set on both axes; slots retain their
         # historical single-axis position dimension here.
         pos = slot_positions.get(g.ref)
@@ -542,7 +543,10 @@ def _location_candidate(
     def _drop(nm):
         edge = "plan view" if view == "plan" else "side view"
         ctx.record_issue(
-            "warning", "location_ref_dropped", f"{nm} not placed (no room above the {edge})"
+            "warning",
+            "location_ref_dropped",
+            f"{nm} not placed (no room above the {edge})",
+            measurement=measurement,
         )
         ctx.escalations.append(Escalation("location", view, nm, "strip_full"))
 
@@ -617,7 +621,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         # `loc.id` rides along as the measurement identity (#1002): the compiler already
         # minted it for this very entry, so the renderer records WHICH measurement it drew
         # rather than leaving the audit to infer it from the annotation's name.
-        refs.append((rx, ry, resolve_feature(loc.ref), loc.id))
+        refs.append((rx, ry, resolve_feature(loc.ref), loc.id, loc.discriminator))
     if not refs:
         return 0
     pinned_set = set(pinned or ())
@@ -646,21 +650,29 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                 u[3] = u[3] or r[2] in pinned_set
                 # Collapsing coincident Xs into one dim must ACCUMULATE what it draws
                 # (#1002 r4): the survivor genuinely measures every collapsed feature's X.
-                if r[3] is not None and r[3] not in u[4]:
+                if r[4] in (None, "x") and r[3] is not None and r[3] not in u[4]:
                     u[4].append(r[3])
                 break
         else:
             x_refs.append(
-                [r[0], r[1], r[2], r[2] in pinned_set, [r[3]] if r[3] is not None else []]
+                [
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[2] in pinned_set,
+                    [r[3]] if r[3] is not None and r[4] in (None, "x") else [],
+                ]
             )
     _x_drawable = {r[0] for r in x_refs if abs(r[0] - datum_x) * a.SCALE >= 1.0}
     _kept_x, _n_x_close = _legible_locations(_x_drawable, a.SCALE)
     if _n_x_close:
+        dropped_x = [r for r in x_refs if r[0] in _x_drawable and r[0] not in set(_kept_x)]
         ctx.record_issue(
             "warning",
             "location_ref_dropped",
             f"{_n_x_close} X location dim(s) too closely spaced to dimension legibly "
             "(use a detail view)",
+            measurement=tuple(mid for ref in dropped_x for mid in ref[4]),
         )
         ctx.escalations.append(Escalation("location", "plan", None, "illegible"))
     _kept_x_set = set(_kept_x)
@@ -735,21 +747,29 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         for u in y_refs:
             if abs(r[1] - u[1]) < 0.5:
                 u[3] = u[3] or r[2] in pinned_set
-                if r[3] is not None and r[3] not in u[4]:
+                if r[4] in (None, "y") and r[3] is not None and r[3] not in u[4]:
                     u[4].append(r[3])  # accumulate, as in the X loop (#1002 r4)
                 break
         else:
             y_refs.append(
-                [r[0], r[1], r[2], r[2] in pinned_set, [r[3]] if r[3] is not None else []]
+                [
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[2] in pinned_set,
+                    [r[3]] if r[3] is not None and r[4] in (None, "y") else [],
+                ]
             )
     _y_drawable = {r[1] for r in y_refs if abs(r[1] - datum_y) * a.SCALE >= 1.0}
     _kept_y, _n_y_close = _legible_locations(_y_drawable, a.SCALE)
     if _n_y_close:
+        dropped_y = [r for r in y_refs if r[1] in _y_drawable and r[1] not in set(_kept_y)]
         ctx.record_issue(
             "warning",
             "location_ref_dropped",
             f"{_n_y_close} Y location dim(s) too closely spaced to dimension legibly "
             "(use a detail view)",
+            measurement=tuple(mid for ref in dropped_y for mid in ref[4]),
         )
         ctx.escalations.append(Escalation("location", "side", None, "illegible"))
     _kept_y_set = set(_kept_y)

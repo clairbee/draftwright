@@ -33,6 +33,7 @@ from draftwright._core import (
     _iso_bbox,
     _log,
 )
+from draftwright._geometry import plane_axes
 from draftwright.annotations._common import (
     CROSSABLE_TYPES,
     CorridorCandidate,
@@ -1019,6 +1020,7 @@ def _add_furniture(
             to_page,
             f"dim_pitch_{view}{j}",
             feature=feat,
+            measurement=pitch.id,
             ctx=ctx,
         )
     elif feat.pattern == "grid":
@@ -1097,10 +1099,11 @@ def _add_grid_pitch_dims(
     members,
     nominals,  # the approved grid_pitch entries, one per lattice axis
     to_page,
-    feature=None,
     *,
+    feature,
     ctx,
     name_prefix="dim_pitch",
+    drop_code=None,
 ):
     """Both pitch dimensions of a rectangular grid — one along each lattice axis,
     each labelled ``(n-1)× pitch`` (#92).  The two axes are recovered as the two
@@ -1136,6 +1139,25 @@ def _add_grid_pitch_dims(
     l2, bx, by = basis2
     u2 = (bx / l2, by / l2)
 
+    # The two pitch values are not identities: on a square-pitch grid they are equal. Map
+    # recovered page axes to the IR's row/column lattice basis instead. `angle` names the
+    # column direction in the plane_axes frame; the perpendicular direction is the row.
+    actual_feature = resolve_feature(feature)
+    by_discriminator = {
+        entry.discriminator: entry
+        for entry in nominals
+        if getattr(entry, "discriminator", None) in {"row", "col"}
+    }
+    pu, pv = plane_axes(actual_feature.frame.axis)
+    angle = math.radians(actual_feature.angle or 0.0)
+    column_world = tuple(math.cos(angle) * pu[k] + math.sin(angle) * pv[k] for k in range(3))
+    origin = actual_feature.frame.origin
+    page_origin = to_page(origin)
+    page_column = to_page(tuple(origin[k] + column_world[k] for k in range(3)))
+    dx, dy = page_column[0] - page_origin[0], page_column[1] - page_origin[1]
+    norm = math.hypot(dx, dy)
+    column_page = (dx / norm, dy / norm)
+
     def _axis_dim(u, pitch_page, sub):
         perp = (-u[1], u[0])
 
@@ -1161,9 +1183,10 @@ def _add_grid_pitch_dims(
         hi = max(line, key=along)
         span = along(hi) - along(lo)
         n = round(span / pitch_page) + 1
-        # Label with the approved pitch entry nearest this axis' page step. Selection is
-        # numeric, the LABEL is the compiler's own text — the two are different jobs.
-        pitch = min(nominals, key=lambda e: abs(e.value - pitch_page / a.SCALE))
+        discriminator = (
+            "col" if abs(u[0] * column_page[0] + u[1] * column_page[1]) > 0.7 else "row"
+        )
+        pitch = by_discriminator[discriminator]
         _place_pitch_dim(
             dwg,
             a,
@@ -1175,6 +1198,8 @@ def _add_grid_pitch_dims(
             to_page,
             f"{name_prefix}_{view}{j}_{sub}",
             feature=feature,
+            measurement=pitch.id,
+            drop_code=drop_code,
             ctx=ctx,
         )
 
@@ -1183,7 +1208,20 @@ def _add_grid_pitch_dims(
 
 
 def _place_pitch_dim(
-    dwg, a: Analysis, view, loc1, loc2, n, pitch_text, to_page, name, feature=None, *, ctx
+    dwg,
+    a: Analysis,
+    view,
+    loc1,
+    loc2,
+    n,
+    pitch_text,
+    to_page,
+    name,
+    feature=None,
+    measurement=None,
+    drop_code=None,
+    *,
+    ctx,
 ):
     """Pitch dimension between two hole-centre *locations* ``loc1``→``loc2``, labelled
     ``(n-1)× pitch``, placed just outside the view on the side of the row's
@@ -1293,7 +1331,8 @@ def _place_pitch_dim(
             _clear_and_validate(off, side_vec, page_box, obstacles),
             name,
             view=view,
-            feature=feature,
+            feature=resolve_feature(feature),
+            measurement=measurement,
         )
 
     # Place onto the zone strip for the chosen side (#374): each side is its own strip, so the
@@ -1400,10 +1439,18 @@ def _place_pitch_dim(
                 _clear_and_validate(offset, side_vec, page_box, obstacles, probe),
                 name,
                 view=view,
-                feature=feature,
+                feature=resolve_feature(feature),
+                measurement=measurement,
             )
             return
     _log.info("Pitch dimension for the %s× %s array skipped (no room)", n, pitch_text)
+    if drop_code is not None:
+        ctx.record_issue(
+            "warning",
+            drop_code,
+            f"slot pattern pitch {pitch_text} not placed (no clear room beside the {view})",
+            measurement=measurement,
+        )
 
 
 def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
@@ -1500,6 +1547,7 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 to_page,
                 f"dim_pocketpat_pitch_{view}{i}",
                 feature=g.ref,
+                measurement=pitch.id,
                 ctx=ctx,
             )
         elif feat.pattern == "grid" and len(grid) == 2:
@@ -1585,6 +1633,18 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
         # misleading spec, Codex #848 r3). Distinct name prefix (dim_slotpat_pitch) so a plan-view
         # slot pattern and hole/pocket pattern do not collide.
         if name not in placed_names:
+            for dimension in (
+                (g.dim(role="pitch"),)
+                if g.facts.pattern == "linear"
+                else tuple(d for d in g.dims if d.role == "grid_pitch")
+            ):
+                if dimension is not None:
+                    ctx.record_issue(
+                        "warning",
+                        "slot_dim_dropped",
+                        "slot pattern pitch not placed because its grouped callout dropped",
+                        measurement=dimension.id,
+                    )
             continue
         feat = g.facts
         members = feat.members or (feat.frame.origin,)
@@ -1606,6 +1666,8 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 to_page,
                 f"dim_slotpat_pitch_{view}{i}",
                 feature=g.ref,
+                measurement=pitch.id,
+                drop_code="slot_dim_dropped",
                 ctx=ctx,
             )
         elif feat.pattern == "grid" and len(grid) == 2:
@@ -1620,6 +1682,7 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 feature=g.ref,
                 ctx=ctx,
                 name_prefix="dim_slotpat_pitch",
+                drop_code="slot_dim_dropped",
             )
     return placed
 
