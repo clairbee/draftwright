@@ -99,6 +99,33 @@ class Flat(Record):
     axis: str
     across: float
     at: tuple[float, float, float]
+    #: The stock's axis LINE — the two coordinates perpendicular to ``axis``, in xyz order
+    #: with the axis component dropped (z → (x, y); x → (y, z); y → (x, z)).
+    #:
+    #: The axis letter alone cannot say whether two flats belong to the same piece of round
+    #: stock, and that is the one thing both consumers need (#1013). Two faces at
+    #: ``(-12.5, 0, 0)`` and ``(12.5, 0, 0)`` are one double-D — one A/F definition. Two at
+    #: ``(0, 0, 0)`` and ``(100, 0, 0)`` are two parallel lobes — two independent ones. From
+    #: ``axis``/``across``/``at`` those are the same shape of data, so the renderer collapsed
+    #: the second case into one callout and coverage, mirroring it, called the result
+    #: complete.
+    #:
+    #: ADR 0013's rule for a record that looks too thin: the fix is the record. The
+    #: recogniser already had the owning cylinder in hand, so this costs nothing to carry.
+    axis_line: tuple[float, float] = (0.0, 0.0)
+    #: The owning stock's axial extent ``(lo, hi)`` along ``axis``.
+    #:
+    #: The axis line alone is NOT stock identity, and this code already knew it: #1015 taught
+    #: the opposition test that "the same infinite axis is not the same piece of stock", and
+    #: the same holds for grouping. Two D-shafts stacked coaxially with a gap share an axis
+    #: line, so grouping on that alone merged two independent A/F definitions into one callout
+    #: — the very defect #1013 set out to fix, in a coaxial arrangement instead of a parallel
+    #: one (Codex #1035 r1).
+    #:
+    #: Together with ``axis_line`` this is the stock identity. Purely geometric — the
+    #: recogniser's internal ``stock`` tuple also carries a solid index, which is a same-run
+    #: equality check and deliberately NOT propagated: it is not stable across runs.
+    stock_span: tuple[float, float] = (0.0, 0.0)
 
 
 def recognise_flats(part, *, cyls=None) -> list[Flat]:
@@ -147,6 +174,8 @@ def recognise_flats(part, *, cyls=None) -> list[Flat]:
             cands.append(
                 {
                     "axis": c["axis"],
+                    "axis_line": _axis_line(c["axis"], ax),
+                    "stock_span": (round(c["s_lo"], 3), round(c["s_hi"], 3)),
                     "n": nv,
                     "s": s,
                     "r": r,
@@ -189,6 +218,32 @@ def recognise_flats(part, *, cyls=None) -> list[Flat]:
                 axis=cand["axis"],
                 across=round(across, 3),
                 at=(round(cand["at"][0], 3), round(cand["at"][1], 3), round(cand["at"][2], 3)),
+                axis_line=cand["axis_line"],
+                stock_span=cand["stock_span"],
             )
         )
     return sorted(out, key=lambda fl: (fl.axis, fl.at))
+
+
+def _axis_line(axis: str, ax) -> tuple[float, float]:
+    """The two coordinates of *ax* perpendicular to *axis* — the stock's axis line (#1013).
+
+    Rounded to the same 3 dp as every other coordinate a record carries, so two faces on one
+    piece of stock compare equal rather than differing in float noise.
+
+    **Axis-ALIGNED stock only, and deliberately so.** Dropping the dominant axis letter's
+    coordinate identifies a line only when the axis is along X, Y or Z. For a slanted
+    cylinder — ``analyse_cylinders`` classifies one by its dominant component, so a
+    ``(0.707, 0, 0.707)`` axis reads as ``"x"`` — this is neither canonical (the value depends
+    on WHICH point along the axis the cylinder record reports) nor sufficient (two different
+    slanted directions through one point encode identically). A canonical key would be the
+    perpendicular foot from the origin plus the direction, as :func:`_same_axis_line` already
+    computes for the opposition test.
+
+    That is not done here because slanted flats do not render at all today: the callout is
+    dropped (`flat_dropped`) before identity matters, so a canonical key would fix a
+    component of an already-broken path with no observable improvement. #1036 covers both
+    halves together. The narrow claim this function makes is the one it can keep.
+    """
+    keep = [i for i, letter in enumerate("xyz") if letter != axis]
+    return (round(ax[keep[0]], 3), round(ax[keep[1]], 3))
