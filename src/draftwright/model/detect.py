@@ -24,6 +24,7 @@ from draftwright.model.ir import (
     AuthoredDimension,
     BossFeature,
     ChamferFeature,
+    ChannelFeature,
     Datum,
     Feature,
     FilletFeature,
@@ -49,6 +50,7 @@ from draftwright.recognition import (
     BoltCircle,
     BossRecord,
     Chamfer,
+    Channel,
     CounterSink,
     FaceLevel,
     Fillet,
@@ -70,9 +72,11 @@ from draftwright.recognition import (
     StepShoulder,
     TurnedProfile,
     TurnedStep,
+    has_multi_axis_plates,
     project_step_shoulders,
     recognise_bosses,
     recognise_chamfers,
+    recognise_channels,
     recognise_countersinks,
     recognise_fillets,
     recognise_flats,
@@ -381,6 +385,22 @@ def _convert_pocket(pk: Pocket, ctx: ConvContext) -> PocketFeature:
     return _member_pocket(pk)
 
 
+def _convert_channel(channel: Channel, ctx: ConvContext) -> ChannelFeature:
+    c = channel.location
+    return ChannelFeature(
+        frame=Frame(origin=c, axis=channel.long_axis),
+        width_axis=channel.width_axis,
+        long_axis=channel.long_axis,
+        width=channel.width,
+        w_center=channel.w_center,
+        lo=channel.lo,
+        hi=channel.hi,
+        d_lo=channel.d_lo,
+        d_hi=channel.d_hi,
+        open_sign=channel.open_sign,
+    )
+
+
 def _convert_pad(pad: RaisedPad, ctx: ConvContext) -> PadFeature:
     """A recognised bounded island → the dimensioning IR."""
     return PadFeature(
@@ -529,6 +549,7 @@ def _convert_groove(groove: Groove, ctx: ConvContext) -> GrooveFeature:
 
 # Tier 1 — uniform converters: a pure (record, ctx) -> Feature mapping.
 _CONVERTERS: dict[type, Converter] = {
+    Channel: _convert_channel,
     Slot: _convert_slot,
     Pocket: _convert_pocket,
     RaisedPad: _convert_pad,
@@ -589,6 +610,7 @@ def build_part_model(
     holes=None,
     patterns=None,
     bosses=None,
+    channels=None,
     slots=None,
     slot_patterns=None,
     risers=None,
@@ -634,6 +656,19 @@ def build_part_model(
         prof = TurnedProfile.from_steps(recognise_turned_steps(part, cyls=cyls))
     orientation = prof.axis if prof is not None else None
     ctx = ConvContext(bbox=bbox, orientation=orientation)
+
+    if channels is None:
+        channels = recognise_channels(part)
+    # A full-span floored gap also describes a monolithic centred rebate, whose two
+    # shoulders are already owned as one correlated StepLevelFeature position set. The
+    # #917 channel scheme applies only where plate recognition proves a multi-axis
+    # U-bracket: base + walls. Use the same evidence as the plate-emission gate below so
+    # the two domains cannot both dimension one profile.
+    if prof is None and rotational is None and plates is None:
+        plates = recognise_plates(part)
+    multi_plate = has_multi_axis_plates(plates or ())
+    if prof is None and rotational is None and multi_plate:
+        features.extend(convert(channel, ctx) for channel in channels)
 
     # Holes and hole patterns. A recognised pattern becomes one PatternFeature
     # (count× member-diameter + pattern dims); its member holes are NOT also
@@ -797,7 +832,7 @@ def build_part_model(
     plate_zs_at_base: set = set()
     if prof is None and rotational is None:
         plates = recognise_plates(part) if plates is None else plates
-        if len({pl.axis for pl in plates}) >= 2:
+        if multi_plate:
             for pl in plates:
                 features.append(convert(pl, ctx))
                 # A Z base plate (bottom == part base) IS the first step level; suppress
