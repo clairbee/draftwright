@@ -57,12 +57,19 @@ def test_case_study_pad_reaches_the_drawing_with_complete_owned_footprint():
         "pad_length.length",
         "location_pad.location",
     }
-    detail_labels = {
+    detail_labels = Counter(
         annotation.label
         for name, annotation in drawing.iter_annotations()
         if name.startswith("dim_detail_a_step")
-    }
-    assert "26" in detail_labels
+    )
+    main_labels = Counter(
+        annotation.label
+        for name, annotation in drawing.iter_annotations()
+        if name.startswith("dim_step")
+    )
+    assert main_labels == Counter({"21": 1})
+    assert detail_labels == Counter({"26": 1})
+    assert not main_labels & detail_labels
     assert drawing.lint() == []
 
 
