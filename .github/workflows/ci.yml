@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# A PR needs results only for its latest head. Each main push gets a unique group because it
+# owns a post-merge slow-suite run that must survive later merges.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -19,17 +25,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Ruff lint
-        run: uv run ruff check src/ tests/
-
-      - name: Ruff format check
-        run: uv run ruff format --check src/ tests/
-
-      - name: Mypy
-        run: uv run mypy src/draftwright/
-
-      - name: Codespell
-        run: uv run codespell src/ tests/ docs/
+      - name: Static preflight
+        run: scripts/pr-check --static
 
   test:
     permissions:
@@ -42,11 +39,11 @@ jobs:
         # 0.11 (cadquery-ocp-novtk — VTK dropped, and the only kernel with 3.13/3.14 wheels).
         # A few exact-position snapshots are skipped on 0.11 (see tests/_kernel.py).
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        # Ubuntu/Python 3.12 is the canonical coverage job below. Excluding it
+        # Ubuntu/Python 3.13 is the canonical coverage job below. Excluding it
         # here keeps the OS/Python matrix complete without running it twice.
         exclude:
           - os: ubuntu-latest
-            python-version: "3.12"
+            python-version: "3.13"
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -70,17 +67,17 @@ jobs:
         # No --timeout here: it would override the 300 s set in
         # [tool.pytest.ini_options]. The heaviest test (full specimen-sheet SVG
         # export) can exceed 120 s on the slower macOS runners.
-        # Coverage runs in CI; it is kept out of the default addopts so local
-        # runs stay lean (see pyproject [tool.pytest.ini_options]).
+        # Coverage is measured once by the canonical Ubuntu/Python 3.13 job below.
+        # Instrumenting all fourteen compatibility jobs adds ~13% runtime without
+        # producing another retained or uploaded report.
         run: >-
           uv run pytest tests/ -n auto --dist loadscope
-          --cov=src/draftwright
-          --cov-report=term-missing
+          --durations=25
 
   coverage:
     # The fifteenth OS/Python matrix entry, split out so only the one job that
     # uploads to Codecov receives an OIDC token and renders retained reports.
-    name: test (ubuntu-latest, 3.12)
+    name: test (ubuntu-latest, 3.13)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -91,7 +88,7 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -103,21 +100,22 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml
           --cov-report=html:htmlcov
+          --durations=25
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           files: coverage.xml
-          # The repository's fail_under gate is authoritative; a third-party
-          # service outage must not block an otherwise valid change.
-          fail_ci_if_error: false
+          # Branch protection requires Codecov's project and patch checks. Fail this
+          # job too when the upload cannot produce those checks, rather than hanging.
+          fail_ci_if_error: true
           use_oidc: true
 
       - name: Upload coverage report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-linux-py3.12
+          name: coverage-linux-py3.13
           path: |
             coverage.xml
             htmlcov/
