@@ -23,6 +23,7 @@ from draftwright.sheet_emit import (
     _member_hole_str,
     emit_sheet_script,
     generate_sheet_script,
+    mirror_model,
     resolve_object_spec,
     unmirrored_dimensions,
 )
@@ -1397,12 +1398,11 @@ class TestRoundTripParity:
         moment that output was declared rather than detected.
 
         Signature parity alone would also be satisfied by two identically BLANK drawings, so
-        this pins the content on both sides as well — including the part that is still wrong.
+        this pins the content on both sides as well.
         This shaft's shoulders sit 4 mm apart, which fails the legibility gate, which drops the
-        whole step chain; the overall height was already suppressed at compile time on the
-        premise that chain would convey it, so nothing states the 60 mm. That is #955, it
-        predates this fix and affects the detected path identically, and it is asserted here
-        rather than glossed: when #955 lands this test must fail and be updated."""
+        whole step chain. #955 recovers the overall height from a compiler-approved contingency
+        while retaining the specific chain-drop diagnostic; direct and generated-script builds
+        must make that same runtime selection."""
         from build123d import Align
 
         shaft = Cylinder(12, 60, align=(Align.CENTER, Align.CENTER, Align.MIN))
@@ -1419,17 +1419,14 @@ class TestRoundTripParity:
             assert any(n.startswith("m_groove") for n in names), (which, names)
             assert "4 WIDE × ø18" in labels, (which, labels)
             assert "ø24" in labels, (which, labels)
-            # The #955 gap, stated: no height, and lint says so on both paths. These four
-            # assertions are expected to fail when #955 lands — that is deliberate. Replace
-            # them with the height's presence then, and check parity still holds; do not
-            # relax them, or the fixture stops describing the drawing it produces. (Asserting
-            # only the lint codes would not decouple this: they change when #955 lands too.)
-            gap = f"{which}: #955 fixed? see the note above — update, don't relax."
-            assert "dim_height" not in names, (gap, names)
-            assert "60" not in labels, (gap, labels)
+            assert "dim_height" in names, (which, names)
+            assert "60" in labels, (which, labels)
             codes = dwg.lint_summary()["by_code"]
-            assert codes.get("axial_length_missing") == 1, (gap, codes)
-            assert codes.get("step_dim_dropped") == 1, (gap, codes)
+            assert codes.get("axial_length_missing", 0) == 0, (which, codes)
+            assert codes.get("step_dim_dropped") == 1, (which, codes)
+            assert not [
+                row for row in dwg.suppressions() if row["parameter_id"] == "height.length"
+            ], (which, dwg.suppressions())
 
     def test_pocket_pattern_parity(self, tmp_path, monkeypatch):
         """#957 review: the emitted script named `pocket` without importing it, so a
@@ -2160,6 +2157,23 @@ class TestTheDimensionMirror:
         assert 'sheet.dimension(envelope1, "width.length")' not in src
         assert 'sheet.dimension(envelope1, "depth.length")' not in src
 
+    def test_a_withheld_model_level_height_does_not_synthesise_an_envelope(self):
+        from dataclasses import replace
+
+        from build123d import Align, Rotation
+
+        part = Rotation(0, 90, 0) * Cylinder(10, 30, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        model = detect_part_model(part)
+        model = replace(
+            model, features=[feature for feature in model.features if feature.kind != "envelope"]
+        )
+        assert not any(feature.kind == "envelope" for feature in model.features)
+
+        mirrored, synthesised = mirror_model(model)
+
+        assert mirrored is model
+        assert synthesised is None
+
 
 #: Annotations a generated script legitimately does NOT declare, keyed by EXACT name prefix
 #: where the family is closed, and each carrying the argument that it can never be a
@@ -2209,6 +2223,8 @@ _PLAN_DIMENSIONAL_FIELDS = {
     "locations": "walked per approved location, matched on the coarse 'location' role",
     "ladders": "walked per ladder; the compiler states the role it is named by "
     "(`_LADDER_ROLE`), so the emitter no longer carries its own copy (#975)",
+    "contingencies": "walked as approved alternative ladders; generated authored scripts "
+    "must retain a fallback even when the automatic build leaves it inactive",
     "diagnostics": "NOT dimensional — the omissions channel; nothing to mirror by definition",
 }
 
@@ -3271,10 +3287,15 @@ class TestTheDeclaredModelMatchesTheDetectedOne:
         exec(compile(src[: src.index("drawing = sheet.build()")], "<emit>", "exec"), ns)  # noqa: S102
         declared = ns["sheet"].model()
 
-        by_kind_detected = [f for f in detected.features if f.kind != "authored_dimension"]
+        mirrored, synthesised = mirror_model(detected)
+        extra = [f.kind for f in mirrored.features][len(detected.features) :]
+        assert extra == (["envelope"] if synthesised is not None else []), (
+            f"{name}: the mirror introduced an unexpected feature set {extra}"
+        )
+        by_kind_detected = [f for f in mirrored.features if f.kind != "authored_dimension"]
         by_kind_declared = [f for f in declared.features if f.kind != "authored_dimension"]
         assert [f.kind for f in by_kind_declared] == [f.kind for f in by_kind_detected], (
-            f"{name}: the script declares a different set of feature kinds"
+            f"{name}: the script declares a different set of feature kinds from its mirror"
         )
 
         for original, rebuilt in zip(by_kind_detected, by_kind_declared):
