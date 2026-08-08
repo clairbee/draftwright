@@ -5,8 +5,11 @@ from pathlib import Path
 import pytest
 
 from draftwright._pmi_part21 import (
+    DatumOccurrenceFact,
     GeometricToleranceFact,
+    match_datum_occurrence,
     match_geometric_tolerance,
+    read_datum_occurrences,
     read_geometric_tolerances,
 )
 
@@ -36,6 +39,12 @@ def _read(tmp_path, name: str, *instances: str):
     return read_geometric_tolerances(step)
 
 
+def _read_datums(tmp_path, name: str, *instances: str):
+    step = tmp_path / f"{name}.step"
+    step.write_text(_step(*instances), encoding="utf-8")
+    return read_datum_occurrences(step)
+
+
 def test_ctc01_geometric_tolerance_facts_are_exact():
     facts = read_geometric_tolerances(CTC01)
 
@@ -50,6 +59,222 @@ def test_ctc01_geometric_tolerance_facts_are_exact():
         ("#56", "Perpendicularity.1", "perpendicularity", 1.5, ""),
         ("#57", "Flatness.1", "flatness", 0.2, ""),
     ]
+
+
+def test_ctc01_datum_occurrences_preserve_context_and_feature_identity():
+    facts = read_datum_occurrences(CTC01)
+
+    assert len(facts) == 11
+    assert [
+        (
+            fact.tolerance_id,
+            fact.tolerance_name,
+            fact.tolerance_kind,
+            fact.datum_feature_id,
+            fact.datum_id,
+            fact.letter,
+            fact.reference_item_ids,
+            fact.reason,
+        )
+        for fact in facts
+    ] == [
+        ("#21", "Position.1", "position", "#34", "#37", "A", ("#861",), ""),
+        ("#21", "Position.1", "position", "#35", "#38", "B", ("#854", "#853"), ""),
+        ("#21", "Position.1", "position", "#36", "#39", "C", ("#839", "#840"), ""),
+        ("#22", "Position.2", "position", "#34", "#37", "A", ("#861",), ""),
+        ("#22", "Position.2", "position", "#35", "#38", "B", ("#854", "#853"), ""),
+        ("#22", "Position.2", "position", "#36", "#39", "C", ("#839", "#840"), ""),
+        (
+            "#26",
+            "Position surfacic profile.3",
+            "profile_surface",
+            "#34",
+            "#37",
+            "A",
+            ("#861",),
+            "",
+        ),
+        (
+            "#26",
+            "Position surfacic profile.3",
+            "profile_surface",
+            "#35",
+            "#38",
+            "B",
+            ("#854", "#853"),
+            "",
+        ),
+        (
+            "#26",
+            "Position surfacic profile.3",
+            "profile_surface",
+            "#36",
+            "#39",
+            "C",
+            ("#839", "#840"),
+            "",
+        ),
+        (
+            "#27",
+            "Position surfacic profile.2",
+            "profile_surface",
+            "#34",
+            "#37",
+            "A",
+            ("#861",),
+            "",
+        ),
+        (
+            "#56",
+            "Perpendicularity.1",
+            "perpendicularity",
+            "#34",
+            "#37",
+            "A",
+            ("#861",),
+            "",
+        ),
+    ]
+    assert {fact.datum_feature_id for fact in facts} == {"#34", "#35", "#36"}
+
+
+def test_datum_correspondence_requires_exact_context_and_letter():
+    facts = (
+        DatumOccurrenceFact("#1", "Position.1", "position", "#10", "#20", "A"),
+        DatumOccurrenceFact("#2", "Position.2", "position", "#10", "#20", "A"),
+    )
+
+    assert match_datum_occurrence(facts, "Position.2", "A") == (facts[1], "")
+    assert match_datum_occurrence(facts, "Position.1", "B") == (
+        None,
+        "Part21 has no datum 'B' in tolerance 'Position.1'",
+    )
+    assert match_datum_occurrence(facts, "", "A") == (
+        None,
+        "XCAF datum occurrence has no tolerance context",
+    )
+    assert match_datum_occurrence(facts, "Position.1", "") == (
+        None,
+        "XCAF datum occurrence has no letter",
+    )
+
+
+def test_datum_correspondence_fails_closed_when_context_and_letter_are_ambiguous():
+    facts = (
+        DatumOccurrenceFact("#1", "Position.1", "position", "#10", "#20", "A"),
+        DatumOccurrenceFact("#1", "Position.1", "position", "#11", "#21", "A"),
+    )
+
+    fact, reason = match_datum_occurrence(facts, "Position.1", "A")
+
+    assert fact is None
+    assert "ambiguous" in reason
+    assert "#1/#10, #1/#11" in reason
+
+
+def test_part21_datum_with_two_feature_relationships_stays_ambiguous(tmp_path):
+    facts = _read_datums(
+        tmp_path,
+        "ambiguous-datum-feature",
+        "#1=(GEOMETRIC_TOLERANCE('Probe','',#90,#91) "
+        "GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE((#2)) POSITION_TOLERANCE());",
+        "#2=DATUM_SYSTEM('',$,#99,.F.,(#3));",
+        "#3=DATUM_REFERENCE_COMPARTMENT('',$,#99,.F.,#4,$);",
+        "#4=DATUM('',$,#99,.F.,'A');",
+        "#5=DATUM_FEATURE('first',$,#99,.T.);",
+        "#6=DATUM_FEATURE('second',$,#99,.T.);",
+        "#7=SHAPE_ASPECT_RELATIONSHIP('',$,#5,#4);",
+        "#8=SHAPE_ASPECT_RELATIONSHIP('',$,#6,#4);",
+    )
+
+    assert facts == (
+        DatumOccurrenceFact(
+            "#1",
+            "Probe",
+            "position",
+            "",
+            "#4",
+            "A",
+            reason="datum #4 has 2 related DATUM_FEATUREs",
+        ),
+    )
+    assert match_datum_occurrence(facts, "Probe", "A") == (
+        facts[0],
+        "datum #4 has 2 related DATUM_FEATUREs",
+    )
+
+
+def test_reversed_datum_relationship_is_exact_but_missing_items_remain_explicit(tmp_path):
+    facts = _read_datums(
+        tmp_path,
+        "reversed-datum-feature",
+        "#1=(GEOMETRIC_TOLERANCE('Probe','',#90,#91) "
+        "GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE((#2)) POSITION_TOLERANCE());",
+        "#2=DATUM_SYSTEM('',$,#99,.F.,(#3));",
+        "#3=DATUM_REFERENCE_COMPARTMENT('',$,#99,.F.,#4,$);",
+        "#4=DATUM('',$,#99,.F.,'A');",
+        "#5=DATUM_FEATURE('first',$,#99,.T.);",
+        "#6=SHAPE_ASPECT_RELATIONSHIP('',$,#4,#5);",
+    )
+
+    assert facts == (
+        DatumOccurrenceFact(
+            "#1",
+            "Probe",
+            "position",
+            "#5",
+            "#4",
+            "A",
+            reason="datum feature #5 has no representation items",
+        ),
+    )
+
+
+def test_malformed_part21_datum_graphs_fail_closed(tmp_path):
+    no_base_parameters = _read_datums(tmp_path, "empty-tolerance", "#1=POSITION_TOLERANCE();")
+    assert no_base_parameters == ()
+
+    no_datum = _read_datums(
+        tmp_path,
+        "empty-compartment",
+        "#1=(GEOMETRIC_TOLERANCE('Probe','',#90,#91) "
+        "GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE((#2)) POSITION_TOLERANCE());",
+        "#2=DATUM_SYSTEM('',$,#99,.F.,(#3));",
+        "#3=DATUM_REFERENCE_COMPARTMENT('',$,#99,.F.,$,$);",
+    )
+    assert no_datum == (
+        DatumOccurrenceFact(
+            "#1",
+            "Probe",
+            "position",
+            "",
+            "",
+            "",
+            reason="datum compartment #3 has 0 datum references",
+        ),
+    )
+
+    no_feature = _read_datums(
+        tmp_path,
+        "unrelated-datum",
+        "#1=(GEOMETRIC_TOLERANCE('Probe','',#90,#91) "
+        "GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE((#2)) POSITION_TOLERANCE());",
+        "#2=DATUM_SYSTEM('',$,#99,.F.,(#3));",
+        "#3=DATUM_REFERENCE_COMPARTMENT('',$,#99,.F.,#4,$);",
+        "#4=DATUM('',$,#99,.F.,'A');",
+        "#5=SHAPE_ASPECT_RELATIONSHIP('',$,$,$);",
+    )
+    assert no_feature == (
+        DatumOccurrenceFact(
+            "#1",
+            "Probe",
+            "position",
+            "",
+            "#4",
+            "A",
+            reason="datum #4 has 0 related DATUM_FEATUREs",
+        ),
+    )
 
 
 def test_si_length_unit_is_resolved_to_millimetres(tmp_path):
