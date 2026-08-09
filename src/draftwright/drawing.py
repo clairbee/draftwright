@@ -467,8 +467,9 @@ class Drawing:
             name: view name (key in :attr:`views`); also used for coordinate lookups.
             shape: a build123d ``Shape`` to project. Given in world (unscaled)
                 coordinates and scaled internally unless ``scaled=True``.
-            camera, up, look_at: viewport parameters in **scaled** space (the same
-                convention the standard views use). ``look_at`` defaults to
+            camera: camera direction in **scaled** space.
+            up: camera up direction in **scaled** space.
+            look_at: viewport target in **scaled** space. Defaults to
                 :attr:`look_at` (the scaled centroid). Compose custom cameras from
                 :attr:`look_at` and :attr:`dist`.
             position: ``(x, y)`` page position for the view centre, in mm.
@@ -785,8 +786,9 @@ class Drawing:
         system (:class:`Strip`) that :func:`build_drawing` uses internally.
 
         Args:
-            p1, p2: page-coordinate tuples ``(px, py, 0)`` — use :meth:`at` to
+            p1: first page-coordinate tuple ``(px, py, 0)`` — use :meth:`at` to
                 convert world coordinates.
+            p2: second page-coordinate tuple ``(px, py, 0)``.
             side: ``"above"``, ``"below"``, ``"left"``, or ``"right"``.
             view: ``"front"``, ``"plan"``, or ``"side"``.
             draft: the drawing's :attr:`draft` preset.
