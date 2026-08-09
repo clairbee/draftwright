@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+## v0.4.2 — 2026-08-09
+
+**The trustworthy manufacturing drawings release.** AP242 PMI is now accounted for from its
+source records through lowering and rendering, imported datum faces retain an auditable topology
+identity, and several drawing paths that previously omitted, invented, or stalled on defining
+geometry now fail closed or produce the required annotation.
+
+### Added
+
+- **AP242 geometric tolerances and datum features survive as source-backed manufacturing
+  requirements** (#62/#675/#1094/#1095/#1099/#1100). The importer recovers range-encoded
+  dimensional tolerances, tolerance characteristics, magnitudes, datum chains, and supported
+  all-around/all-over modifiers. Datum representation-item faces are resolved to imported
+  topology through OCCT's exact transfer relationship rather than geometric resemblance, so the
+  NIST CTC-01 datum definitions `A`, `B`, and `C` lower and render without guessing.
+
+- **PMI completeness lint reconciles every AP242 source record through extraction, projection,
+  lowering, and rendering** (#623). Unsupported or incomplete requirements remain explicit with
+  source-specific outcomes instead of allowing a partial PMI transcription to report clean.
+
+- **Hexagonal and other regular polygonal bosses are recognised and dimensioned by their
+  across-flats size** (#676). Automatic and declared paths share the same feature model, and
+  mutation tests reject incomplete, unequal, non-planar, and ambiguous face sets.
+
+- **Generated `Sheet` scripts preserve references to named source objects where correspondence
+  is proven** (#1041). The `--script` path emits declarations such as
+  `sheet.hole(features.tap)` instead of copying detected numbers; ambiguous, stale, non-shape, or
+  unused mappings fail closed.
+
+- **A curated API reference is published at
+  <https://pzfreo.github.io/draftwright/>** (#846), covering the supported entry points,
+  `Sheet` declaration surface and fluent handles, `Drawing` results, and feature constructors.
+
+### Fixed
+
+- **Recognition no longer combines faces from different solids into phantom slots or pads**
+  (#958). Each physical solid is recognised independently before the results are combined.
+
+- **`Sheet.from_part(...).envelope()` reuses the detected whole-part envelope** (#1000) instead
+  of appending a duplicate feature whose dimensions were then silently deduplicated on the page.
+
+- **Crowded Z-turned step chains recover the independently approved overall height when the
+  chain cannot be placed** (#955), and placed step lengths retain measurement identity for
+  differential audit (#1004).
+
+- **All-over GD&T leaders and complex STEP B-spline paths have bounded, export-safe DXF
+  conversion** (#1097/#1070). All-over scope now reaches the existing export-safe leader
+  representation, while spline conversion reads OCCT knots, poles, and weights through its
+  indexed API instead of expensive sequence wrappers; visible curve geometry is preserved.
+
+### Changed
+
+- **Hosted CI retains every supported Python version and both dependency/kernel generations on
+  macOS and Windows with a smaller compatibility matrix** (#1103). PRs still require lint,
+  coverage, Codecov, and the compatibility gates; the slow standards tier runs once after merge.
+
+- **The pinned wheel fixture now records mutation-gated evidence for a repeating 13-fold radial
+  profile without claiming gear semantics** (#1085). Runtime recognition remains fail-closed
+  until a separate feature contract has independently sufficient evidence.
+
 ## v0.4.1 — 2026-08-07
 
 **The recognition trust release.** Automatic drawings now fail closed on unsupported inner
