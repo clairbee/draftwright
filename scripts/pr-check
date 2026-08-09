@@ -11,6 +11,7 @@ static_checks() {
     uv run ruff format --check src/ tests/
     uv run mypy src/draftwright/
     uv run codespell src/ tests/ docs/ scripts/ .github/ CONTRIBUTING.md
+    uv run --group docs mkdocs build --strict
 }
 
 case "$mode" in

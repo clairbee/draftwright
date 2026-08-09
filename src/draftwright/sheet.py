@@ -629,49 +629,63 @@ class _Control:
 
     # Form tolerances (no datum reference) --------------------------------------------------
     def straightness(self, tol, *, modifier=None) -> _Control:
+        """Apply straightness tolerance *tol*; no datum reference is permitted."""
         return self._add("straightness", tol, modifier=modifier)
 
     def flatness(self, tol, *, modifier=None) -> _Control:
+        """Apply flatness tolerance *tol*; no datum reference is permitted."""
         return self._add("flatness", tol, modifier=modifier)
 
     def circularity(self, tol, *, modifier=None) -> _Control:
+        """Apply circularity tolerance *tol*; no datum reference is permitted."""
         return self._add("circularity", tol, modifier=modifier)
 
     def cylindricity(self, tol, *, modifier=None) -> _Control:
+        """Apply cylindricity tolerance *tol*; no datum reference is permitted."""
         return self._add("cylindricity", tol, modifier=modifier)
 
     # Profile ------------------------------------------------------------------------------
     def profile_line(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply line-profile tolerance *tol*, optionally relative to datum(s) *to*."""
         return self._add("profile_line", tol, to=to, modifier=modifier)
 
     def profile_surface(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply surface-profile tolerance *tol*, optionally relative to datum(s) *to*."""
         return self._add("profile_surface", tol, to=to, modifier=modifier)
 
     # Orientation --------------------------------------------------------------------------
     def angularity(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply angularity tolerance *tol* relative to datum(s) *to*."""
         return self._add("angularity", tol, to=to, modifier=modifier)
 
     def perpendicularity(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply perpendicularity tolerance *tol* relative to datum(s) *to*."""
         return self._add("perpendicularity", tol, to=to, modifier=modifier)
 
     def parallelism(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply parallelism tolerance *tol* relative to datum(s) *to*."""
         return self._add("parallelism", tol, to=to, modifier=modifier)
 
     # Location (a position/concentricity zone is diametral by default) ---------------------
     def position(self, tol, *, to=None, diameter=True, modifier=None) -> _Control:
+        """Apply position tolerance *tol* relative to *to*; *diameter* selects the zone."""
         return self._add("position", tol, to=to, diameter=diameter, modifier=modifier)
 
     def concentricity(self, tol, *, to=None, diameter=True, modifier=None) -> _Control:
+        """Apply concentricity tolerance *tol* relative to *to*; *diameter* selects the zone."""
         return self._add("concentricity", tol, to=to, diameter=diameter, modifier=modifier)
 
     def symmetry(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply symmetry tolerance *tol* relative to datum(s) *to*."""
         return self._add("symmetry", tol, to=to, modifier=modifier)
 
     # Runout -------------------------------------------------------------------------------
     def circular_runout(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply circular-runout tolerance *tol* relative to datum(s) *to*."""
         return self._add("circular_runout", tol, to=to, modifier=modifier)
 
     def total_runout(self, tol, *, to=None, modifier=None) -> _Control:
+        """Apply total-runout tolerance *tol* relative to datum(s) *to*."""
         return self._add("total_runout", tol, to=to, modifier=modifier)
 
 

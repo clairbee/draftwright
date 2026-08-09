@@ -9,6 +9,9 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
+**[API reference](https://pzfreo.github.io/draftwright/)** ·
+**[Examples and source](https://github.com/pzfreo/draftwright#readme)**
+
 Automated technical-drawing generation for [build123d](https://github.com/gumyr/build123d).
 Point it at a solid (or a STEP file) and get a fully-annotated multi-view engineering
 drawing — orthographic views, dimensions, section A–A, ISO hatching, title block — ready

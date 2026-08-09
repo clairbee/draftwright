@@ -12,4 +12,5 @@ testenv/
 coverage.xml
 coverage*.json
 htmlcov/
+site/
 .DS_Store

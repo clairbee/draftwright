@@ -58,6 +58,7 @@ Homepage = "https://github.com/pzfreo/draftwright"
 Repository = "https://github.com/pzfreo/draftwright"
 Issues = "https://github.com/pzfreo/draftwright/issues"
 Changelog = "https://github.com/pzfreo/draftwright/blob/main/CHANGELOG.md"
+Documentation = "https://pzfreo.github.io/draftwright/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/draftwright"]
@@ -149,6 +150,10 @@ select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
 
 [dependency-groups]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocstrings[python]>=0.30,<1",
+]
 dev = [
     "codespell>=2.3.0",
     "hypothesis>=6",
