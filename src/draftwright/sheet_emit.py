@@ -66,7 +66,7 @@ def _candidate_external(part: Shape, candidate: Shape) -> bool | None:
         return None
     try:
         intersection = part & candidate
-        if intersection is None:
+        if not isinstance(intersection, Shape):
             return None
         overlap = abs(float(intersection.volume))
     except Exception:  # noqa: BLE001 — an unavailable Boolean means unavailable evidence
