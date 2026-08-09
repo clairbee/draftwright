@@ -5,6 +5,10 @@
 - **Amendment 1** (2026-07-05): the three authoring modes + the **mode-3 generation surface**
   (a declarative `Sheet`-DSL emitter, #461/#462/#463) — sequenced *before* P2b. Decided: for
   detected input, emit a **part-seam** with detected numbers; reconstruction deferred.
+- **Amendment 4** (2026-08-09, #1041): a live-source features dataclass may designate a
+  Shape-valued `body` and expose named Shape fields. The emitter substitutes a source reference
+  only for independently polarity-checked, geometry-preserving, mutual one-to-one cylindrical
+  correspondence; every unavailable or ambiguous match retains the numeric declaration.
 - **Date:** 2026-07-05
 - **Deciders:** Paul Fremantle (pzfreo)
 
@@ -329,3 +333,26 @@ bores are *sizing* bores come from the part classification (`analysis._classify_
 inference path for one fact (it silently dropped bores and mis-picked the axis when tried).
 #950 restores the object form once that classification is shared. (All bores share `role="bore"`, so a bore decoration folds onto every bore —
 distinguishing individual bores is out of scope.)
+
+## Amendment 4 — fail-closed named-source emission (2026-08-09, #1041)
+
+Mode 3b no longer requires the user to perform every mechanical numeric-to-object swap by hand.
+An object spec may resolve to the documented features dataclass form: one Shape-valued `body`
+plus public named Shape fields. The generated seam binds the result once as `features`, detects
+from `features.body`, and may emit `sheet.hole(features.bore)` or
+`sheet.step(features.journal)`.
+
+This does **not** weaken Amendment 1's rejection of reconstructed geometry. The candidates are
+the caller's real source objects; draftwright creates none. Nor does a plausible geometric
+resemblance earn a reference. A candidate is used only when all of these are established:
+
+1. Its Boolean relationship to `body` proves the required polarity: absent material for a hole
+   cutter, wholly present material for a boss or step. Partial overlap is unavailable evidence.
+2. Axis, diameter and in-plane position match the detected cylindrical feature, and the object
+   form reconstructs the same defining centre and axial length without numeric overrides.
+3. The feature has exactly one candidate and that candidate has exactly one feature. Duplicate
+   names, repeated geometry, or any other ambiguity fail closed to the pre-existing numeric line.
+
+The guard is deliberately per-line. Unsupported non-cylindrical features and unmatched
+cylindrical features remain complete numeric declarations in the same script. This preserves
+the honest 3a baseline and avoids turning partial source identity into an all-or-nothing mode.

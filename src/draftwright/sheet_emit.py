@@ -4,13 +4,14 @@ Mode 3 of the three authoring modes: *generate an editable beautiful-Python scri
 **detected** :class:`PartModel` and print a :class:`~draftwright.Sheet` script — one commentable
 line per feature — that the user edits / comments-out / extends, then re-runs.
 
-**Detected input only writes numbers (the part-seam form, ADR 0011 Amdt 1 decision).** For a STEP
-file or a recovered solid the number *is* the ground truth, so a detected value is honest. We never
-fabricate a build123d part to chase a number-free layer — a synthesised solid silently drops what
-detection didn't model (a misread band, a thread's true form, an unrecognised relief) yet reads as
-authoritative. A caller who
-*has* the objects (mode 3b) wires their real part into the seam and swaps the number lines for
-``sheet.hole(obj)`` references — the emitter's numbers are a starting point, not a ceiling.
+**Detected STEP input only writes numbers (the part-seam form, ADR 0011 Amdt 1 decision).** For a
+STEP file or a recovered solid the number *is* the ground truth, so a detected value is honest. We
+never fabricate a build123d part to chase a number-free layer — a synthesised solid silently drops
+what detection didn't model (a misread band, a thread's true form, an unrecognised relief) yet reads
+as authoritative. A caller who *has* the objects (mode 3b) can expose a features dataclass with a
+Shape-valued ``body``; the emitter references a named object only where source polarity, geometry,
+and mutual one-to-one correspondence independently establish it (#1041). Every unavailable or
+ambiguous correspondence retains the complete detected numeric declaration.
 
 Kinds with no declarative verb are flagged inline — never silently dropped — and left to the
 auto-pass that runs over the declared model on re-run. Every *geometric* kind now has one
@@ -29,12 +30,132 @@ fixtures (#472).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 
 from build123d import Shape
 
 from draftwright.builder import detect_part_model
+
+
+@dataclass(frozen=True)
+class _ObjectSource:
+    """A resolved live-source seam and the named geometry it can reference."""
+
+    part: Shape
+    seam: str
+    candidates: Mapping[str, Shape]
+
+
+_REFERENCE_EXTERNAL = {"hole": False, "boss": True, "step": True}
+_REFERENCE_DIA_TOL = 0.2
+_REFERENCE_POS_TOL = 0.5
+
+
+def _candidate_external(part: Shape, candidate: Shape) -> bool | None:
+    """Whether *candidate* is material in *part*, ``False`` for a removed tool.
+
+    A source object is independently useful only when the Boolean relationship is decisive:
+    wholly present means an external boss/step; wholly absent means an internal cutter.  A
+    partial overlap could be a construction solid, an unfinished Boolean, or a composite tool,
+    so it deliberately has no polarity and cannot acquire a reference.
+    """
+    volume = abs(float(candidate.volume))
+    if volume <= 1e-9:
+        return None
+    try:
+        intersection = part & candidate
+        if intersection is None:
+            return None
+        overlap = abs(float(intersection.volume))
+    except Exception:  # noqa: BLE001 — an unavailable Boolean means unavailable evidence
+        return None
+    fraction = overlap / volume
+    if fraction <= 1e-7:
+        return False
+    if fraction >= 1 - 1e-7:
+        return True
+    return None
+
+
+def _reference_geometry_matches(feature, candidate: Shape) -> bool:
+    """Whether a candidate can rebuild *feature* without restating its defining geometry."""
+    from draftwright.model.declare import _norm_axis, _read_cylinder
+
+    if getattr(feature, "kind", None) not in _REFERENCE_EXTERNAL:
+        return False
+    if feature.kind == "hole" and getattr(feature, "profile", None) not in (None, "circular"):
+        return False
+    if feature.kind == "hole" and getattr(feature, "count", 1) != 1:
+        return False
+    try:
+        axis, diameter, centre = _read_cylinder(candidate)
+        axis = _norm_axis(axis)
+    except Exception:  # noqa: BLE001 — an unreadable candidate is simply not evidence
+        return False
+    if axis != _norm_axis(feature.frame.axis):
+        return False
+    if abs(float(feature.diameter) - float(diameter)) > _REFERENCE_DIA_TOL:
+        return False
+    axis_index = "xyz".index(axis)
+    perpendicular = [index for index in range(3) if index != axis_index]
+    if any(
+        abs(float(feature.frame.origin[index]) - float(centre[index])) > _REFERENCE_POS_TOL
+        for index in perpendicular
+    ):
+        return False
+
+    # The broad correspondence deliberately ignores axial position, as Sheet._match_object
+    # does. Emission has a stronger obligation: the object form must reconstruct the same IR.
+    # If its centre/length differ, keep the complete numeric declaration rather than smuggling
+    # overrides beside a reference that appears authoritative.
+    if any(
+        abs(float(feature.frame.origin[index]) - float(centre[index])) > 5e-4 for index in range(3)
+    ):
+        return False
+    if abs(float(feature.diameter) - float(diameter)) > 5e-4:
+        return False
+    bb = candidate.bounding_box()
+    axial_length = (bb.size.X, bb.size.Y, bb.size.Z)[axis_index]
+    measured_length = getattr(feature, "length", None)
+    if measured_length is None and feature.kind == "boss":
+        measured_length = getattr(feature, "height", None)
+    return measured_length is None or abs(float(measured_length) - axial_length) <= 5e-4
+
+
+def _object_references(
+    features, part: Shape | None, candidates: Mapping[str, Shape] | None
+) -> dict[int, str]:
+    """Mutual one-to-one feature→source expressions, with ambiguity failing closed."""
+    if part is None or not candidates:
+        return {}
+
+    feature_edges: dict[int, list[str]] = {}
+    candidate_edges: dict[str, list[int]] = {name: [] for name in candidates}
+    polarities = {
+        name: _candidate_external(part, candidate) for name, candidate in candidates.items()
+    }
+    for feature in features:
+        kind = getattr(feature, "kind", None)
+        if not isinstance(kind, str):
+            continue
+        expected_external = _REFERENCE_EXTERNAL.get(kind)
+        if expected_external is None:
+            continue
+        for name, candidate in candidates.items():
+            if polarities[name] != expected_external:
+                continue
+            if not _reference_geometry_matches(feature, candidate):
+                continue
+            feature_edges.setdefault(id(feature), []).append(name)
+            candidate_edges[name].append(id(feature))
+
+    return {
+        feature_id: names[0]
+        for feature_id, names in feature_edges.items()
+        if len(names) == 1 and len(candidate_edges[names[0]]) == 1
+    }
 
 
 def _n(v) -> float | int:
@@ -68,7 +189,7 @@ def _tuple_arg(values) -> str:
     return "(" + ", ".join(vals) + ")"
 
 
-def _hole_line(f) -> str:
+def _hole_line(f, object_ref: str | None = None) -> str:
     if getattr(f, "profile", None) == "double_d":
         kw = [
             f"major_diameter={_n(f.diameter)}",
@@ -82,7 +203,15 @@ def _hole_line(f) -> str:
         if f.profile_direction is not None:
             kw.append(f"profile_direction={_direction(f.profile_direction)}")
         return f"sheet.double_d_bore({', '.join(kw)})"
-    kw = [f"diameter={_n(f.diameter)}", f"at={_pt(f.frame.origin)}", f'axis="{f.frame.axis}"']
+    kw = (
+        [object_ref]
+        if object_ref is not None
+        else [
+            f"diameter={_n(f.diameter)}",
+            f"at={_pt(f.frame.origin)}",
+            f'axis="{f.frame.axis}"',
+        ]
+    )
     if f.count and f.count > 1:
         kw.append(f"count={f.count}")
         # A count-group carries its member positions; without them the render collapses to a
@@ -324,7 +453,13 @@ def _datum_ref_line(f, origin_ref: str | None = None) -> str:
     )
 
 
-def _feature_line(f, part_envelope=None, *, origin_ref: str | None = None) -> str:
+def _feature_line(
+    f,
+    part_envelope=None,
+    *,
+    origin_ref: str | None = None,
+    object_ref: str | None = None,
+) -> str:
     """The declaration for one feature.
 
     *part_envelope* is the whole-part `EnvelopeFeature` when the caller knows it, so an
@@ -388,7 +523,7 @@ def _feature_line(f, part_envelope=None, *, origin_ref: str | None = None) -> st
             f'axis="{f.frame.axis}")'
         )
     if k == "hole":
-        return _hole_line(f)
+        return _hole_line(f, object_ref)
     if k == "boss":
         thr = (
             f", thread={f.thread!r}" if getattr(f, "thread", None) else ""
@@ -398,14 +533,22 @@ def _feature_line(f, part_envelope=None, *, origin_ref: str | None = None) -> st
         # regenerated model could not express a dimension its source had — silently before
         # the mirror named it, and as a raise afterwards. ADR 0011's round-trip rule is that
         # recognise, emit and declare agree about a feature's parameters.
-        height = f", height={_n(f.height)}" if getattr(f, "height", None) else ""
+        height = (
+            f", height={_n(f.height)}" if object_ref is None and getattr(f, "height", None) else ""
+        )
         # The SPAN too, not just the height. Detection reports `frame.origin` as the boss TOP
         # while `declare.boss` reads `at` as its CENTRE, so round-tripping the origin alone
         # shifted the height dimension by half the boss — same value, wrong witness lines
         # (#947 review, found by a boss fixture the corpus previously lacked). Emitting the
         # span states the geometry outright instead of relying on the two ends agreeing about
         # a coordinate convention.
-        span = f", span=({_pt(f.span[0])}, {_pt(f.span[1])})" if getattr(f, "span", None) else ""
+        span = (
+            f", span=({_pt(f.span[0])}, {_pt(f.span[1])})"
+            if object_ref is None and getattr(f, "span", None)
+            else ""
+        )
+        if object_ref is not None:
+            return f"sheet.diameter({object_ref}{thr})"
         return (
             f"sheet.diameter(diameter={_n(f.diameter)}{height}{span}, "
             f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
@@ -424,6 +567,8 @@ def _feature_line(f, part_envelope=None, *, origin_ref: str | None = None) -> st
         thr = (
             f", thread={f.thread!r}" if getattr(f, "thread", None) else ""
         )  # external thread (#859)
+        if object_ref is not None:
+            return f"sheet.step({object_ref}{thr})"
         return (
             f"sheet.step(diameter={_n(f.diameter)}, length={_n(f.length)}, "
             f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
@@ -1008,7 +1153,9 @@ def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) ->
     return out
 
 
-def _feature_block(features, part_envelope=None) -> tuple[list[str], dict[int, str]]:
+def _feature_block(
+    features, part_envelope=None, object_refs: Mapping[int, str] | None = None
+) -> tuple[list[str], dict[int, str]]:
     """The emitted feature lines plus ``{id(feature): binding}`` for the names they bind.
 
     The map is RETURNED rather than recomputed by the dimension block, which needs the same
@@ -1046,11 +1193,13 @@ def _feature_block(features, part_envelope=None) -> tuple[list[str], dict[int, s
                     f"emit_sheet_script(): cannot preserve a {f.kind} whose origin has "
                     "no emitted binding"
                 )
-            line = (
-                _feature_line(f, part_envelope, origin_ref=origin_ref)
-                if gdt_with_origin
-                else _feature_line(f, part_envelope)
-            )
+            object_ref = (object_refs or {}).get(id(f))
+            if gdt_with_origin:
+                line = _feature_line(f, part_envelope, origin_ref=origin_ref)
+            elif object_ref is not None:
+                line = _feature_line(f, part_envelope, object_ref=object_ref)
+            else:
+                line = _feature_line(f, part_envelope)
             name = _binding(f, line, counts)
             if name is not None:
                 names[id(f)] = name
@@ -1075,9 +1224,9 @@ decorate one after the fact. They are bound rather than addressed by position on
 comment out a feature and any line naming it fails loudly, instead of silently retargeting
 onto its neighbour.
 
-The values are DETECTED off the geometry (honest for a STEP / recovered solid). If you
-built the part yourself, wire your object into the `part = …` seam and swap a numbered
-line for a reference — e.g.  sheet.hole(my_bore)  — to read the size off the object.
+The numeric values are DETECTED off the geometry (honest for a STEP / recovered solid).
+With a named features container, uniquely proven source objects are referenced directly;
+unavailable or ambiguous matches remain complete numeric declarations and fail closed.
 """'''
 
 
@@ -1100,6 +1249,8 @@ def emit_sheet_script(
     zones: bool = False,
     projection: str | None = None,
     object_ref: bool = False,
+    object_candidates: Mapping[str, Shape] | None = None,
+    source_part: Shape | None = None,
     formats: Sequence[str] = ("pdf",),
 ) -> str:
     """The generated declarative ``Sheet`` script text for a detected *model*.
@@ -1187,7 +1338,10 @@ def emit_sheet_script(
         ctor.append(f"projection={projection!r}")
     from draftwright.model.declare import _envelope_from_bbox
 
-    feature_lines, _names = _feature_block(model.features, _envelope_from_bbox(model.bbox))
+    object_refs = _object_references(model.features, source_part, object_candidates)
+    feature_lines, _names = _feature_block(
+        model.features, _envelope_from_bbox(model.bbox), object_refs
+    )
     # Narrowed to what the BODY actually names. The set above is derived from feature kinds,
     # which over-imports the moment a kind stops emitting a constructor: since #976 a
     # whole-part envelope emits `sheet.envelope()`, so `EnvelopeFeature` and `Frame` were
@@ -1226,6 +1380,13 @@ def emit_sheet_script(
         # script has no such objects, so this note is emitted only for object inputs).
         *(
             [
+                "# Named-source correspondence: unique cylindrical matches below reference",
+                "# `features.<name>` directly. Numeric lines are deliberate fail-closed fallbacks",
+                "# where source polarity, geometry, or one-to-one identity was not established.",
+                "",
+            ]
+            if object_candidates
+            else [
                 "# Object-reference tip: you built these objects, so swap a numbered arg for the",
                 "# object itself to read the size off it — e.g.  sheet.step(journal)  /",
                 "#  sheet.hole(m3_bore).thread('M3x0.5')  — no numbers restated (ADR 0011 declare).",
@@ -1270,12 +1431,13 @@ def emit_sheet_script(
     return "\n".join(lines) + "\n"
 
 
-def resolve_object_spec(spec: str) -> tuple[Shape, str]:
-    """Resolve a ``module:attr`` (or ``path/to/file.py:attr``) spec into ``(build123d object,
-    import seam)`` (ADR 0011, #469). The attribute is imported; a zero-argument callable (a
-    ``make_part()`` factory) is called. The returned seam is the Python that re-binds ``part``
-    in the generated script, so the drawing references your **live parametric source**, not a
-    frozen STEP.
+def _resolve_object_source(spec: str) -> _ObjectSource:
+    """Resolve a live Shape or a dataclass carrying ``body`` plus named Shape fields.
+
+    The features-container form is the source-identity seam from #1041: it binds the factory
+    result once as ``features``, detects from ``features.body``, and makes each other public
+    Shape field available to the correspondence guard. A plain Shape keeps the exact #469
+    behaviour and supplies no candidates.
 
     SECURITY: importing the target executes its module-level code — the same trust as running
     the file yourself."""
@@ -1365,10 +1527,39 @@ def resolve_object_spec(spec: str) -> tuple[Shape, str]:
             )
         obj, called = obj(), True
 
-    if not isinstance(obj, Shape):
-        raise ValueError(f"{spec!r}: resolved to {type(obj).__name__}, not a build123d Shape")
+    target = f"{ref}{'()' if called else ''}"
+    if isinstance(obj, Shape):
+        return _ObjectSource(obj, f"{seam}\npart = {target}", {})
 
-    return obj, f"{seam}\npart = {ref}{'()' if called else ''}"
+    body = getattr(obj, "body", None)
+    if is_dataclass(obj) and isinstance(body, Shape):
+        candidates = {
+            f"features.{field.name}": value
+            for field in fields(obj)
+            if field.name != "body"
+            and not field.name.startswith("_")
+            and isinstance((value := getattr(obj, field.name)), Shape)
+        }
+        return _ObjectSource(
+            body,
+            f"{seam}\nfeatures = {target}\npart = features.body",
+            candidates,
+        )
+
+    raise ValueError(
+        f"{spec!r}: resolved to {type(obj).__name__}, not a build123d Shape or a dataclass "
+        "with a Shape-valued body"
+    )
+
+
+def resolve_object_spec(spec: str) -> tuple[Shape, str]:
+    """Resolve a Shape-valued object spec into ``(object, import seam)`` (#469).
+
+    Kept as the compatibility surface for callers that only need the body. The CLI uses the
+    richer private resolver so a #1041 features container can also carry named candidates.
+    """
+    source = _resolve_object_source(spec)
+    return source.part, source.seam
 
 
 def generate_sheet_script(
@@ -1390,6 +1581,7 @@ def generate_sheet_script(
     projection: str | None = None,
     pmi: str = "off",
     part_expr: str | None = None,
+    object_candidates: Mapping[str, Shape] | None = None,
     formats: Sequence[str] = ("pdf",),
 ) -> str:
     """Write a declarative ``Sheet``-DSL script for *step_file* (a STEP path or a build123d
@@ -1440,6 +1632,8 @@ def generate_sheet_script(
         zones=zones,
         projection=projection,
         object_ref=is_shape,  # a live Shape / resolved object-spec has objects to reference (#771)
+        object_candidates=object_candidates,
+        source_part=step_file if isinstance(step_file, Shape) else None,
         formats=formats,
     )
     py_path = f"{stem}.py"

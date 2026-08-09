@@ -72,21 +72,20 @@ def build_thumbwheel() -> Part:
     return build_thumbwheel_features().body
 ```
 
-`--out ... --script` against a `module:attr` / `file.py:attr` spec needs a **zero-arg**
-callable returning a build123d `Shape` (or an already-built one) — so point it at
-`build_thumbwheel`, not `build_thumbwheel_features`: the latter returns a
-`ThumbwheelFeatures` dataclass and the resolver rejects it (`resolved to
-ThumbwheelFeatures, not a build123d Shape`);
-if your builder takes a `params` argument, point the spec at a small zero-arg factory
-instead of the parametrised function itself.
+`--out ... --script` against a `module:attr` / `file.py:attr` spec accepts either a zero-arg
+callable returning a build123d `Shape`, or the features-dataclass form above: a zero-arg callable
+returning a dataclass with a Shape-valued `body` and named Shape fields. Point it at
+`build_thumbwheel_features` to let the emitter preserve independently established references.
+If your builder takes a `params` argument, point the spec at a small zero-arg factory instead of
+the parametrised function itself.
 
 ## Generate the script first, then edit it
 
 You do not write the `Sheet` script below from scratch — you generate it and edit it. Point
-`--script` at the **Shape-returning** wrapper:
+`--script` at the **features-returning** factory:
 
 ```bash
-draftwright yourmodule:build_thumbwheel --script --out thumbwheel
+draftwright yourmodule:build_thumbwheel_features --script --out thumbwheel
 ```
 
 That writes `thumbwheel.py`. `--script` emits the declarative `Sheet` flavour by default (the
@@ -95,8 +94,9 @@ only one since 0.3 — `--style sheet` is the sole accepted value).
 What comes out — **verbatim, with feature and dimension lines elided where marked**:
 
 ```python
-from yourmodule import build_thumbwheel as _obj
-part = _obj()
+from yourmodule import build_thumbwheel_features as _obj
+features = _obj()
+part = features.body
 
 sheet = Sheet(part, title='DRAWING', number='DWG-001')
 hole1 = sheet.hole(diameter=1.6, at=(0.8, 0, 0), axis="x").depth(8)   # ⌀1.6 blind 8
@@ -114,16 +114,24 @@ drawing = sheet.build()
 drawing.export('thumbwheel', formats=('pdf',))
 ```
 
-`part` is rebound to your **live source**, not a frozen STEP. `authored_dimensions()` declares
-that this is the complete set, so commenting a `dimension(...)` line out drops exactly that
-dimension. `sheet.envelope()` reads the overall size off the part rather than restating it. The
-title defaults to `DRAWING` — pass `--title` to set it.
+`features` and `part` are rebound to your **live source**, not a frozen STEP. References are
+substituted only where polarity, defining geometry, and mutual one-to-one correspondence all
+agree. This particular fused body no longer has a one-to-one mapping: it detects more axial
+segments than the source names, the tap's construction span is offset from the finished bore,
+and the fused external objects partially overlap one another. Every line therefore stays a
+complete numeric declaration. That is intentional — a numeric fallback is safer than a
+plausible but wrong source name. A plate with an isolated named cutter whose centre agrees with
+the finished bore instead emits `sheet.hole(features.bore, depth=...)` automatically.
+`authored_dimensions()` declares that this is the complete set, so commenting a
+`dimension(...)` line out drops exactly that dimension. `sheet.envelope()` reads the overall
+size off the part rather than restating it. The title defaults to `DRAWING` — pass `--title` to
+set it.
 
-Honest, and a working starting point. But `diameter=4, length=3.7` are numbers *restated* from
-geometry you already have — change the journal in your source and the drawing quietly disagrees.
-Note too that the fused body detects as four `step`s: the silhouette is all detection can see
-once the objects are unioned. The rest of this doc is the edit that fixes both — swap each
-numbered line for the object it was measured from.
+Honest, and a working starting point. Note that the fused body detects as four `step`s: the
+silhouette is all detection can see once the objects are unioned. Source references cure
+restated numbers where identity survives; they do not recreate manufacturing identity that the
+finished solid no longer contains. The rest of this document shows how to declare that intent
+explicitly when the generated fail-closed mix cannot.
 
 ## Declaring the drawing by reference
 

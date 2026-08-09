@@ -39,6 +39,62 @@ _SOURCE_MODULE = (
     "def needs_args(x):\n    return x\n"
 )
 
+_SOURCE_FEATURES_MODULE = """
+from dataclasses import dataclass
+from build123d import Box, Cylinder, Part, Pos
+
+@dataclass
+class Features:
+    body: Part
+    bore: Part
+
+def make_features():
+    bore = Pos(20, 10, 4) * Cylinder(4, 20)
+    return Features(body=Box(80, 50, 8) - bore, bore=bore)
+
+@dataclass
+class AmbiguousFeatures:
+    body: Part
+    bore: Part
+    duplicate: Part
+
+def make_ambiguous_features():
+    bore = Pos(20, 10, 4) * Cylinder(4, 20)
+    return AmbiguousFeatures(body=Box(80, 50, 8) - bore, bore=bore, duplicate=bore)
+
+@dataclass
+class TwoBoreFeatures:
+    body: Part
+    small: Part
+    large: Part
+
+def make_two_bore_features():
+    small = Pos(-20, 10, 4) * Cylinder(3, 20)
+    large = Pos(20, -10, 4) * Cylinder(5, 20)
+    return TwoBoreFeatures(body=Box(80, 50, 8) - small - large, small=small, large=large)
+
+@dataclass
+class ShaftFeatures:
+    body: Part
+    large_step: Part
+    small_step: Part
+
+def make_shaft_features():
+    large_step = Pos(0, 0, 5) * Cylinder(10, 10)
+    small_step = Pos(0, 0, 15) * Cylinder(6, 10)
+    return ShaftFeatures(
+        body=large_step + small_step,
+        large_step=large_step,
+        small_step=small_step,
+    )
+
+def make_offset_tool_features():
+    bore = Pos(20, 10, -6) * Cylinder(4, 20)
+    return Features(body=Box(80, 50, 8) - bore, bore=bore)
+
+features = make_features()
+"""
+
 AP242_CTC01 = Path(__file__).parent / "fixtures" / "nist_ctc_01_asme1_ap242.stp"
 
 
@@ -994,6 +1050,11 @@ class TestObjectSpec:
         p.write_text(_SOURCE_MODULE, encoding="utf-8")
         return p
 
+    def _features_mod(self, tmp_path, name="featuremod"):
+        p = tmp_path / f"{name}.py"
+        p.write_text(_SOURCE_FEATURES_MODULE, encoding="utf-8")
+        return p
+
     def test_file_attr_resolves_object_with_self_contained_seam(self, tmp_path):
         p = self._mod(tmp_path)
         obj, seam = resolve_object_spec(f"{p}:bracket")
@@ -1014,6 +1075,274 @@ class TestObjectSpec:
         export_step(Box(60, 40, 12), str(step))
         py2 = generate_sheet_script(str(step), out=str(tmp_path / "step"))
         assert "Object-reference tip" not in Path(py2).read_text(encoding="utf-8")
+
+    def test_features_container_emits_unique_bore_reference_and_rebuilds_same_feature(
+        self, tmp_path, monkeypatch
+    ):
+        import dataclasses
+
+        from typer.testing import CliRunner
+
+        from draftwright import Drawing
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["featuremod:make_features", "--script", "--out", "referenced"]
+        )
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "referenced.py").read_text(encoding="utf-8")
+        assert "features = _obj()" in source
+        assert "part = features.body" in source
+        hole_line = _feature_line_for(source, "sheet.hole(")
+        assert "sheet.hole(features.bore, depth=8)" in hole_line
+        assert "diameter=" not in hole_line and "at=" not in hole_line and "axis=" not in hole_line
+
+        captured = {}
+        monkeypatch.setattr(
+            Drawing, "export", lambda self, *a, **k: captured.setdefault("drawing", self)
+        )
+        exec(compile(source, str(tmp_path / "referenced.py"), "exec"), {})  # noqa: S102
+        rebuilt = next(f for f in captured["drawing"].model().features if f.kind == "hole")
+        original = next(
+            f
+            for f in detect_part_model(__import__("featuremod").make_features().body).features
+            if f.kind == "hole"
+        )
+        # Same exemption as the repository-wide #964 oracle: a singleton detector records its
+        # own origin as the one member, while the declared singleton uses the empty default.
+        assert _structurally_equal(dataclasses.replace(original, members=()), rebuilt)
+
+    def test_two_names_for_one_cutter_fail_closed_to_the_numeric_declaration(
+        self, tmp_path, monkeypatch
+    ):
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["featuremod:make_ambiguous_features", "--script", "--out", "ambiguous"]
+        )
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "ambiguous.py").read_text(encoding="utf-8")
+        hole_line = _feature_line_for(source, "sheet.hole(")
+        assert "sheet.hole(diameter=8" in hole_line
+        assert "features.bore" not in hole_line and "features.duplicate" not in hole_line
+
+    def test_distinct_bores_emit_their_own_names_not_a_geometric_neighbour(
+        self, tmp_path, monkeypatch
+    ):
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["featuremod:make_two_bore_features", "--script", "--out", "two"]
+        )
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "two.py").read_text(encoding="utf-8")
+        lines = [
+            _feature_line_for(source, "sheet.hole(features.small"),
+            _feature_line_for(source, "sheet.hole(features.large"),
+        ]
+        assert "diameter=6" not in lines[0] and "at=" not in lines[0]
+        assert "diameter=10" not in lines[1] and "at=" not in lines[1]
+
+    def test_external_step_candidates_emit_only_the_corresponding_source_object(
+        self, tmp_path, monkeypatch
+    ):
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["featuremod:make_shaft_features", "--script", "--out", "shaft"]
+        )
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "shaft.py").read_text(encoding="utf-8")
+        assert "sheet.step(features.large_step)" in source
+        assert "sheet.step(features.small_step)" in source
+        assert "sheet.step(diameter=" not in source
+
+    def test_axially_offset_construction_tool_fails_closed_to_numeric(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["featuremod:make_offset_tool_features", "--script", "--out", "offset"]
+        )
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "offset.py").read_text(encoding="utf-8")
+        hole_line = _feature_line_for(source, "sheet.hole(")
+        assert "sheet.hole(diameter=8" in hole_line
+        assert "features.bore" not in hole_line
+
+    def test_candidate_polarity_requires_wholly_present_or_wholly_absent_material(self):
+        from draftwright.sheet_emit import _candidate_external
+
+        candidate = Cylinder(4, 20)
+        containing = Box(40, 40, 40)
+        removed = containing - candidate
+        partial = Pos(0, 0, 15) * Box(40, 40, 40)
+        assert _candidate_external(containing, candidate) is True
+        assert _candidate_external(removed, candidate) is False
+        assert _candidate_external(partial, candidate) is None
+
+    def test_candidate_polarity_fails_closed_when_volume_or_boolean_evidence_is_unavailable(
+        self,
+    ):
+        from types import SimpleNamespace
+
+        from build123d import Edge
+
+        from draftwright.sheet_emit import _candidate_external
+
+        assert _candidate_external(Box(10, 10, 10), Edge.make_line((0, 0, 0), (1, 0, 0))) is None
+
+        candidate = SimpleNamespace(volume=1.0)
+
+        class NoIntersection:
+            def __and__(self, _other):
+                return None
+
+        assert _candidate_external(NoIntersection(), candidate) is None
+        assert _candidate_external(Box(10, 10, 10), candidate) is None
+
+    def test_reference_rejects_a_grouped_hole_and_a_nearby_wrong_diameter(self):
+        from types import SimpleNamespace
+
+        from draftwright.sheet_emit import _reference_geometry_matches
+
+        candidate = Cylinder(4, 20)
+        frame = SimpleNamespace(origin=(0.0, 0.0, 0.0), axis="z")
+        grouped = SimpleNamespace(kind="hole", profile=None, count=4, diameter=8.0, frame=frame)
+        wrong_diameter = SimpleNamespace(
+            kind="hole", profile=None, count=1, diameter=8.1, frame=frame
+        )
+        exact = SimpleNamespace(kind="hole", profile=None, count=1, diameter=8.0, frame=frame)
+        assert _reference_geometry_matches(grouped, candidate) is False
+        assert _reference_geometry_matches(wrong_diameter, candidate) is False
+        assert _reference_geometry_matches(exact, candidate) is True
+
+    def test_reference_geometry_mutations_reject_wrong_kind_profile_axis_position_and_length(
+        self,
+    ):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from draftwright.model import Frame, HoleFeature, StepFeature
+        from draftwright.sheet_emit import _reference_geometry_matches
+
+        candidate = Cylinder(4, 20)
+        exact_hole = HoleFeature(
+            frame=Frame((0.0, 0.0, 0.0), "z"), diameter=8.0, depth=None, through=True
+        )
+        mutations = [
+            SimpleNamespace(kind="slot"),
+            SimpleNamespace(
+                kind="hole",
+                profile="double_d",
+                count=1,
+                diameter=8.0,
+                frame=exact_hole.frame,
+            ),
+            replace(exact_hole, frame=Frame((0.0, 0.0, 0.0), "x")),
+            replace(exact_hole, frame=Frame((1.0, 0.0, 0.0), "z")),
+            replace(exact_hole, frame=Frame((0.0, 0.0, 1.0), "z")),
+            replace(exact_hole, diameter=8.5),
+            StepFeature(
+                frame=Frame((0.0, 0.0, 0.0), "z"),
+                diameter=8.0,
+                length=19.0,
+                span=((0.0, 0.0, -9.5), (0.0, 0.0, 9.5)),
+            ),
+        ]
+        assert _reference_geometry_matches(exact_hole, candidate) is True
+        assert all(
+            _reference_geometry_matches(mutation, candidate) is False for mutation in mutations
+        )
+
+    def test_unreadable_candidate_and_boss_height_guard_fail_closed(self, monkeypatch):
+        from draftwright.model import BossFeature, Frame
+        from draftwright.sheet_emit import _feature_line, _reference_geometry_matches
+
+        candidate = Cylinder(4, 20)
+        exact = BossFeature(
+            frame=Frame((0.0, 0.0, 0.0), "z"), diameter=8.0, height=20.0, thread="M8"
+        )
+        assert _reference_geometry_matches(exact, candidate) is True
+        assert (
+            _reference_geometry_matches(
+                BossFeature(frame=exact.frame, diameter=8.0, height=19.0), candidate
+            )
+            is False
+        )
+        assert _feature_line(exact, object_ref="features.boss") == (
+            "sheet.diameter(features.boss, thread='M8')"
+        )
+
+        monkeypatch.setattr(
+            "draftwright.model.declare._read_cylinder",
+            lambda _candidate: (_ for _ in ()).throw(ValueError("not cylindrical")),
+        )
+        assert _reference_geometry_matches(exact, candidate) is False
+
+    def test_reference_graph_skips_unknown_kinds_and_wrong_polarity(self):
+        from types import SimpleNamespace
+
+        from draftwright.model import Frame, HoleFeature
+        from draftwright.sheet_emit import _object_references
+
+        candidate = Cylinder(4, 20)
+        body = Box(40, 40, 20) + candidate
+        hole = HoleFeature(
+            frame=Frame((0.0, 0.0, 0.0), "z"), diameter=8.0, depth=None, through=True
+        )
+        assert (
+            _object_references(
+                [SimpleNamespace(kind=None), hole], body, {"features.bore": candidate}
+            )
+            == {}
+        )
+
+    def test_one_candidate_matching_two_features_is_not_assigned_to_either(self):
+        from dataclasses import replace
+
+        from draftwright.model import Frame, HoleFeature
+        from draftwright.sheet_emit import _object_references
+
+        candidate = Cylinder(4, 20)
+        body = Box(40, 40, 20) - candidate
+        first = HoleFeature(
+            frame=Frame((0.0, 0.0, 0.0), "z"), diameter=8.0, depth=None, through=True
+        )
+        second = replace(first)
+        assert _object_references([first, second], body, {"features.bore": candidate}) == {}
+
+    def test_already_built_features_container_binds_without_calling_it(
+        self, tmp_path, monkeypatch
+    ):
+        from typer.testing import CliRunner
+
+        from draftwright.cli import app
+
+        self._features_mod(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(app, ["featuremod:features", "--script", "--out", "built"])
+        assert result.exit_code == 0, result.output
+        source = (tmp_path / "built.py").read_text(encoding="utf-8")
+        assert "features = _obj\npart = features.body" in source
+        assert "features = _obj()" not in source
 
     def test_zero_arg_factory_is_called(self, tmp_path):
         p = self._mod(tmp_path)
