@@ -174,15 +174,15 @@ def main(
     from draftwright.builder import build_drawing
 
     if script:
-        from draftwright.sheet_emit import generate_sheet_script, resolve_object_spec
+        from draftwright.sheet_emit import _resolve_object_source, generate_sheet_script
 
         # The Sheet script now carries the title-block / layout aspects (#474), so forward all
         # four flags — the generated script reproduces them on re-run (no more inert warning).
         if _looks_like_object_spec(step_file):
             # STEP_FILE is a `module:attr` / `file.py:attr` spec → reference a live object
-            obj, seam = resolve_object_spec(step_file)
+            source = _resolve_object_source(step_file)
             py_path = generate_sheet_script(
-                obj,
+                source.part,
                 out=out,
                 title=title,
                 number=number,
@@ -197,7 +197,8 @@ def main(
                 frame=frame,
                 zones=zones,
                 projection=projection or None,
-                part_expr=seam,
+                part_expr=source.seam,
+                object_candidates=source.candidates,
                 formats=tuple(formats),
             )
         else:
