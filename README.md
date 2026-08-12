@@ -217,9 +217,33 @@ dwg = build_drawing(part)
 env = next(f for f in dwg.model().features if f.kind == "envelope")
 dwg.dimension(env, "length", role="width", side="below", pin=True)
 
-crit = dwg.lint_summary()   # {"passed", "score", "by_code", "issues":[…suggestion]}
+crit = dwg.lint_summary()
+# Legacy diagnostic severity heuristic (not overall drawing quality):
+assert crit["diagnostic_score"] == crit["score"]
+# Independently observable components; no composite quality score is invented:
+completeness = crit["quality"]["completeness"]
+# Named for its denominator: the requirements Draftwright recognized AND can audit.
+# 1.0 does NOT mean the drawing is complete — it means every requirement recognition did
+# identify was placed, however much of the part it missed. What was never recognized never
+# became a requirement. (Recognized nothing auditable at all? available is False, not 1.0.)
+audited = completeness["audited_score"]
+assert completeness["scope"] == "audited_recognized_requirements"
+completeness["excludes"]                     # what the denominator cannot see
+completeness["unrecognised_geometry_reports"]  # a floor on that gap, never a measure
+legibility = crit["quality"]["legibility"]
+restraint = crit["quality"]["restraint"]  # unavailable until provenance is complete
 dwg.repair()                # auto-fix mechanically-fixable lint; never worsens
 ```
+
+Completeness is strict about authored omissions: removing a dimension from a complete authored
+set records a `suppressed` requirement and lowers the audited score. The evidence distinguishes
+that choice from a placement failure, but cannot certify that the omission is
+engineering-correct; plain deletion is not an accepted-waiver mechanism.
+
+**`audited_score` is not a completion gate.** It answers "of the requirements we recognised and
+can audit, how many were placed?" — so a part can score 1.0 with whole features missing from the
+drawing, if recognition never identified them. Gate on issue codes and severities, and read
+`excludes` and `unrecognised_geometry_reports` for what the denominator cannot account for.
 
 Each `LintIssue` carries a domain-meaningful `code` and, when computable, a
 ready-to-apply `suggestion`. See `docs/adr/` for the design (deterministic
