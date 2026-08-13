@@ -359,12 +359,13 @@ def test_a_suppression_on_the_same_measurement_does_explain_the_loss():
 
 
 def test_a_labelless_callout_loss_is_still_detected():
-    """A hole callout renders as a `Leader` whose own `label` is "" — its text lives on an
-    attached callout object, and on some paths nowhere readable at all.
+    """A legacy/external leader may expose no semantic label even when it is a callout.
 
-    The first cut required a non-empty label, so those were dropped from the comparison
-    entirely and a vanished hole callout produced NO loss. That is the single thing this
-    module must never do, and the type filter added to remove furniture is what introduced it.
+    Generated hole leaders now retain their callout content (#1142), but audit remains
+    compatible with older or user-supplied labelless leaders. The first cut required a
+    non-empty label, so those were dropped from the comparison entirely and a vanished
+    callout produced NO loss. That is the single thing this module must never do, and the
+    type filter added to remove furniture is what introduced it.
 
     Presence is the signal; the label is extra detail on it.
     """
@@ -379,20 +380,14 @@ def test_a_labelless_callout_loss_is_still_detected():
     assert explain(diff)[0].startswith("LOST: hc_plan0")
 
 
-def test_a_callout_content_change_is_a_documented_blind_spot():
-    """Presence is seen; CONTENT is not, for hole callouts.
-
-    A callout renders as a `Leader` whose `label` is "" — the text is built at draw time and
-    never exposed on the object. Measured on real builds: changing a bore from 8 to 12
-    produces an identical diff. Pinned as a KNOWN LIMIT so the docstring cannot drift from the
-    behaviour, and so the day the text becomes readable this test fails and someone deletes it.
-    """
-    before = _FakeDrawing({"hc_plan0": ""}, types={"hc_plan0": "Leader"})
-    after = _FakeDrawing({"hc_plan0": ""}, types={"hc_plan0": "Leader"})  # different bore
+def test_a_generated_callout_content_change_is_observable():
+    """Generated hole leaders expose their geometric callout's semantic content (#1142)."""
+    before = _FakeDrawing({"hc_plan0": "⌀8 THRU"}, types={"hc_plan0": "Leader"})
+    after = _FakeDrawing({"hc_plan0": "⌀12 THRU"}, types={"hc_plan0": "Leader"})
 
     diff = diff_builds(before, after)
-    assert diff["dimensions_changed"] == {}, "no readable text, so no detectable change"
-    assert explain(diff) == []
+    assert diff["dimensions_changed"] == {"hc_plan0": ("⌀8 THRU", "⌀12 THRU")}
+    assert explain(diff) == ["changed: hc_plan0 ⌀8 THRU -> ⌀12 THRU"]
 
 
 def test_no_difference_reports_nothing():

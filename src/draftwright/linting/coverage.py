@@ -27,7 +27,14 @@ from typing import Literal
 from build123d import GeomType
 from build123d_drafting.helpers import CenterMark, Dimension, TitleBlock
 
-from draftwright._core import _DIAM_RE, _END_ON, HoleRef, _axis_letter, _fmt, _xyz
+from draftwright._core import (
+    _END_ON,
+    HoleRef,
+    _annotation_diameter_sources,
+    _axis_letter,
+    _fmt,
+    _xyz,
+)
 from draftwright.linting.issues import LintIssue
 from draftwright.linting.profiled_bore_coverage import profiled_bore_key
 from draftwright.recognition import (
@@ -229,9 +236,12 @@ def lint_feature_coverage(
 
     Builds a feature inventory from *part*'s hole/boss diameters (cylinder
     patches spanning at least ~half a turn around their axis in total, so
-    fillets are ignored) and diffs it against every ø value mentioned in the
-    annotations' labels, plus the structured ``covers_diameters`` metadata on
-    annotations that draw their values geometrically (e.g. ``HoleCallout``).
+    fillets are ignored) and diffs it against either the structured
+    ``covers_diameters`` metadata on annotations that draw their values
+    geometrically (e.g. ``HoleCallout``), or every ø value mentioned in an
+    unstructured annotation's label. A structured annotation is never parsed as
+    free text too: suffix diameters such as a bolt-circle definition are not
+    physical-feature coverage, and ``covers_count`` remains authoritative.
     Radius callouts are *not* counted — "R5 TYP" fillet notes would otherwise
     mask an undimensioned ø10 bore. Title blocks are skipped — part numbers
     like "BRACKET R8" are not callouts. Each uncovered diameter yields one
@@ -270,14 +280,16 @@ def lint_feature_coverage(
     for ann in annotations:
         if isinstance(ann, TitleBlock):
             continue
-        label = getattr(ann, "label", None) or ""
-        for m in _DIAM_RE.finditer(label):
-            mentioned.add(float(m.group(1)))
-            text_mentioned.add(float(m.group(1)))
+        structured_diameters, text_diameters = _annotation_diameter_sources(ann)
+        # A geometric HoleCallout now exposes equivalent semantic text (#1142), but the
+        # shared source policy excludes it here: BCD suffixes are not physical coverage,
+        # and structured ``covers_count`` must remain authoritative.
+        mentioned.update(text_diameters)
+        text_mentioned.update(text_diameters)
         count = getattr(ann, "covers_count", 1)
-        for v in getattr(ann, "covers_diameters", ()):
-            mentioned.add(float(v))
-            provided[float(v)] = provided.get(float(v), 0) + count
+        for v in structured_diameters:
+            mentioned.add(v)
+            provided[v] = provided.get(v, 0) + count
 
     exclude = exclude or ()
     issues = [
