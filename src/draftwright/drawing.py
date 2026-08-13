@@ -91,6 +91,7 @@ from draftwright.linting import (
     lint_slot_coverage,
     pmi_stage_summary,
 )
+from draftwright.linting.issues import _collect_issue_aggregation, _current_issue_aggregation
 from draftwright.linting.quality import quality_components
 from draftwright.projection import (
     project_view_geometry,
@@ -2722,6 +2723,10 @@ class Drawing:
         (#1022). The default stays the full critique: a caller asking "is this drawing
         right?" means both halves.
         """
+        return self._lint(physical=physical, aggregation=_current_issue_aggregation())
+
+    def _lint(self, *, physical: bool = True, aggregation=None):
+        """Internal lint path with an optional summary-scoped pair ledger (#1147)."""
         # Drawable area (page minus the standard margin), passed explicitly to
         # lint_drawing for bounds checks — draftwright owns linting now and no
         # longer relies on the helpers set_page module-global (ADR 0007).
@@ -2748,6 +2753,7 @@ class Drawing:
                 view_shapes=view_shapes,
                 view_edge_cache=self._view_edge_cache,
                 ann_box_cache=self._ann_box_cache,
+                _aggregation=aggregation,
             )
         else:
             issues = []
@@ -2759,6 +2765,7 @@ class Drawing:
                     view_shapes=view_shapes,
                     view_edge_cache=self._view_edge_cache,
                     ann_box_cache=self._ann_box_cache,
+                    _aggregation=aggregation,
                 )
         if self.part is not None and physical:
             # Reuse the single feature inventory from the build (#244) when present,
@@ -2965,7 +2972,9 @@ class Drawing:
         - ``score`` — legacy coarse 0–1 diagnostic heuristic (see ``_SCORE_*``);
         - ``diagnostic_score`` — the same value under its honest name;
         - ``quality`` — separable completeness, restraint, and legibility components. No
-          composite drawing-quality score is manufactured (#1127);
+          composite drawing-quality score is manufactured (#1127). Legibility's existing
+          severity/code counts are raw findings; its ``primary_*`` counts and scalar group
+          producer-identified pair findings by annotation and failure mechanism (#1147);
         - ``errors`` / ``warnings`` / ``infos`` — counts by severity;
         - ``by_code`` — per-check counts;
         - ``geometry_issues`` — count of standards/geometry-correctness issues
@@ -2974,7 +2983,11 @@ class Drawing:
         - ``pmi`` — when source PMI exists, source-to-render stage counts derived from the
           extraction report, final IR, annotation registry, and structured placement drops.
         """
-        issues = self.lint()
+        # Keep dispatch through the documented public critique method: subclasses and callers
+        # may extend ``lint``. The context is task-local, and only the base implementation
+        # records pair evidence; custom issues remain independent (fail closed).
+        with _collect_issue_aggregation() as aggregation:
+            issues = self.lint()
         errors = sum(1 for i in issues if i.severity == "error")
         warnings = sum(1 for i in issues if i.severity == "warning")
         infos = sum(1 for i in issues if i.severity == "info")
@@ -3003,6 +3016,7 @@ class Drawing:
             issues=issues,
             error_penalty=_SCORE_ERROR_PENALTY,
             warning_penalty=_SCORE_WARNING_PENALTY,
+            _aggregation=aggregation,
         )
         return {
             "passed": errors == 0,

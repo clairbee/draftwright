@@ -6,6 +6,8 @@ standalone validators). draftwright owns linting; this is its ``LintIssue``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal
 
@@ -32,3 +34,50 @@ class LintIssue:
     # (validation) and a valid candidate that did not fit (placement). Quality components must
     # not infer that distinction from the shared code or its message (#1127).
     outcome_stage: Literal["placement", "validation"] | None = None
+
+
+class _IssueAggregation:
+    """Summary-scoped side ledger for pairwise score grouping (#1147).
+
+    Public lint results remain ordinary ``LintIssue`` values. During one ``lint_summary`` call,
+    structural lint records an opaque token for each primary annotation beside the emitted issue.
+    The ledger retains neither annotations nor their process-local ids after aggregation and is
+    never serialised. A fresh instance per summary also makes separate lint runs independent.
+    """
+
+    def __init__(self) -> None:
+        # Retain the small plain-data issue value for this summary scope so its address cannot
+        # be recycled onto an unrelated custom issue. This never retains the annotation/CAD
+        # graph: public ``LintIssue`` values carry no aggregation subject (#1147 review).
+        self._issues_and_tokens: dict[int, tuple[LintIssue, object, str]] = {}
+
+    def record_pair(self, issue: LintIssue, token: object) -> None:
+        self._issues_and_tokens[id(issue)] = (issue, token, issue.code)
+
+    def token_for(self, issue: LintIssue):
+        stored = self._issues_and_tokens.get(id(issue))
+        return (
+            stored[1]
+            if stored is not None and stored[0] is issue and stored[2] == issue.code
+            else None
+        )
+
+
+_CURRENT_AGGREGATION: ContextVar[_IssueAggregation | None] = ContextVar(
+    "draftwright_lint_aggregation", default=None
+)
+
+
+def _current_issue_aggregation() -> _IssueAggregation | None:
+    return _CURRENT_AGGREGATION.get()
+
+
+@contextmanager
+def _collect_issue_aggregation():
+    """Collect base-lint pair evidence while preserving public ``Drawing.lint`` dispatch."""
+    aggregation = _IssueAggregation()
+    token = _CURRENT_AGGREGATION.set(aggregation)
+    try:
+        yield aggregation
+    finally:
+        _CURRENT_AGGREGATION.reset(token)

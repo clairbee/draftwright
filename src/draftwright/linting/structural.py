@@ -17,7 +17,7 @@ from build123d import GeomType
 
 from draftwright._core import _shape_box2d
 from draftwright._geometry import _boxes_overlap, _segment_clips_box
-from draftwright.linting.issues import LintIssue
+from draftwright.linting.issues import LintIssue, _IssueAggregation
 
 _log = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ def lint_drawing(
     view_shapes: list | None = None,
     view_edge_cache: dict | None = None,
     ann_box_cache: dict | None = None,
+    _aggregation: _IssueAggregation | None = None,
 ) -> list[LintIssue]:
     """Structural checks on a composed annotation list, duck-typed.
 
@@ -252,6 +253,10 @@ def lint_drawing(
     # Per-run label_bbox warning memo (#711 review / Codex sweep): threaded to every
     # check so one bad item warns once per lint run, with no cross-run global state.
     warned_label_bbox: set[int] = set()
+    # Opaque primary-subject tokens exist only for this call. Every input object remains live
+    # in ``items`` while the map is used, so its id cannot be recycled; the summary ledger gets
+    # only the tokens, never annotation ids or CAD graphs (#1147 review).
+    pair_tokens = {id(item): object() for item in items} if _aggregation is not None else {}
 
     # Resolve page bounds: explicit arg beats module-level context.
     if page_bbox is None and _DRAWING_PAGE is not None:
@@ -305,7 +310,13 @@ def lint_drawing(
                 dim_item = item_b if is_cl_a else item_a
                 cl_item = item_a if is_cl_a else item_b
                 _lint_centerline_dim_overlap(
-                    dim_item, cl_item, issues, box_cache, warned=warned_label_bbox
+                    dim_item,
+                    cl_item,
+                    issues,
+                    box_cache,
+                    warned=warned_label_bbox,
+                    aggregation=_aggregation,
+                    subject_token=pair_tokens.get(id(dim_item)),
                 )
                 continue
 
@@ -712,7 +723,15 @@ def _lint_view_shapes(
                 )
 
 
-def _lint_centerline_dim_overlap(dim_item, cl_item, issues, box_cache=None, warned=None) -> None:
+def _lint_centerline_dim_overlap(
+    dim_item,
+    cl_item,
+    issues,
+    box_cache=None,
+    warned=None,
+    aggregation=None,
+    subject_token=None,
+) -> None:
     """Flag label-vs-centerline overlap for a (dim, centerline) pair.
 
     #701: only the centreline measure is guarded (malformed ``segments`` /
@@ -752,17 +771,26 @@ def _lint_centerline_dim_overlap(dim_item, cl_item, issues, box_cache=None, warn
 
     if ox > 0.5 and oy > 0.5:
         dim_label = getattr(dim_item, "label", "?")
-        issues.append(
-            LintIssue(
-                severity="warning",
-                message=(
-                    f"label '{dim_label}' overlaps centerline by "
-                    f"{ox:.1f}×{oy:.1f} mm — use label_offset_x to shift "
-                    f"or increase dim offset to clear the centerline"
-                ),
-                code="label_centerline_overlap",
-            )
+        issue = LintIssue(
+            severity="warning",
+            message=(
+                f"label '{dim_label}' overlaps centerline by "
+                f"{ox:.1f}×{oy:.1f} mm — use label_offset_x to shift "
+                f"or increase dim offset to clear the centerline"
+            ),
+            # Pair detail stays in the raw issue: this is the compared centre mark's
+            # extent centre, so equal-looking findings can still be traced spatially.
+            location=(
+                (cl_min_x + cl_max_x) / 2.0,
+                (cl_min_y + cl_max_y) / 2.0,
+            ),
+            code="label_centerline_overlap",
         )
+        issues.append(issue)
+        if aggregation is not None and subject_token is not None:
+            # The side ledger sees which half of the pair owns the readability defect;
+            # neither the annotation nor its run-local identity enters public diagnostics.
+            aggregation.record_pair(issue, subject_token)
 
 
 def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=None) -> None:
