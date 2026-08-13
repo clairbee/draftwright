@@ -661,6 +661,32 @@ class Drawing:
     def _ann_box_cache(self) -> dict:
         return self._build.ann_box_cache
 
+    @property
+    def box_cache(self) -> dict:
+        """The ONE annotation bounding-box memo for this build (#1138).
+
+        Placement and lint both measure annotations, and an *optimal* ``bounding_box()``
+        tessellates (~16 ms for a Leader), so anything measured on both paths is worth
+        measuring once. Sharing one memo makes that hold by construction.
+
+        Keep its measured scope in mind before attributing a build's cost to it: on a
+        plate build it holds **two** entries, on a flange **three**, all leaders and
+        their callouts. Dimensions are *not* among them and cannot be — ``strip_obstacles``
+        decomposes anything exposing ``.segments`` instead of boxing it whole, and
+        ``corridor_blockers`` skips ``Dimension``/``SafeDimension`` outright. The memo is
+        worth tens of milliseconds, not a phase; the leader work in #1138 is what moved
+        the number.
+
+        Exposed publicly (not as ``_ann_box_cache``) because the annotations layer is
+        duck-typed against ``dwg`` and, per ADR 0005, reads no private Drawing state.
+        Sharing the dict rather than adding a second memo also means ``lint()``'s
+        existing liveness prune — which drops entries for objects no longer on the
+        sheet — covers placement-seeded entries for free; a separate placement cache
+        would have to re-implement that pruning, and a missed prune keeps OCC geometry
+        alive for the drawing's lifetime.
+        """
+        return self._build.ann_box_cache
+
     @deprecated(
         "Drawing.attach_part_model() is deprecated (#817): build-state attach is engine "
         "plumbing; the mutator is now private (_attach_part_model). Removed in 0.5.0."

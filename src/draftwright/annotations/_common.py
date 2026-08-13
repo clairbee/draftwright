@@ -26,7 +26,7 @@ from draftwright._core import (  # noqa: F401 — _anno_box re-exported (#700)
 from draftwright._geometry import _boxes_overlap, _segment_crosses_box  # noqa: F401
 from draftwright.layout import StripCandidate, plan_strip
 from draftwright.linting.issues import LintIssue
-from draftwright.linting.structural import _centerline_extent
+from draftwright.linting.structural import _ann_box, _centerline_extent
 from draftwright.model.compiled import resolve_feature
 
 _log = logging.getLogger(__name__)
@@ -376,12 +376,22 @@ class SolveTrace:
             _log.warning("trace: could not write %s: %s", self.path, exc)
 
 
-def _geom_box(o):
+def _geom_box(o, cache=None):
     """Full rendered-geometry bbox ``(x0, y0, x1, y1)`` of an annotation — leader
     shafts and arrow tips, dimension witness/extension lines, centrelines, hatch —
     *not* just its label box. ``None`` if it does not bbox cleanly (logged at
     debug: a silently dropped occupant is the wrong failure mode for an occupancy
-    model, so the omission is at least observable)."""
+    model, so the omission is at least observable).
+
+    With *cache* (a drawing's :attr:`~draftwright.drawing.Drawing.box_cache`) the
+    measurement goes through lint's ``_ann_box`` memo instead of straight to OCC, so
+    an annotation is boxed once per build rather than once here and again in lint
+    (#1138). Same memo, not a parallel one — its identity+location-token entries are
+    what make sharing safe, and lint's prune is what keeps it from leaking. Without a
+    cache the behaviour is unchanged, which keeps the duck-typed callers and the
+    tests that call this bare working."""
+    if cache is not None:
+        return _ann_box(o, cache)
     try:
         b = o.bounding_box()
         return (b.min.X, b.min.Y, b.max.X, b.max.Y)
@@ -466,6 +476,69 @@ def dim_footprint(p1, p2, side, distance, draft, label):
         ys += [p1[1] + sy * far, p2[1] + sy * far]
     pad = draft.line_width / 2.0
     return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+
+
+def leader_footprint(tip, elbow, draft, *, text_side="auto", callout_box=None):
+    """Analytical page-mm AABB ``(x0, y0, x1, y1)`` of the :class:`Leader` that
+    ``Leader(tip, elbow, label="", draft, text_side=…, callout=…)`` would build —
+    WITHOUT constructing any OCC geometry (#1138, the #602 pattern applied to
+    leaders).
+
+    Probing one callout leader's footprint by *building* it costs 0.12–0.21 s —
+    6–10 % of a whole drawing — because a ``Leader`` fuses an ``Arrow``, a swept
+    shelf rectangle and the callout sketch before anything can be measured. The
+    footprint is arithmetic given the callout's own box, which is measured once
+    and memoised rather than re-measured per candidate position.
+
+    Mirrors ``helpers.Leader.__init__``: the shelf runs ``pad_around_text`` from
+    the elbow in ``shelf_dir`` (``text_side``, or tip→elbow's horizontal sense when
+    ``"auto"``), and the callout hangs at the shelf end — its near edge on the
+    shelf end, centred vertically on the elbow. The shaft is inflated by half of
+    whichever of *arrow_length* / *line_width* dominates, and over-claiming is the
+    safe direction (this box selects which obstacles a carve considers, so a box
+    that is too big keeps an irrelevant obstacle, while one that is too small drops
+    a real one).
+
+    Returns ``None`` where ``Leader`` itself would raise — a forced *text_side*
+    that runs the shaft through the label — so callers omit the candidate exactly
+    as the built-geometry probe's except-handler did.
+    """
+    gap = draft.pad_around_text
+    if text_side == "auto":
+        shelf_dir = 1.0 if elbow[0] >= tip[0] else -1.0
+    else:
+        shelf_dir = 1.0 if text_side == "right" else -1.0
+    shelf_end_x = elbow[0] + shelf_dir * gap
+
+    # The arrowhead bounds the shaft only while it is the wider of the two; a style with a
+    # heavy line and a small arrow inverts that, and a diagonal shaft then pushes its stroke
+    # past an arrow-only box. Pad by whichever dominates.
+    half_shaft = max(draft.arrow_length, draft.line_width) / 2.0
+    xs = [tip[0] - half_shaft, tip[0] + half_shaft, elbow[0] - half_shaft, elbow[0] + half_shaft]
+    ys = [tip[1] - half_shaft, tip[1] + half_shaft, elbow[1] - half_shaft, elbow[1] + half_shaft]
+
+    half_line = draft.line_width / 2.0
+    xs += [min(elbow[0], shelf_end_x) - half_line, max(elbow[0], shelf_end_x) + half_line]
+    ys += [elbow[1] - half_line, elbow[1] + half_line]
+
+    if callout_box is not None:
+        cw = callout_box[2] - callout_box[0]
+        ch = callout_box[3] - callout_box[1]
+        if shelf_dir > 0:
+            cx0, cx1 = shelf_end_x, shelf_end_x + cw
+        else:
+            cx0, cx1 = shelf_end_x - cw, shelf_end_x
+        cy0, cy1 = elbow[1] - ch / 2.0, elbow[1] + ch / 2.0
+        # Leader raises rather than draw a shaft through its own label; a forced side
+        # is the only way to get there, matching helpers' own guard condition.
+        if text_side != "auto" and _segment_crosses_box(
+            (tip[0], tip[1]), (elbow[0], elbow[1]), (cx0, cy0, cx1, cy1)
+        ):
+            return None
+        xs += [cx0, cx1]
+        ys += [cy0, cy1]
+
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 CROSSABLE_TYPES = frozenset({"Centerline", "CenterlineCircle", "CenterMark"})
@@ -727,6 +800,7 @@ def corridor_blockers(dwg, view):
     128). Sibling location/envelope dims are excluded: they chain off the shared datum
     and legitimately share the corridor. View scoping mirrors :func:`strip_obstacles`
     (this view's own annotations + drawing-level occupants that no ortho view owns)."""
+    cache = getattr(dwg, "box_cache", None)  # the drawing's one box memo (#1138)
     boxes = []
     for name, o in dwg.iter_annotations():
         if view is not None:
@@ -735,7 +809,7 @@ def corridor_blockers(dwg, view):
                 continue
         if isinstance(o, (Dimension, SafeDimension)) or type(o).__name__ in CROSSABLE_TYPES:
             continue  # datum-chained dims share the corridor; centre lines are crossable
-        bb = _geom_box(o)
+        bb = _geom_box(o, cache)
         if bb is not None:
             boxes.append(bb)
     return boxes
