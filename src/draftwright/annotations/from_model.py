@@ -68,6 +68,10 @@ from draftwright.annotations._common import (
     _anno_box,
     _box_hits,
     _geom_box,
+    _hole_location_coverage_fact,
+    _same_location_ordinate,
+    _with_hole_center_coverage,
+    _with_hole_location_coverage,
     carve_free_position,
     dim_footprint,
     full_strip_message,
@@ -166,6 +170,15 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
     if suffix:
         terms.append(suffix)
     callout.label = " ".join(terms)
+    callout.measurements = tuple(spec.get("measurements", ()))
+    callout.covers_hole_requirements = tuple(
+        requirement
+        for requirement, covered in (
+            ("bore.through", spec["through"]),
+            ("grouping.count", bool(count and count > 1)),
+        )
+        if covered
+    )
     profile_coverage = spec.get("profile_coverage")
     callout.covers_profiles = () if profile_coverage is None else (profile_coverage,)
     callout.profile_boundary = spec.get("profile_boundary")
@@ -562,6 +575,8 @@ def _location_candidate(
     measurement=None,
     pinned=False,
     footprint=None,
+    location_coverage=(),
+    hole_requirements=(),
 ):
     """A :class:`CorridorCandidate` for a datum-referenced hole/pattern location dim.
     Location dims outrank a coincident slot-position line in dedup (#345) and form the
@@ -570,7 +585,11 @@ def _location_candidate(
     it; only a physically full strip drops (``location_ref_dropped`` → hole-table escalate)."""
 
     def _placed(nm):
-        if getattr(feature, "kind", None) in ("hole", "pattern"):
+        # Only loose HoleFeatures have rows in the automatic scattered-hole table.
+        # Pattern locations remain documented by their own dimensions/furniture; marking
+        # them replaceable lets an unrelated successful table silently delete their
+        # provenance (#1143 adversarial review).
+        if getattr(feature, "kind", None) == "hole":
             ctx.coverage.cover_scattered_hole_doc(nm)
         if pinned:
             dwg.pin(nm)
@@ -582,12 +601,13 @@ def _location_candidate(
             "location_ref_dropped",
             f"{nm} not placed (no room above the {edge})",
             measurement=measurement,
+            hole_requirements=hole_requirements,
         )
         ctx.escalations.append(Escalation("location", view, nm, "strip_full"))
 
     return CorridorCandidate(
         name=name,
-        build=build,
+        build=lambda pos: _with_hole_location_coverage(build(pos), location_coverage),
         order=(_LOC_SUBCHAIN, distance, name),
         # A placed location may later be replaced by the scattered-hole table (#351 PR-4c).
         on_place=_placed,
@@ -656,7 +676,16 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         # `loc.id` rides along as the measurement identity (#1002): the compiler already
         # minted it for this very entry, so the renderer records WHICH measurement it drew
         # rather than leaving the audit to infer it from the annotation's name.
-        refs.append((rx, ry, resolve_feature(loc.ref), loc.id, loc.discriminator))
+        refs.append(
+            (
+                rx,
+                ry,
+                resolve_feature(loc.ref),
+                loc.id,
+                loc.discriminator,
+                _hole_location_coverage_fact(loc),
+            )
+        )
     if not refs:
         return 0
     pinned_set = set(pinned or ())
@@ -681,12 +710,16 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     x_refs: list = []
     for r in refs:
         for u in x_refs:
-            if abs(r[0] - u[0]) < 0.5:
+            if _same_location_ordinate(r[0], u[0]):
                 u[3] = u[3] or r[2] in pinned_set
                 # Collapsing coincident Xs into one dim must ACCUMULATE what it draws
                 # (#1002 r4): the survivor genuinely measures every collapsed feature's X.
                 if r[4] in (None, "x") and r[3] is not None and r[3] not in u[4]:
                     u[4].append(r[3])
+                if r[4] in (None, "x") and r[3] is not None:
+                    fact = r[5]
+                    if fact not in u[5]:
+                        u[5].append(fact)
                 break
         else:
             x_refs.append(
@@ -696,6 +729,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                     r[2],
                     r[2] in pinned_set,
                     [r[3]] if r[3] is not None and r[4] in (None, "x") else [],
+                    [r[5]] if r[3] is not None and r[4] in (None, "x") else [],
                 ]
             )
     _x_drawable = {r[0] for r in x_refs if abs(r[0] - datum_x) * a.SCALE >= 1.0}
@@ -708,6 +742,9 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
             f"{_n_x_close} X location dim(s) too closely spaced to dimension legibly "
             "(use a detail view)",
             measurement=tuple(mid for ref in dropped_x for mid in ref[4]),
+            hole_requirements=tuple(
+                (feature, parameter) for ref in dropped_x for feature, parameter, _point in ref[5]
+            ),
         )
         ctx.escalations.append(Escalation("location", "plan", None, "illegible"))
     _kept_x_set = set(_kept_x)
@@ -718,7 +755,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     # pass carving around the other and interleaving. No alternate view for a plan-X
     # location, so a corridor-blocked dim is force-kept (policy B), not relocated; only a
     # physically full strip drops (→ location_ref_dropped, escalates the hole table).
-    for i, (rx, ry, feat, pin_ref, mids) in enumerate(
+    for i, (rx, ry, feat, pin_ref, mids, location_facts) in enumerate(
         sorted(x_refs, key=lambda r: abs(r[0] - datum_x))
     ):
         if abs(rx - datum_x) * a.SCALE < 1.0:
@@ -727,7 +764,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         # A single X-location dim shared by two *distinct* features at this X belongs to
         # neither exclusively — leave it unowned so drop() cannot over-strip a sibling's
         # dimension and annotations_of never over-claims it (review #406, ADR 0010).
-        _shared_x = any(abs(o[0] - rx) < 0.5 and o[2] != feat for o in refs)
+        _shared_x = any(_same_location_ordinate(o[0], rx) and o[2] != feat for o in refs)
         _xfeat = None if _shared_x else feat
         # The measurement does NOT follow the feature (#1002 r4). Feature-unowned is an
         # ADR 0010 *ownership* rule — it stops drop(feature) stripping a sibling's dim. It
@@ -736,6 +773,8 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
         # only option; recording all of them is both true and exactly what the tuple-valued
         # channel exists for (ADR 0016 / #886). Discarding it made the audit blind on an
         # ordinary dedup path.
+        # One ADR 0016 feature-level location identity per collapsed owner; the structured
+        # location facts below carry that this particular visible member is X (#883).
         _xmid = tuple(mids)
         register_corridor(
             ctx,
@@ -761,6 +800,10 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                 ),
                 feature=_xfeat,
                 measurement=_xmid,
+                location_coverage=location_facts,
+                hole_requirements=tuple(
+                    (feature, parameter) for feature, parameter, _point in location_facts
+                ),
                 pinned=pin_ref,
                 footprint=lambda pos, _rx=rx, _ry=ry: dim_footprint(
                     (PX(datum_x), PY(_ry), 0),
@@ -780,10 +823,14 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     y_refs: list = []
     for r in refs:
         for u in y_refs:
-            if abs(r[1] - u[1]) < 0.5:
+            if _same_location_ordinate(r[1], u[1]):
                 u[3] = u[3] or r[2] in pinned_set
                 if r[4] in (None, "y") and r[3] is not None and r[3] not in u[4]:
                     u[4].append(r[3])  # accumulate, as in the X loop (#1002 r4)
+                if r[4] in (None, "y") and r[3] is not None:
+                    fact = r[5]
+                    if fact not in u[5]:
+                        u[5].append(fact)
                 break
         else:
             y_refs.append(
@@ -793,6 +840,7 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                     r[2],
                     r[2] in pinned_set,
                     [r[3]] if r[3] is not None and r[4] in (None, "y") else [],
+                    [r[5]] if r[3] is not None and r[4] in (None, "y") else [],
                 ]
             )
     _y_drawable = {r[1] for r in y_refs if abs(r[1] - datum_y) * a.SCALE >= 1.0}
@@ -805,6 +853,9 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
             f"{_n_y_close} Y location dim(s) too closely spaced to dimension legibly "
             "(use a detail view)",
             measurement=tuple(mid for ref in dropped_y for mid in ref[4]),
+            hole_requirements=tuple(
+                (feature, parameter) for ref in dropped_y for feature, parameter, _point in ref[5]
+            ),
         )
         ctx.escalations.append(Escalation("location", "side", None, "illegible"))
     _kept_y_set = set(_kept_y)
@@ -812,18 +863,19 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
     # Cap the side-above strip below the iso view so Y-location dims never run under it
     # (the carve respects outer_limit); the dim_pitch_side dims are obstacles the carve
     # avoids structurally, retiring the old manual allocate(10.0) reservation + cursor.
-    if y_refs and any(SX(ry) + 10 > iso_x0 - 4 for _, ry, _feat, _pin, _mids in y_refs):
+    if y_refs and any(SX(ry) + 10 > iso_x0 - 4 for _, ry, _feat, _pin, _mids, _facts in y_refs):
         a.sv_zones.above.outer_limit = min(a.sv_zones.above.outer_limit, iso_y0 - 4)
-    for i, (rx, ry, feat, pin_ref, mids) in enumerate(
+    for i, (rx, ry, feat, pin_ref, mids, location_facts) in enumerate(
         sorted(y_refs, key=lambda r: abs(r[1] - datum_y))
     ):
         if abs(ry - datum_y) * a.SCALE < 1.0:
             continue
         n += 1
         # Shared-Y location dim → unowned (see the X loop; review #406).
-        _shared_y = any(abs(o[1] - ry) < 0.5 and o[2] != feat for o in refs)
+        _shared_y = any(_same_location_ordinate(o[1], ry) and o[2] != feat for o in refs)
         _yfeat = None if _shared_y else feat
-        _ymid = tuple(mids)  # every collapsed feature's Y — see the X loop (#1002 r4)
+        # Every collapsed feature-level location; the structured facts carry Y (see X above).
+        _ymid = tuple(mids)
         register_corridor(
             ctx,
             ("side", "above"),
@@ -848,6 +900,10 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
                 ),
                 feature=_yfeat,
                 measurement=_ymid,
+                location_coverage=location_facts,
+                hole_requirements=tuple(
+                    (feature, parameter) for feature, parameter, _point in location_facts
+                ),
                 pinned=pin_ref,
                 footprint=lambda pos, _ry=ry: dim_footprint(
                     (SX(datum_y), SZ(a.bb.max.Z), 0),
@@ -886,7 +942,12 @@ def render_centermarks(dwg, furniture_groups, *, ctx) -> int:
         for loc in members:
             px, py, *_ = dwg.at(view, *loc)
             ctx.place(
-                CenterMark((px, py, 0), size, dwg.draft), f"m_cm{n}", view=view, feature=feat
+                _with_hole_center_coverage(
+                    CenterMark((px, py, 0), size, dwg.draft), feat, loc, view
+                ),
+                f"m_cm{n}",
+                view=view,
+                feature=feat,
             )
             n += 1
     return n

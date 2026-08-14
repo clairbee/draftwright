@@ -186,10 +186,10 @@ def diff_builds(before, after) -> dict:
     # every envelope dim of every perturbed build as "reattributed" — three noise lines on a
     # three-dimension drawing, in the one experiment this module exists to run.
     #
-    # A hole's X and Y location dims share ONE id (`location.location`), because `location`
-    # is addressable per feature and per-member identity is still open (ADR 0016 / #883), so
-    # an X↔Y swap is invisible here. That is the compiler's addressing granularity, not a
-    # limit of this comparison.
+    # Hole location DimensionIds remain one feature-level `location.location` unit (ADR 0016).
+    # Physical completeness carries directional X/Y evidence separately, but this differential
+    # audit intentionally compares the public addressable identity, so X↔Y substitution remains
+    # part of #883's open naming decision.
     substituted: dict[str, tuple] = {}
     for name in set(before_dims) & set(after_dims):
         b_ids, a_ids = _identities(before, name), _identities(after, name)

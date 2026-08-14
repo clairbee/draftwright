@@ -150,14 +150,16 @@ class AddressableDimension:
 
     **Scope: the feature parameters that flow through `plan_dimensions`.** A location has
     no entry here — `plan_dimensions` skips every `location`-kind parameter and
-    `plan_locations` returns a flat cross-feature list of bare `PlannedDimension`s, deduped
-    by ref point, that never enters a `DimensionGroup`.
+    `plan_locations` returns a flat cross-feature list of bare `PlannedDimension`s that
+    preserves every feature-owned identity and never enters a `DimensionGroup`. The
+    renderer may collapse truly coincident ordinates into one visible mark, while retaining
+    every semantic owner on that mark.
 
     That no longer means a location is unaddressable. each feature's own `LOCATION_STEM` gives
     locatable kind a role, which is what `sheet.dimension(bore, "location")` names and what
     an authored set omits (#925) — one unit per feature. The finer question **#883** asks
-    (is a grouped hole's location one unit or one per member? does a deduped coincident ref
-    belong to which feature?) is about NAMING, and omission is well-formed either way, so
+    (one unit or one per member; how X/Y components are named; who owns a shared mark) is
+    about NAMING, and omission is well-formed either way, so
     it no longer blocks the `"location"` role."""
 
     id: ParameterId
@@ -441,10 +443,11 @@ def location_datum(feature) -> str | None:
 #: The role every authored entry uses to name a location, whatever the per-kind role above.
 #:
 #: One coarse unit per feature, deliberately: #883 asks whether a patterned hole's location
-#: is one addressable thing or one per member, and that is a question about NAMING. Omission
-#: does not need the answer — "this feature's position is not in the set" is well-formed at
-#: either granularity, and a finer id (`location.member.3`) refines this one later without
-#: contradicting it. So the completeness contract does not wait on #883.
+#: is one addressable thing or one per member and how its X/Y components are named. Those are
+#: questions about NAMING. Omission does not need the answer — "this feature's position is not
+#: in the set" is well-formed at either granularity, and a finer id
+#: (`location.member.3`, for example) refines this one later without contradicting it. So the
+#: completeness contract does not wait on #883.
 LOCATION_ROLE = "location"
 
 
@@ -462,7 +465,9 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     """Plan hole **location** dimensions — the *intent*: which features get located
     and from which datum. The renderer owns the tier/legibility/zone layout
     (Amendment 4). One ref per un-patterned Z-hole + one per Z-pattern (bolt-circle
-    centre, else the array member nearest the datum); coincident refs deduped. Each
+    centre, else the array member nearest the datum). Coincident refs remain distinct here
+    so the renderer can collapse them into one mark while retaining every measurement id.
+    Each
     returned `PlannedDimension` carries the datum and a `span` of datum → ref; the
     renderer derives the X (plan) and Y (side) distances from it (#238).
 
@@ -471,9 +476,9 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
     location is a dimension and obeys the same completeness rule. Two consequences worth
     stating:
 
-    - The coincident-ref DEDUP runs over the surviving refs only. Deduping first would let
-      an omitted feature's ref absorb an approved sibling's and take the drawing's position
-      dim down with it — the author would have named a measurement and got nothing.
+    - Coincident-ref grouping runs over the surviving refs only. Grouping first would let an
+      omitted feature's ref absorb an approved sibling's and take the drawing's position dim
+      down with it — the author would have named a measurement and got nothing.
     - Everything else is unchanged when no set is authored: every ref survives, so the
       dedup sees the same input it always did.
     """
@@ -583,38 +588,15 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
             else:
                 kept.append((r, role, feat))
         refs = kept
-    unique: list[tuple[Point, str, Feature]] = []
-    for r, role, feat in refs:
-        clash = next(
-            (u for u, _, _ in unique if abs(r[0] - u[0]) < 0.5 and abs(r[1] - u[1]) < 0.5),
-            None,
-        )
-        if clash is None:
-            unique.append((r, role, feat))
-        else:
-            # Record the rejection instead of dropping it silently (#996). This is a RULE
-            # deciding a measurement is redundant — the same category as the suppressions
-            # above — but it used to filter before the compiler saw the candidate, so no
-            # `Omission` existed and the audit could not see it. An audit that claims
-            # completeness while a suppression path is invisible is worse than none, because
-            # its silence reads as "nothing was suppressed" (Codex #996 r1).
-            omitted.append(
-                _plan(
-                    r,
-                    role,
-                    feat,
-                    suppressed=True,
-                    reason=(
-                        f"coincident with a location already dimensioned at "
-                        f"({clash[0]:.3f}, {clash[1]:.3f})"
-                    ),
-                )
-            )
     omitted += [
         _plan(feat.frame.origin, role, feat, suppressed=True, reason=why)
         for feat, role, why in dropped
     ]
-    return [_plan(r, role, feat) for r, role, feat in unique] + omitted
+    # Do not erase coincident semantic identities here. ``render_locations`` owns the
+    # per-axis grouping and records every collapsed id on its one shared mark (ADR 0010 /
+    # 0016). Compiler-time dedup used to make a central bore sharing a bolt-circle centre
+    # look unlocated even though the visible X/Y dimensions constrained both features.
+    return [_plan(r, role, feat) for r, role, feat in refs] + omitted
 
 
 def _request_for(model, feature, param):

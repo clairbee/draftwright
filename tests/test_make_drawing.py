@@ -4596,7 +4596,13 @@ class TestHolePatternAnnotations:
             part = part - Pos(15, -52.5 + i * 35, 0) * Cylinder(2.5, 10)
         dwg = build_drawing(part)
         assert "dim_pitch_plan0" in dwg.annotations()
-        assert [i for i in dwg.lint() if i.severity != "info"] == []
+        (dropped,) = [i for i in dwg.lint() if i.code == "hole_pattern_dim_dropped"]
+        assert len(dropped.measurement_ids) == 1
+        assert dropped.measurement_ids[0].parameter == "pitch.length"
+        summary = dwg.lint_summary()
+        assert summary["by_code"] == {"hole_pattern_dim_dropped": 1}
+        assert summary["geometry_issues"] == 1
+        assert summary["quality"]["completeness"]["dropped"] == 1
 
     @pytest.mark.timeout(60)
     def test_count_mismatch_surfaces_in_lint(self):
@@ -5252,14 +5258,17 @@ class TestLintSummaryAndDrops:
         assert s["diagnostic_score"] == s["score"]
         assert set(s["quality"]) == {"completeness", "restraint", "legibility"}
         completeness = s["quality"]["completeness"]
-        assert completeness["available"] is False
-        assert completeness["audited_score"] is None
+        assert completeness["available"] is True
+        assert completeness["audited_score"] == 1.0
         assert completeness["coverage"] == "partial"
         assert completeness["scope"] == "audited_recognized_requirements"
-        assert completeness["unscored_recognized_families"] == ["holes"]
+        assert completeness["unscored_recognized_families"] == []
         assert completeness["reason"] == (
-            "recognized requirements exist only in families without outcome ledgers"
+            "audited_score covers recognized requirements in audited families only; it is "
+            "not evidence that the drawing is complete"
         )
+        assert completeness["requirements"] == completeness["placed"] == 4
+        assert completeness["by_family"]["holes"] == 4
         assert sum(s["by_code"].values()) == len(issues)
         assert len(s["issues"]) == len(issues)
         # A single-hole plate doesn't overflow the per-view callout cap.
@@ -9468,7 +9477,15 @@ class TestTurnedDiameters:
         assert (
             auto.get_annotation("dim_height").label == replayed.get_annotation("dim_height").label
         )
-        assert not auto.lint_summary()["by_code"] and not replayed.lint_summary()["by_code"]
+        # The off-axis four-hole pattern has relative pitch/count but no absolute X/Z
+        # location dimensions. The hole-family ledger added by #1143 reports those two
+        # physical requirements honestly on both paths; reconstruction must preserve the
+        # same critique as well as the same annotation set.
+        assert (
+            auto.lint_summary()["by_code"]
+            == replayed.lint_summary()["by_code"]
+            == {"hole_requirement_missing": 2}
+        )
 
         # ── from #881: the Y-step furniture lands in the right views on the replay ──
         assert replayed.view_of("centerline_side") == "side"
@@ -10722,13 +10739,14 @@ class TestHoleTable:
         assert right_members == []
 
     def test_table_and_balloons_keep_lint_clean(self):
-        # covers_diameters lets coverage lint count the tabulated holes, and the
-        # balloons are furniture (is_centerline) so they do not trip overlap lint.
+        # One covers_diameters entry per physical bore lets coverage lint verify the
+        # table's visible QTY, and the balloons are furniture (is_centerline) so they do
+        # not trip overlap lint.
         dwg = build_drawing(_multi_hole_plate())
         before = {i.code for i in dwg.lint()}
         dwg.add_hole_table("plan")
         assert {i.code for i in dwg.lint()} == before
-        assert dwg.get_annotation("hole_table_plan").covers_diameters == (16.0, 10.0)
+        assert dwg.get_annotation("hole_table_plan").covers_diameters == (16.0, 10.0, 10.0)
 
     def test_table_does_not_overlap_views_or_title_block(self):
         dwg = build_drawing(_multi_hole_plate())
@@ -10966,7 +10984,9 @@ class TestEscalation:
         assert not any(n.startswith("balloon_") for n in ann)
         assert sum(1 for n in ann if n.startswith("hc_plan")) >= 1  # spec-group callouts
         assert any(n.startswith("m_locx") for n in ann)  # location dims placed, not dropped
-        assert [i for i in dwg.lint() if i.severity in ("warning", "error")] == []
+        warnings = [i for i in dwg.lint() if i.severity in ("warning", "error")]
+        assert warnings and {issue.code for issue in warnings} == {"hole_pattern_dim_dropped"}
+        assert all(issue.measurement_ids for issue in warnings)
 
     def test_escalation_clears_density_lint(self, dense_plate_dwg):
         # No callout_dropped / location_ref_dropped / count-mismatch warnings

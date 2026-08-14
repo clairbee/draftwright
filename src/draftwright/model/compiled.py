@@ -58,6 +58,7 @@ from draftwright.model.ir import (
     Feature,
     HoleFeature,
     PartModel,
+    PatternFeature,
     PocketFeature,
     Point,
     PolygonalStockFeature,
@@ -612,9 +613,10 @@ class RenderableDimensionPlan:
         out: list[AddressableIntent] = []
         named: set[int] = set()
         for approved in self.locations:
-            # One intent per FEATURE, not per ref: coincident refs are deduplicated across
-            # features, and `dimension(f, "location")` is a per-feature unit (#883 is the
-            # per-member question, deliberately not answered here).
+            # One intent per FEATURE, not per ref. The compiler preserves coincident
+            # feature-owned identities; rendering may share one visible ordinate while
+            # accumulating every owner. `dimension(f, "location")` remains a per-feature
+            # unit (#883 is the per-member question, deliberately not answered here).
             feature = resolve_feature(approved.ref)
             if feature is None or id(feature) in named:
                 continue
@@ -892,8 +894,10 @@ def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[
 
     A location is a dimension: it prints a number, so an authored set that does not name it
     must not get one. That decision is made in `plan_locations` (which owns the datum and
-    the coincident-ref dedup) and read off `suppressed` here, so this stays the single place
-    a renderer's location content comes from.
+    authored suppression) and read off `suppressed` here. Coincident feature identities
+    remain distinct through this compiler boundary; the renderer may combine their truly
+    coincident marks while retaining all semantic owners. This stays the single place a
+    renderer's location content comes from.
 
     The renderer keeps its own filters — the concentric-bore exclusion, the legibility gate,
     the sub-millimetre offset test. Those only ever REMOVE an approved entry, which is a
@@ -905,6 +909,10 @@ def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[
     for pd in plan_locations(model):
         feature = pd.feature
         span = pd.param.span
+        directional_location = (
+            isinstance(feature, HoleFeature | PatternFeature | SlotPatternFeature)
+            and feature.frame.axis == "z"
+        )
         directional_slot_pattern = (
             isinstance(feature, SlotPatternFeature) and feature.frame.axis == "z"
         )
@@ -926,17 +934,24 @@ def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[
             continue
         assert span is not None  # an APPROVED location always carries its datum → ref span
         axis = feature.frame.axis if feature is not None else None
-        if directional_slot_pattern:
-            assert isinstance(feature, SlotPatternFeature)
+        if directional_location:
+            assert feature is not None
             # One authored `location` intent, two independently observable page dimensions.
-            # Keeping distinct ids is what lets completeness detect deletion of X while Y
-            # remains placed; a shared set member would make that false negative structural.
+            # Hole/pattern X/Y facts remain rendering members of the ONE feature-level
+            # addressable DimensionId (ADR 0016 / #883); critique carries their directional
+            # physical evidence separately. Slot patterns retain their existing directional
+            # identity contract.
             for measured_axis in ("x", "y"):
                 index = "xyz".index(measured_axis)
                 value = abs(span[1][index] - span[0][index])
+                parameter_id = (
+                    f"{pd.param.parameter_id}.{measured_axis}"
+                    if directional_slot_pattern
+                    else pd.param.parameter_id
+                )
                 approved.append(
                     ApprovedDimension(
-                        id=_dim_id(feature, f"{pd.param.parameter_id}.{measured_axis}"),
+                        id=_dim_id(feature, parameter_id),
                         value_text=_fmt(value),
                         value=value,
                         # `render_locations` groups both axes from this full datum→ref
@@ -983,7 +998,7 @@ def _compile_locations(model: PartModel) -> tuple[list[ApprovedDimension], list[
         approved.append(
             ApprovedDimension(
                 id=_dim_id(feature, pd.param.parameter_id),
-                #: The Z-normal ladder is the one location entry with no per-axis value:
+                #: Pocket/pad Z-normal ladders remain one location entry with no per-axis value:
                 #: `render_locations` groups refs ACROSS features and dedups per axis before
                 #: it knows which dims exist, so an entry per axis would be approving a mark
                 #: whose existence the renderer decides. Splitting it needs that grouping to

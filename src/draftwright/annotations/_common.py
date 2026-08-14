@@ -32,6 +32,72 @@ from draftwright.model.compiled import resolve_feature
 _log = logging.getLogger(__name__)
 
 
+def _with_hole_location_coverage(annotation, coverage):
+    """Attach exact compiler location/member facts to a rendered annotation.
+
+    Both the automatic corridor pass and live edit verbs use this seam.  Keeping it
+    below the individual renderers prevents one placement path from carrying only a
+    feature-level measurement identity while another carries the member it locates.
+    """
+    annotation.covers_hole_locations = tuple(coverage)
+    return annotation
+
+
+def _hole_location_coverage_fact(location):
+    """The directional physical fact rendered by one compiled hole location member.
+
+    ``location.id`` remains ADR 0016's feature-level addressable ``DimensionId``. The
+    requirement parameter is deliberately separate: critique can distinguish X from Y
+    without resolving #883's open public naming decision or minting a general identity.
+    """
+    feature = resolve_feature(location.ref)
+    if feature is None and location.id is not None:
+        feature = location.id.feature
+    assert feature is not None and location.span is not None
+    parameter = location.id.parameter if location.id is not None else location.parameter_id
+    if parameter in {"location.location", "location_pattern.location"} and location.discriminator:
+        parameter = f"{parameter}.{location.discriminator}"
+    return (feature, parameter, tuple(location.span[1]))
+
+
+def _with_hole_center_coverage(annotation, feature, member, view):
+    """Attach the physical member identified by hole/pattern centre furniture."""
+    annotation.covers_hole_centers = ((feature, tuple(member), view),)
+    return annotation
+
+
+def _same_location_ordinate(left, right) -> bool:
+    """Whether two compiled locations state the same physical ordinate.
+
+    Layout may reject distinct dimensions that are too close to print legibly, but that
+    spacing policy must never merge their semantic provenance.  Compiler coordinates are
+    stable to six decimals; this tolerance absorbs only floating-point construction noise.
+    """
+    return abs(float(left) - float(right)) <= 1e-6
+
+
+def _register_hole_table_coverage(
+    table,
+    registry,
+    name,
+    *,
+    measurements=(),
+    locations=(),
+    requirements=(),
+):
+    """Register the semantic facts visibly carried by a placed hole table.
+
+    Automatic escalation and the public table verb share this seam so the table object,
+    registry measurement inventory, and physical hole ledger cannot drift apart.
+    """
+    table.covers_hole_locations = tuple(locations)
+    table.covers_hole_requirements_by_feature = tuple(requirements)
+    identity = registry.identity_of(name)
+    identity["measurement"] = tuple(measurements)
+    registry.reapply(name, identity)
+    return table
+
+
 @dataclass(frozen=True)
 class Escalation:
     """A first-class "could not place this here" signal (ADR 0009 Amendment 1, P5-strand-2).
@@ -1195,7 +1261,15 @@ class PlacementContext:
         return self._hole_feature_index.get(tuple(round(c, 3) for c in location))
 
     def record_issue(
-        self, severity, code, message, *, measurement=None, source=None, outcome_stage=None
+        self,
+        severity,
+        code,
+        message,
+        *,
+        measurement=None,
+        hole_requirements=(),
+        source=None,
+        outcome_stage=None,
     ) -> None:
         """Record a build-time lint issue on the run's registry (#639). Replaces the passes'
         old `dwg._record_build_issue`."""
@@ -1216,6 +1290,7 @@ class PlacementContext:
                 code=code,
                 message=message,
                 measurement_ids=ids,
+                hole_requirement_ids=tuple(hole_requirements),
                 source_ids=source_ids,
                 outcome_stage=outcome_stage,
             )
@@ -1226,6 +1301,14 @@ class PlacementContext:
 
     def drop_issues(self, *codes) -> None:
         self.registry.drop_issues(codes)
+
+    def drop_issues_where(self, code, predicate) -> None:
+        """Resolve only *code* findings accepted by *predicate*.
+
+        Fallbacks can cover one semantic subset of a shared layout pass. Keeping this
+        selection in the issue owner prevents a renderer from rebuilding the issue list.
+        """
+        self.registry.drop_issues_where((code,), predicate)
 
 
 def register_corridor(ctx, key, strip, view, axis, tier, cand):

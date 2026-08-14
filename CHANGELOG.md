@@ -13,6 +13,14 @@
 
 ### Added
 
+- **Hole and hole-pattern requirements now participate in semantic completeness accounting**
+  (#1143). `lint_summary()["quality"]["completeness"]` reconciles recognition-owned bore,
+  depth/through, grouping, pattern, and location requirements to placed, suppressed, dropped,
+  missing, or explicitly unverifiable outcomes. Ambiguous declared/automatic correspondence
+  fails closed without shrinking the physical denominator. Z-normal hole locations retain ADR
+  0016's feature-level `location.location` addressability while structured physical evidence
+  distinguishes the independently required X and Y ordinates for critique.
+
 - **`lint_summary()` exposes drawing-quality evidence as separate completeness, restraint,
   and legibility components** (#1127). The legacy `score` remains byte-compatible and is also
   returned as the honestly named `diagnostic_score`; no composite quality verdict is invented.

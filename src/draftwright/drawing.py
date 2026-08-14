@@ -49,6 +49,7 @@ from draftwright._core import (
 )
 from draftwright.annotations._common import (
     PlacementContext,
+    _register_hole_table_coverage,
     carve_free_position,
     strip_obstacles,
 )
@@ -79,6 +80,7 @@ from draftwright.linting import (
     lint_drawing,
     lint_feature_coverage,
     lint_flat_coverage,
+    lint_hole_coverage,
     lint_location_coverage,
     lint_pmi_extraction,
     lint_pmi_ignored,
@@ -118,11 +120,16 @@ _GEOMETRY_AWARE_CODES = frozenset(
         "flat_requirement_suppressed",
         "flat_requirement_missing",
         "flat_requirement_unverifiable",
+        "hole_requirement_suppressed",
+        "hole_requirement_missing",
+        "hole_requirement_unverifiable",
         "missing_principal_dimension",
         "label_vs_measured",
         "dim_inside_part",
         "callout_dropped",
         "location_ref_dropped",
+        "off_axis_location_dropped",
+        "hole_pattern_dim_dropped",
         "step_dim_dropped",
         "plate_thickness_dropped",
         "step_position_dropped",
@@ -177,7 +184,7 @@ class _HoleInstance(NamedTuple):
 
 
 def _ir_hole_groups(model, target_axis: str) -> list[tuple]:
-    """``(spec, [member positions], count)`` groups of *model*'s holes on *target_axis*.
+    """``(owner, spec, [member positions], count)`` groups on *target_axis*.
 
     One group per IR hole/pattern feature — the spec-grouping + pattern recognition
     detection already did, so no ``HoleRecord``/``HoleSpec`` re-grouping is needed
@@ -189,9 +196,9 @@ def _ir_hole_groups(model, target_axis: str) -> list[tuple]:
     groups: list[tuple] = []
     for f in model.features:
         if f.kind == "hole" and f.frame.axis == target_axis:
-            groups.append((f, list(f.members) or [f.frame.origin], f.count))
+            groups.append((f, f, list(f.members) or [f.frame.origin], f.count))
         elif f.kind == "pattern" and f.member.frame.axis == target_axis:
-            groups.append((f.member, list(f.members) or [f.member.frame.origin], f.count))
+            groups.append((f, f.member, list(f.members) or [f.member.frame.origin], f.count))
     return groups
 
 
@@ -585,7 +592,7 @@ class Drawing:
             return []
 
         result = []
-        for spec, positions, count in _ir_hole_groups(model, target_axis):
+        for _owner, spec, positions, count in _ir_hole_groups(model, target_axis):
             result.append(
                 FeatureInfo(
                     type="hole",
@@ -1497,13 +1504,16 @@ class Drawing:
         edits: in deferred mode they still flow through the shared corridor solve, but
         survive/dedup as high-priority candidates and pin themselves once placed (#511).
         Each dim is tagged with *feature* so :meth:`drop` / :meth:`annotations_of` find it.
-        Returns the placed names (0–2 — one per axis with a real offset).
+        In live mode, returns one placed name per distinct requested in-plane
+        ordinate with a real offset. In deferred mode, records the intent and
+        returns ``[]``; the names are created when the context finalizes.
 
         Raises ``ValueError`` if *feature* is not a Z-axis hole/pattern (side-drilled
         bores are placed by the auto-pass). A feature with no datum-referenced ref (a
-        datum-less model, a concentric/on-datum bore, or a ref deduped against a sibling)
-        returns ``[]``. Placed reasonably, not via the auto-pass's corridor solve
-        (byte-identity is not a goal, #400 Ph2).
+        datum-less model or a concentric/on-datum bore) returns ``[]``. Live placement
+        handles this feature alone; automatic/deferred rendering may coalesce truly
+        coincident ordinates while retaining every semantic owner. Placed reasonably, not
+        via the auto-pass's corridor solve (byte-identity is not a goal, #400 Ph2).
         """
         if self._defer_intents:  # #426: record, don't place — finalize() drains it
             self._intents.append(Intent("locate", feature, {"axes": axes, "pin": pin}))
@@ -2402,7 +2412,7 @@ class Drawing:
             # this per-run ctx (#639), discarded when finalize returns (#440).
             if routable:
                 assert a is not None
-                _maybe_tabulate_holes(self, a, ctx=ctx)
+                _maybe_tabulate_holes(self, a, ctx=ctx, plan=compile_dimensions(model))
 
         run_stages(
             {
@@ -2563,14 +2573,15 @@ class Drawing:
 
         glist = [
             (
+                owner,
                 [_HoleInstance(pos, spec.diameter, spec.through, spec.depth) for pos in positions],
                 count,
             )
-            for spec, positions, count in _ir_hole_groups(model, target)
+            for owner, spec, positions, count in _ir_hole_groups(model, target)
         ]
         return [
-            (tag, holes, count)
-            for tag, (holes, count) in zip(_tag_sequence(len(glist)), glist, strict=True)
+            (tag, owner, holes, count)
+            for tag, (owner, holes, count) in zip(_tag_sequence(len(glist)), glist, strict=True)
         ]
 
     def add_balloons(self, view, specs):
@@ -2604,29 +2615,66 @@ class Drawing:
         One row per hole spec-group — ``TAG | ⌀ | DEPTH | QTY`` with tags
         ``A, B, …`` — placed via :meth:`add_table`. With *balloons* (the
         default) a circled tag is added at each hole keyed to its row. The table
-        carries ``covers_diameters`` so the coverage lint counts the tabulated
-        holes as dimensioned. Returns the table, or ``None`` when *view* has no
-        holes or it will not fit.
+        carries the same semantic measurement and structured requirement provenance as
+        automatic table escalation, so physical hole outcomes count only the facts the
+        table visibly states. Returns the table, or ``None`` when *view* has no holes or it
+        will not fit.
         """
         groups = self._hole_spec_groups(view)
         if not groups:
             return None
         rows = [("TAG", "⌀", "DEPTH", "QTY")]
         diams = []
-        for tag, holes, count in groups:
+        for tag, _owner, holes, count in groups:
             h = holes[0]
             depth = "THRU" if h.through else (_fmt(h.depth) if h.depth else "")
             rows.append((tag, f"ø{_fmt(h.diameter)}", depth, str(count)))
-            diams.append(h.diameter)
-        table = self.add_table(rows, prefer=prefer, name=name or f"hole_table_{view}")
+            # Legacy physical-diameter lint counts one structured entry per bore.
+            # Repeat the value exactly as many times as the visible QTY asserts, just as
+            # automatic escalation does, while the semantic ledger below retains the
+            # feature-scoped grouping identity.
+            diams.extend([h.diameter] * count)
+        table_name = name or f"hole_table_{view}"
+        table = self.add_table(rows, prefer=prefer, name=table_name)
         if table is None:
             return None
         # The table documents these diameters — let lint see that (#93).
         table.covers_diameters = tuple(diams)
+        from draftwright.model.compiled import DimensionId
+
+        # Calling the public verb is an explicit edit: the table itself authors every
+        # measurement it visibly prints, even when the original dimension set omitted a
+        # generated callout.  Construct the same stable identities the compiler uses so
+        # holes and patterns join the physical outcome ledger through one seam.
+        measurements = tuple(
+            DimensionId(owner, parameter)
+            for _tag, owner, holes, _count in groups
+            for parameter in (
+                ("bore.diameter",)
+                if holes[0].through or holes[0].depth is None
+                else ("bore.diameter", "bore.depth")
+            )
+        )
+        requirements = tuple(
+            (owner, "bore.through", 1) for _tag, owner, holes, _count in groups if holes[0].through
+        ) + tuple(
+            (owner, "grouping.count", count) for _tag, owner, _holes, count in groups if count > 1
+        )
+        _register_hole_table_coverage(
+            table,
+            self._registry,
+            table_name,
+            measurements=measurements,
+            requirements=requirements,
+        )
         if balloons:
             self.add_balloons(
                 view,
-                [(tag, j, h) for tag, holes, _count in groups for j, h in enumerate(holes)],
+                [
+                    (tag, j, h)
+                    for tag, _owner, holes, _count in groups
+                    for j, h in enumerate(holes)
+                ],
             )
         return table
 
@@ -2899,6 +2947,14 @@ class Drawing:
                 assembly=self.assembly,
             )
             issues += lint_slot_coverage(
+                self.part,
+                recognition=recognition,
+                features=getattr(model, "features", ()) if model is not None else (),
+                registry=self._registry,
+                omissions=self._build.omissions,
+                assembly=self.assembly,
+            )
+            issues += lint_hole_coverage(
                 self.part,
                 recognition=recognition,
                 features=getattr(model, "features", ()) if model is not None else (),
