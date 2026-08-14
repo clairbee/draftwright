@@ -692,6 +692,11 @@ def _fit_box_obstacle(item, index):
     return f"obstacle[{index}]", tuple(item)
 
 
+def _boxes_overlap(left, right):
+    """Return whether two page-space boxes overlap with positive area."""
+    return left[0] < right[2] and right[0] < left[2] and left[1] < right[3] and right[1] < left[3]
+
+
 def fit_box(size, region, obstacles, prefer="br", *, clearance=0.0, trace=None):
     """Place a ``(w, h)`` box in *region* avoiding *obstacles*, sat as near the
     *prefer* corner as possible (ADR 0003, #93).
@@ -752,11 +757,7 @@ def fit_box(size, region, obstacles, prefer="br", *, clearance=0.0, trace=None):
         )
         for name, box in named
     ]
-    obs = [
-        (name, box)
-        for name, box in expanded
-        if box[0] < rx1 and rx0 < box[2] and box[1] < ry1 and ry0 < box[3]
-    ]
+    obs = [(name, box) for name, box in expanded if _boxes_overlap(box, region)]
     x_edges = {rx0, rx1, *(o[0] for _name, o in obs), *(o[2] for _name, o in obs)}
     y_edges = {ry0, ry1, *(o[1] for _name, o in obs), *(o[3] for _name, o in obs)}
     xs = sorted({x for e in x_edges for x in (e, e - w) if rx0 <= x <= rx1 - w})
@@ -781,23 +782,25 @@ def fit_box(size, region, obstacles, prefer="br", *, clearance=0.0, trace=None):
 
     while candidates:
         _score, bx, by, y_index, x_score = heapq.heappop(candidates)
-        blockers = tuple(
-            sorted(
-                {
-                    name
-                    for name, o in obs
-                    if bx < o[2] and o[0] < bx + w and by < o[3] and o[1] < by + h
-                }
-            )
-        )
+        candidate_box = (bx, by, bx + w, by + h)
+        retain_rejection = trace is not None and len(trace.rejected) < trace.max_rejections
+        if retain_rejection:
+            blockers = tuple(sorted({name for name, o in obs if _boxes_overlap(candidate_box, o)}))
+            blocked = bool(blockers)
+        else:
+            # Once the bounded diagnostic sample is full, only collision truth is
+            # needed. Preserve the former solver's early exit instead of sorting
+            # every blocker name for every remaining O(n²) candidate (#1145 review).
+            blockers = ()
+            blocked = any(_boxes_overlap(candidate_box, o) for _name, o in obs)
         if trace is not None:
             trace.attempted_candidates += 1
-        if not blockers:
+        if not blocked:
             return (bx, by)
         if trace is not None:
             trace.rejected_candidates += 1
-            if len(trace.rejected) < trace.max_rejections:
-                trace.rejected.append(FitBoxRejection((bx, by, bx + w, by + h), blockers))
+            if retain_rejection:
+                trace.rejected.append(FitBoxRejection(candidate_box, blockers))
 
         next_index = y_index + 1
         if next_index < len(ranked_y):

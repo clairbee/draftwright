@@ -421,6 +421,32 @@ class TestFitBox:
         assert len(trace.rejected) == 2
         assert trace.rejected_candidates == trace.attempted_candidates == 6
 
+    def test_blocker_scan_short_circuits_after_bounded_trace_sample(self, monkeypatch):
+        # The first obstacle rejects every candidate. Once the two retained
+        # diagnostic samples are full, each remaining candidate must stop there
+        # rather than sorting every colliding name (a 30x no-fit regression).
+        obstacles = [("cover", (0, 0, 100, 100))]
+        obstacles.extend(
+            (f"edge-{index}", (index + 0.1, index + 0.2, index + 0.3, index + 0.4))
+            for index in range(30)
+        )
+        overlap_calls = 0
+        original = L._boxes_overlap
+
+        def counted(left, right):
+            nonlocal overlap_calls
+            overlap_calls += 1
+            return original(left, right)
+
+        monkeypatch.setattr(L, "_boxes_overlap", counted)
+        trace = FitBoxTrace(max_rejections=2)
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacles, "tr", trace=trace) is None
+
+        preprocessing = len(obstacles)
+        sampled_scans = len(trace.rejected) * len(obstacles)
+        short_circuited_scans = trace.rejected_candidates - len(trace.rejected)
+        assert overlap_calls == preprocessing + sampled_scans + short_circuited_scans
+
     def test_trace_explains_a_usable_region_size_violation(self):
         trace = FitBoxTrace()
         assert fit_box((110, 120), (0, 0, 100, 100), [], trace=trace) is None
