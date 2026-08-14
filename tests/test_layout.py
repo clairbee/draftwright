@@ -4,11 +4,14 @@ These exercise the placement primitives in isolation, with no drawing build,
 which is the point of putting them in their own module.
 """
 
+import tracemalloc
+
 import pytest
 
 import draftwright.layout as L
 from draftwright.layout import (
     _ANCHOR_WEIGHT,
+    FitBoxTrace,
     _assign_balloon_bands,
     _greedy_strip_1d,
     _solve_guarded_strip_1d,
@@ -373,6 +376,92 @@ class TestFitBox:
         # A single obstacle leaving no 60-wide gap anywhere.
         assert fit_box((60, 60), (0, 0, 100, 100), [(20, 0, 80, 100)], "br") is None
 
+    def test_named_rejection_trace_comes_from_the_exact_candidate_solve(self):
+        trace = FitBoxTrace()
+        assert (
+            fit_box(
+                (60, 60),
+                (0, 0, 100, 100),
+                [("central keep-out", (20, 0, 80, 100))],
+                "br",
+                trace=trace,
+            )
+            is None
+        )
+        assert trace.violation is None
+        assert trace.attempted_candidates == trace.rejected_candidates >= len(trace.rejected) > 0
+        assert all(rejection.blockers == ("central keep-out",) for rejection in trace.rejected)
+        # The first record is the genuinely nearest preferred candidate, not a
+        # separately reconstructed explanation of the failure.
+        assert trace.rejected[0].region == (40, 0, 100, 60)
+
+    def test_trace_attributes_the_nearest_candidate_to_its_distinct_blocker(self):
+        trace = FitBoxTrace()
+        quadrants = [
+            ("bottom-left", (0, 0, 50, 50)),
+            ("bottom-right", (50, 0, 100, 50)),
+            ("top-left", (0, 50, 50, 100)),
+            ("top-right", (50, 50, 100, 100)),
+        ]
+        assert fit_box((20, 20), (0, 0, 100, 100), quadrants, "tr", trace=trace) is None
+        assert trace.rejected[0].region == (80, 80, 100, 100)
+        assert trace.rejected[0].blockers == ("top-right",)
+
+    def test_rejection_trace_samples_are_bounded_while_total_remains_exact(self):
+        trace = FitBoxTrace(max_rejections=2)
+        assert (
+            fit_box(
+                (60, 60),
+                (0, 0, 100, 100),
+                [("central keep-out", (20, 0, 80, 100))],
+                trace=trace,
+            )
+            is None
+        )
+        assert len(trace.rejected) == 2
+        assert trace.rejected_candidates == trace.attempted_candidates == 6
+
+    def test_blocker_scan_short_circuits_after_bounded_trace_sample(self, monkeypatch):
+        # The first obstacle rejects every candidate. Once the two retained
+        # diagnostic samples are full, each remaining candidate must stop there
+        # rather than sorting every colliding name (a 30x no-fit regression).
+        obstacles = [("cover", (0, 0, 100, 100))]
+        obstacles.extend(
+            (f"edge-{index}", (index + 0.1, index + 0.2, index + 0.3, index + 0.4))
+            for index in range(30)
+        )
+        overlap_calls = 0
+        original = L._boxes_overlap
+
+        def counted(left, right):
+            nonlocal overlap_calls
+            overlap_calls += 1
+            return original(left, right)
+
+        monkeypatch.setattr(L, "_boxes_overlap", counted)
+        trace = FitBoxTrace(max_rejections=2)
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacles, "tr", trace=trace) is None
+
+        preprocessing = len(obstacles)
+        sampled_scans = len(trace.rejected) * len(obstacles)
+        short_circuited_scans = trace.rejected_candidates - len(trace.rejected)
+        assert overlap_calls == preprocessing + sampled_scans + short_circuited_scans
+
+    def test_trace_explains_a_usable_region_size_violation(self):
+        trace = FitBoxTrace()
+        assert fit_box((110, 120), (0, 0, 100, 100), [], trace=trace) is None
+        assert trace.attempted_candidates == 0
+        assert trace.violation == (
+            "width exceeds usable region by 10.0 mm; height exceeds usable region by 20.0 mm"
+        )
+
+    def test_clearance_inflates_obstacles_and_rejects_negative_values(self):
+        obstacle = [("wall", (20, 0, 40, 100))]
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacle, "bl") == (0, 0)
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacle, "bl", clearance=2) == (42, 0)
+        with pytest.raises(ValueError, match="non-negative"):
+            fit_box((20, 20), (0, 0, 100, 100), obstacle, clearance=-0.1)
+
     def test_deterministic(self):
         args = ((20, 10), (0, 0, 100, 100), [(30, 30, 60, 60)], "br")
         assert fit_box(*args) == fit_box(*args)
@@ -401,6 +490,23 @@ class TestFitBox:
         # not blow up like the old O(n^4) form. Just assert it returns.
         obstacles = [(i, i, i + 2, i + 2) for i in range(0, 200, 5)]
         assert fit_box((20, 20), (0, 0, 300, 300), obstacles, "tr") is not None
+
+    def test_candidate_cartesian_product_is_streamed_with_bounded_live_memory(self):
+        # 400 sparse boxes produce >640k distinct X×Y candidate pairs, but the
+        # preferred A4 corner is immediately free. Materialising those triples
+        # consumed hundreds of MiB; the separable-score heap needs O(n) state.
+        obstacles = [
+            (16 + i * 0.2, 16 + i * 0.1, 16.05 + i * 0.2, 16.05 + i * 0.1) for i in range(400)
+        ]
+        tracemalloc.start()
+        try:
+            assert fit_box((7.51, 14.03), (16, 16, 281, 194), obstacles, "tr") == pytest.approx(
+                (273.49, 179.97)
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 5_000_000
 
 
 def test_layout_engine_is_wired_into_the_drawing_path():

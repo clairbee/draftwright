@@ -44,8 +44,9 @@ non-linear) stays deferred (#94) and may never be needed — see that ADR's
 
 from __future__ import annotations
 
+import heapq
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
 
 Axis = Literal["x", "y"]
@@ -651,29 +652,114 @@ def plan_strip(candidates, lo, hi, min_gap, *, axis: Axis = "y"):
 # ---------------------------------------------------------------------------
 
 
-def fit_box(size, region, obstacles, prefer="br"):
+@dataclass(frozen=True)
+class FitBoxRejection:
+    """One candidate rectangle rejected by :func:`fit_box` (#1145)."""
+
+    region: tuple[float, float, float, float]
+    blockers: tuple[str, ...]
+
+
+@dataclass
+class FitBoxTrace:
+    """Inspectable record of a :func:`fit_box` decision (#1145).
+
+    The placer stays a pure rectangle solver: callers may supply named obstacles
+    and opt into this side record when a failed furniture placement needs an
+    actionable diagnostic.  ``rejected_candidates`` retains the exact total;
+    ``rejected`` is a bounded, preference-ordered sample for messages.  The hot
+    paths that only need a position pay no trace construction cost.
+    """
+
+    attempted_candidates: int = 0
+    rejected_candidates: int = 0
+    rejected: list[FitBoxRejection] = field(default_factory=list)
+    violation: str | None = None
+    clearance: float = 0.0
+    max_rejections: int = field(default=8, repr=False)
+
+
+def _fit_box_obstacle(item, index):
+    """Return ``(name, box)`` for a bare box or ``(name, box)`` input."""
+    if (
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], str)
+        and isinstance(item[1], (tuple, list))
+        and len(item[1]) == 4
+    ):
+        return item[0], tuple(item[1])
+    return f"obstacle[{index}]", tuple(item)
+
+
+def _boxes_overlap(left, right):
+    """Return whether two page-space boxes overlap with positive area."""
+    return left[0] < right[2] and right[0] < left[2] and left[1] < right[3] and right[1] < left[3]
+
+
+def fit_box(size, region, obstacles, prefer="br", *, clearance=0.0, trace=None):
     """Place a ``(w, h)`` box in *region* avoiding *obstacles*, sat as near the
     *prefer* corner as possible (ADR 0003, #93).
 
     *region* and each obstacle are ``(x0, y0, x1, y1)`` page-mm boxes. *prefer* is
-    one of ``"bl" "br" "tl" "tr"``. Returns the box ``(x0, y0)`` or ``None``.
+    one of ``"bl" "br" "tl" "tr"``. Obstacles may instead be supplied as
+    ``(name, box)`` pairs; names do not affect placement. Returns the box
+    ``(x0, y0)`` or ``None``.
+
+    *clearance* inflates each obstacle by that many page millimetres before
+    candidates are derived and tested.  The usable region itself is unchanged:
+    callers own its page/frame inset.
+
+    Pass a :class:`FitBoxTrace` to *trace* to count every rejected candidate and
+    retain a bounded preference-ordered sample with the obstacle names that
+    blocked it.  This keeps diagnostics derived from the exact solve rather than
+    from a second explanatory model.
 
     An optimal placement always has each box edge flush against a region or
-    obstacle edge, so the candidate top-left positions are exactly
+    (clearance-inflated) obstacle edge, so the candidate lower-left positions are exactly
     ``{edge, edge - boxsize}`` per axis — O(n) each, O(n²) positions, each
     checked against the obstacles in O(n). That is O(n³), tractable for the
     dozens-of-annotations obstacle sets the hole table feeds it (the old
-    rectangle-enumeration form was O(n⁴) and blew up — #93 review). Deterministic
-    (sorted candidates, first minimum wins).
+    rectangle-enumeration form was O(n⁴) and blew up — #93 review). Candidate
+    pairs are streamed rather than materialised, keeping live memory O(n).
+    Deterministic (ascending candidates, first minimum wins).
     """
     w, h = size
     rx0, ry0, rx1, ry1 = region
+    if clearance < 0:
+        raise ValueError("fit_box clearance must be non-negative")
+    if trace is not None:
+        trace.attempted_candidates = 0
+        trace.rejected_candidates = 0
+        trace.rejected.clear()
+        trace.violation = None
+        trace.clearance = clearance
     if w > rx1 - rx0 or h > ry1 - ry0:
+        if trace is not None:
+            violations = []
+            if w > rx1 - rx0:
+                violations.append(f"width exceeds usable region by {w - (rx1 - rx0):.1f} mm")
+            if h > ry1 - ry0:
+                violations.append(f"height exceeds usable region by {h - (ry1 - ry0):.1f} mm")
+            trace.violation = "; ".join(violations)
         return None
     # Only obstacles that can intersect the region constrain the placement.
-    obs = [o for o in obstacles if o[0] < rx1 and rx0 < o[2] and o[1] < ry1 and ry0 < o[3]]
-    x_edges = {rx0, rx1, *(o[0] for o in obs), *(o[2] for o in obs)}
-    y_edges = {ry0, ry1, *(o[1] for o in obs), *(o[3] for o in obs)}
+    named = [_fit_box_obstacle(item, index) for index, item in enumerate(obstacles)]
+    expanded = [
+        (
+            name,
+            (
+                box[0] - clearance,
+                box[1] - clearance,
+                box[2] + clearance,
+                box[3] + clearance,
+            ),
+        )
+        for name, box in named
+    ]
+    obs = [(name, box) for name, box in expanded if _boxes_overlap(box, region)]
+    x_edges = {rx0, rx1, *(o[0] for _name, o in obs), *(o[2] for _name, o in obs)}
+    y_edges = {ry0, ry1, *(o[1] for _name, o in obs), *(o[3] for _name, o in obs)}
     xs = sorted({x for e in x_edges for x in (e, e - w) if rx0 <= x <= rx1 - w})
     ys = sorted({y for e in y_edges for y in (e, e - h) if ry0 <= y <= ry1 - h})
 
@@ -681,16 +767,46 @@ def fit_box(size, region, obstacles, prefer="br"):
     top = prefer in ("tl", "tr")
     cx = rx1 if right else rx0
     cy = ry1 if top else ry0
-    best = None
-    best_score = None
+    # Scores separate into X + Y terms.  Merge one sorted Y stream per X via a
+    # heap so candidates arrive in exact ``(score, bx, by)`` order without ever
+    # materialising the O(len(xs) * len(ys)) Cartesian product (#1145 review).
+    ranked_y = sorted(
+        ((((by + h if top else by) - cy) ** 2, by) for by in ys),
+        key=lambda candidate: (candidate[0], candidate[1]),
+    )
+    candidates: list[tuple[float, float, float, int, float]] = []
     for bx in xs:
-        for by in ys:
-            if any(bx < o[2] and o[0] < bx + w and by < o[3] and o[1] < by + h for o in obs):
-                continue
-            bcx = bx + w if right else bx
-            bcy = by + h if top else by
-            score = (bcx - cx) ** 2 + (bcy - cy) ** 2
-            if best_score is None or score < best_score:
-                best_score = score
-                best = (bx, by)
-    return best
+        x_score = ((bx + w if right else bx) - cx) ** 2
+        y_score, by = ranked_y[0]
+        heapq.heappush(candidates, (x_score + y_score, bx, by, 0, x_score))
+
+    while candidates:
+        _score, bx, by, y_index, x_score = heapq.heappop(candidates)
+        candidate_box = (bx, by, bx + w, by + h)
+        retain_rejection = trace is not None and len(trace.rejected) < trace.max_rejections
+        if retain_rejection:
+            blockers = tuple(sorted({name for name, o in obs if _boxes_overlap(candidate_box, o)}))
+            blocked = bool(blockers)
+        else:
+            # Once the bounded diagnostic sample is full, only collision truth is
+            # needed. Preserve the former solver's early exit instead of sorting
+            # every blocker name for every remaining O(n²) candidate (#1145 review).
+            blockers = ()
+            blocked = any(_boxes_overlap(candidate_box, o) for _name, o in obs)
+        if trace is not None:
+            trace.attempted_candidates += 1
+        if not blocked:
+            return (bx, by)
+        if trace is not None:
+            trace.rejected_candidates += 1
+            if retain_rejection:
+                trace.rejected.append(FitBoxRejection(candidate_box, blockers))
+
+        next_index = y_index + 1
+        if next_index < len(ranked_y):
+            y_score, next_by = ranked_y[next_index]
+            heapq.heappush(
+                candidates,
+                (x_score + y_score, bx, next_by, next_index, x_score),
+            )
+    return None
