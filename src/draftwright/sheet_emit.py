@@ -1279,6 +1279,14 @@ unavailable or ambiguous matches remain complete numeric declarations and fail c
 """'''
 
 
+def _validate_scale_policy(scale, scale_policy) -> None:
+    """Reject incoherent script options before detection or emission work begins."""
+    if scale_policy not in {"strict", "fallback", "permissive"}:
+        raise ValueError("scale_policy must be 'strict', 'fallback', or 'permissive'")
+    if scale is None and scale_policy != "fallback":
+        raise ValueError("scale_policy applies only when an explicit scale is supplied")
+
+
 def emit_sheet_script(
     model,
     part_expr: str,
@@ -1289,6 +1297,7 @@ def emit_sheet_script(
     drawn_by: str = "",
     tolerance: str = "ISO 2768-m",
     scale=None,
+    scale_policy="fallback",
     page=None,
     material: str = "",
     date: str = "",
@@ -1325,6 +1334,7 @@ def emit_sheet_script(
     comment a feature line out and re-run — which shifts every later index and silently
     retargets the declarations onto their neighbours. #931 and #932 removed positional
     addressing from the artefact, so the declarations can now be written honestly."""
+    _validate_scale_policy(scale, scale_policy)
     # The script declares this model — `model` plus an envelope when the overall height would
     # otherwise be unnameable under the mirrored (authored) set. BEFORE the import scan, since
     # a synthesised envelope needs `EnvelopeFeature` imported like a detected one.
@@ -1369,6 +1379,8 @@ def emit_sheet_script(
         ctor.append(f"tolerance={tolerance!r}")
     if scale is not None:
         ctor.append(f"scale={scale!r}")
+    if scale_policy != "fallback":
+        ctor.append(f"scale_policy={scale_policy!r}")
     if page is not None:
         ctor.append(f"page={page!r}")
     if material:
@@ -1620,6 +1632,7 @@ def generate_sheet_script(
     tolerance: str = "ISO 2768-m",
     drawn_by: str = "",
     scale=None,
+    scale_policy="fallback",
     page=None,
     material: str = "",
     date: str = "",
@@ -1645,6 +1658,7 @@ def generate_sheet_script(
     surface (flagged inline).
     *part_expr*, when given, overrides the ``part = …`` seam — e.g. the import seam from
     :func:`resolve_object_spec` so the script references a live module (#469)."""
+    _validate_scale_policy(scale, scale_policy)
     is_shape = isinstance(step_file, Shape)
     stem = out or ("drawing" if is_shape else Path(step_file).stem)
     for _ext in (".py", ".svg", ".dxf"):
@@ -1672,6 +1686,7 @@ def generate_sheet_script(
         drawn_by=drawn_by,
         tolerance=tolerance,
         scale=scale,
+        scale_policy=scale_policy,
         page=page,
         material=material,
         date=date,

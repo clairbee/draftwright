@@ -1,7 +1,7 @@
 # ADR 0004 — Compose-then-pack: views as blocks carrying their annotation footprint
 
-- **Status:** Accepted (2026-06-19; amended 2026-06-20, 2026-07-09 and
-  2026-07-18 — see Amendments)
+- **Status:** Accepted (2026-06-19; amended 2026-06-20, 2026-07-09,
+  2026-07-18 and 2026-08-14 — see Amendments)
 - **Date:** 2026-06-19
 - **Deciders:** Paul Fremantle (pzfreo)
 
@@ -104,17 +104,18 @@ scale↔footprint loop to iterate — `compose(scale)` fixes the legibility and
 escalation choices for that scale. The scattered estimators (`_est_*_depth`,
 table size, halo) collapse into one composer per view.
 
-**The legibility floor is advisory for an *explicit* scale (#489).** `_MIN_VIEW_MM`
-(10 mm) is purely the threshold below which an explicit scale earns a legibility
-*warning*. It does **not** bound the auto scale (`choose_scale` picks by a pure
-geometric page fit) and does **not** gate which annotations exist (step/location
-legibility use `_MIN_STEP_*`/`_MIN_LOC_SEP_MM`). A caller who sets an intentional
-1:1 (or `scale="1:10"`) has accepted the cramping, so an explicit scale below the
-floor is honoured, not vetoed — and the warning fires only when the auto scale
-would *itself* be legible, so its "omit the scale" advice is always real. The one
-hard rejection is `_MIN_RENDER_MM` (0.1 mm) — a conservative geometry floor well
-above where OCCT's annotation arcs actually degenerate (`Geom_TrimmedCurve U1==U2`,
-~1e-4 mm); there we raise a clean message rather than crash.
+**The geometry legibility floor remains advisory for an *explicit* scale (#489), but
+required annotation outcomes are not (#1146).** `_MIN_VIEW_MM` (10 mm) is purely the
+threshold below which an explicit scale earns a legibility *warning*. It does **not** bound
+the auto scale (`choose_scale` picks by a pure geometric page fit) and does **not** gate which
+annotations exist (step/location legibility use `_MIN_STEP_*`/`_MIN_LOC_SEP_MM`). Since #1146,
+the completed drawing is also checked for required placement drops: the default policy retries
+smaller preferred ISO 5455 scales, strict policy rejects the request, and only an explicit
+permissive policy returns the incomplete scale with a warning. Thus a caller may accept small
+geometry, but not silently lose manufacturing requirements. The one unconditional hard
+rejection is `_MIN_RENDER_MM` (0.1 mm) — a conservative geometry floor well above where OCCT's
+annotation arcs actually degenerate (`Geom_TrimmedCurve U1==U2`, ~1e-4 mm); there we raise a
+clean message rather than crash.
 
 ### Relationship to retired ADR 0003 and the rejected 2D solve
 
@@ -283,3 +284,36 @@ code is right, and the text is hereby reconciled rather than left to mislead:
    (`_annotations_out_of_bounds`) deliberately measure the *built* annotations'
    real bounding boxes — O(n) per bounded iteration, matching what lint tests.
    The rule constrains the fitness search, not the post-build verification.
+
+## Amendment (2026-08-14) — explicit scale cannot silently lose requirements (#1146)
+
+ADR 0004 originally said an explicit scale below the advisory geometry-legibility floor is
+honoured because the caller has accepted a cramped drawing. That remains true for geometry:
+an explicit scale may make a view small and earn a warning without being vetoed. It is not,
+however, authority to discard manufacturing requirements. A drawing that silently loses a
+required dimension, callout, GD&T frame, or authored table is incomplete rather than merely
+cramped.
+
+The explicit-scale contract is therefore amended as follows:
+
+1. A completed drawing is checked for required placement outcomes, including the measured
+   footprint of authored sheet tables. Pinning, priority, or informational diagnostic severity
+   cannot hide a displaced requirement.
+2. The default policy retries smaller preferred ISO 5455 scales and selects the largest complete
+   candidate at or below the requested scale. Strict policy rejects an incomplete requested
+   scale; permissive policy returns it only with an explicit warning.
+3. The decision remains inspectable through the drawing's structured scale-decision record,
+   including requested/effective scale, attempted candidates, and stable blocker identities.
+4. Trial builds reuse imported, classified, recognised, and critique inventories. This keeps the
+   policy search bounded and preserves the ADR's box-math performance rationale; discarded
+   trials are not independent full recognition pipelines.
+5. Automatic page selection is deliberately more conservative than an explicitly forced page.
+   Required authored-table footprints are reserved before the flexible, orientation-only iso and
+   the candidate must retain the iso fitness budget. This may select a larger standard page even
+   when a caller-forced smaller page can place every requirement by fitting furniture around the
+   rendered iso. The forced-page build is complete and strict policy therefore honours it; the
+   automatic search is not a “smallest page on which lint happens to be clean” optimiser.
+
+The unconditional `_MIN_RENDER_MM` safety floor and the advisory `_MIN_VIEW_MM` warning retain
+their prior meanings. This amendment narrows only the old “honour explicit scale” statement:
+caller-accepted geometric cramping is permitted, silent semantic incompleteness is not.

@@ -39,6 +39,14 @@ class PmiMode(str, Enum):
     annotate = "annotate"
 
 
+class ScalePolicy(str, Enum):
+    """Required-annotation policy for an explicit drawing scale (#1146)."""
+
+    strict = "strict"
+    fallback = "fallback"
+    permissive = "permissive"
+
+
 def _parse_formats(value: str) -> list[str]:
     """Parse a ``--format`` value (comma-list, with an ``all`` alias) into an
     ordered, de-duplicated list of formats. Raises on an unknown token."""
@@ -118,6 +126,11 @@ def main(
     scale: float | None = typer.Option(
         None, help="Drawing-scale override, e.g. 5 for 5:1 or 0.5 for 1:2 (default: auto)"
     ),
+    scale_policy: ScalePolicy = typer.Option(
+        ScalePolicy.fallback,
+        "--scale-policy",
+        help="Explicit-scale completeness policy: strict, fallback, or permissive",
+    ),
     page: str | None = typer.Option(
         None, help="Page-size override: A4..A0 or WIDTHxHEIGHT in mm, e.g. 420x297 (default: auto)"
     ),
@@ -166,6 +179,10 @@ def main(
     if script and style != "sheet":
         # validate before the ~5 s engine import so a typo fails fast
         raise typer.BadParameter("--style must be 'sheet'", param_hint="--style")
+    if scale is None and scale_policy is not ScalePolicy.fallback:
+        raise typer.BadParameter(
+            "--scale-policy requires an explicit --scale", param_hint="--scale-policy"
+        )
 
     # Import the engine lazily, only on the build path: it pulls in build123d/OCP
     # (~5 s of CAD-kernel import). Keeping it out of module scope means shell
@@ -189,6 +206,7 @@ def main(
                 tolerance=tolerance,
                 drawn_by=drawn_by,
                 scale=scale,
+                scale_policy=scale_policy.value,
                 page=page,
                 material=material,
                 date=date,
@@ -210,6 +228,7 @@ def main(
                 tolerance=tolerance,
                 drawn_by=drawn_by,
                 scale=scale,
+                scale_policy=scale_policy.value,
                 page=page,
                 material=material,
                 date=date,
@@ -232,6 +251,7 @@ def main(
         tolerance=tolerance,
         drawn_by=drawn_by,
         scale=scale,
+        scale_policy=scale_policy.value,
         page=page,
         pmi=pmi.value if pmi is not None else None,
         material=material,

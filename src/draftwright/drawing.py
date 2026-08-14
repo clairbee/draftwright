@@ -368,6 +368,8 @@ class Drawing:
 
     Attributes:
         scale: drawing scale factor (e.g. ``2.0`` for 2:1).
+        scale_decision: JSON-friendly resolution of an automatic or explicit scale request,
+            including the requested/effective scales and any required placement blockers.
         page_w, page_h: sheet size in mm.
         tb_w: title-block width in mm.
         draft: the shared ``Draft`` preset used by the automatic annotations.
@@ -404,6 +406,17 @@ class Drawing:
         assembly=None,
     ):
         self.scale = scale
+        # Public, JSON-friendly record of how the requested drawing scale was resolved
+        # (#1146). The build wrapper replaces this automatic default for explicit policies.
+        self.scale_decision = {
+            "policy": "automatic",
+            "requested_scale": None,
+            "effective_scale": scale,
+            "status": "automatic",
+            "blockers": (),
+            "attempted_scales": (),
+            "attempts": (),
+        }
         self.part = part
         self._cyl_cache = cyls
         # None → the coverage lint auto-detects a multi-solid part as an
@@ -2520,7 +2533,9 @@ class Drawing:
         self._add(n, name, view=view)
         return name
 
-    def add_table(self, rows, *, prefer="tr", name="table", block_cols=None):
+    def add_table(
+        self, rows, *, prefer="tr", name="table", block_cols=None, _source_id: str | None = None
+    ):
         """Add a generic data table in the preferred available sheet region (#93/#1145).
 
         *rows* is a list of equal-length string tuples (``rows[0]`` is the
@@ -2621,11 +2636,16 @@ class Drawing:
                 )
             if detail is None:
                 detail = "solver returned no placement trace"
-            self._record_build_issue(
-                "warning",
-                "table_dropped",
-                f"table {name!r} did not fit the sheet; measured page-space footprint "
-                f"{measured}; {detail}",
+            self._registry.record_issue(
+                LintIssue(
+                    severity="warning",
+                    code="table_dropped",
+                    message=(
+                        f"table {name!r} did not fit the sheet; measured page-space footprint "
+                        f"{measured}; {detail}"
+                    ),
+                    source_ids=(_source_id,) if _source_id is not None else (),
+                )
             )
             return None
         return self._add(table.locate(Location((pos[0], pos[1], 0))), name)
