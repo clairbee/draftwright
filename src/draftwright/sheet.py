@@ -1406,8 +1406,9 @@ class Sheet:
         """Declare a corner-block data table — positioned at :meth:`build` by the engine's generic
         auto-placer, clear of the views, title block, and annotations (the same machinery as the
         hole table), and lint-checked. *rows* is a sequence of equal-length row sequences (row 0
-        the header); cells are stringified. *prefer* is the page corner to sit nearest
-        (``"tr"``/``"tl"``/``"br"``/``"bl"``). A table with no free corner records a
+        the header); cells are stringified. *prefer* ranks the free candidates by the page corner
+        to sit nearest (``"tr"``/``"tl"``/``"br"``/``"bl"``); it does not exclude viable interior
+        or opposite-corner space. A table with no fitting free region records an inspectable
         ``table_dropped`` lint — it never overlaps. Revision blocks, BOMs and schedules all use
         this; :meth:`notes` is the single-column convenience over it."""
         rows = list(rows)

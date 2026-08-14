@@ -9,6 +9,7 @@ import pytest
 import draftwright.layout as L
 from draftwright.layout import (
     _ANCHOR_WEIGHT,
+    FitBoxTrace,
     _assign_balloon_bands,
     _greedy_strip_1d,
     _solve_guarded_strip_1d,
@@ -372,6 +373,47 @@ class TestFitBox:
         assert fit_box((10, 200), (0, 0, 100, 100), [], "br") is None  # too tall
         # A single obstacle leaving no 60-wide gap anywhere.
         assert fit_box((60, 60), (0, 0, 100, 100), [(20, 0, 80, 100)], "br") is None
+
+    def test_named_rejection_trace_comes_from_the_exact_candidate_solve(self):
+        trace = FitBoxTrace()
+        assert (
+            fit_box(
+                (60, 60),
+                (0, 0, 100, 100),
+                [("central keep-out", (20, 0, 80, 100))],
+                "br",
+                trace=trace,
+            )
+            is None
+        )
+        assert trace.violation is None
+        assert trace.attempted_candidates == trace.rejected_candidates >= len(trace.rejected) > 0
+        assert all(rejection.blockers == ("central keep-out",) for rejection in trace.rejected)
+        # The first record is the genuinely nearest preferred candidate, not a
+        # separately reconstructed explanation of the failure.
+        assert trace.rejected[0].region == (40, 0, 100, 60)
+
+    def test_rejection_trace_samples_are_bounded_while_total_remains_exact(self):
+        trace = FitBoxTrace(max_rejections=2)
+        assert (
+            fit_box(
+                (60, 60),
+                (0, 0, 100, 100),
+                [("central keep-out", (20, 0, 80, 100))],
+                trace=trace,
+            )
+            is None
+        )
+        assert len(trace.rejected) == 2
+        assert trace.rejected_candidates == trace.attempted_candidates == 6
+
+    def test_trace_explains_a_usable_region_size_violation(self):
+        trace = FitBoxTrace()
+        assert fit_box((110, 120), (0, 0, 100, 100), [], trace=trace) is None
+        assert trace.attempted_candidates == 0
+        assert trace.violation == (
+            "width exceeds usable region by 10.0 mm; height exceeds usable region by 20.0 mm"
+        )
 
     def test_deterministic(self):
         args = ((20, 10), (0, 0, 100, 100), [(30, 30, 60, 60)], "br")

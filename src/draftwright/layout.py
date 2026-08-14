@@ -45,7 +45,7 @@ non-linear) stays deferred (#94) and may never be needed — see that ADR's
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
 
 Axis = Literal["x", "y"]
@@ -651,15 +651,61 @@ def plan_strip(candidates, lo, hi, min_gap, *, axis: Axis = "y"):
 # ---------------------------------------------------------------------------
 
 
-def fit_box(size, region, obstacles, prefer="br"):
+@dataclass(frozen=True)
+class FitBoxRejection:
+    """One candidate rectangle rejected by :func:`fit_box` (#1145)."""
+
+    region: tuple[float, float, float, float]
+    blockers: tuple[str, ...]
+
+
+@dataclass
+class FitBoxTrace:
+    """Inspectable record of a :func:`fit_box` decision (#1145).
+
+    The placer stays a pure rectangle solver: callers may supply named obstacles
+    and opt into this side record when a failed furniture placement needs an
+    actionable diagnostic.  ``rejected_candidates`` retains the exact total;
+    ``rejected`` is a bounded, preference-ordered sample for messages.  The hot
+    paths that only need a position pay no trace construction cost.
+    """
+
+    attempted_candidates: int = 0
+    rejected_candidates: int = 0
+    rejected: list[FitBoxRejection] = field(default_factory=list)
+    violation: str | None = None
+    max_rejections: int = field(default=8, repr=False)
+
+
+def _fit_box_obstacle(item, index):
+    """Return ``(name, box)`` for a bare box or ``(name, box)`` input."""
+    if (
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], str)
+        and isinstance(item[1], (tuple, list))
+        and len(item[1]) == 4
+    ):
+        return item[0], tuple(item[1])
+    return f"obstacle[{index}]", tuple(item)
+
+
+def fit_box(size, region, obstacles, prefer="br", *, trace=None):
     """Place a ``(w, h)`` box in *region* avoiding *obstacles*, sat as near the
     *prefer* corner as possible (ADR 0003, #93).
 
     *region* and each obstacle are ``(x0, y0, x1, y1)`` page-mm boxes. *prefer* is
-    one of ``"bl" "br" "tl" "tr"``. Returns the box ``(x0, y0)`` or ``None``.
+    one of ``"bl" "br" "tl" "tr"``. Obstacles may instead be supplied as
+    ``(name, box)`` pairs; names do not affect placement. Returns the box
+    ``(x0, y0)`` or ``None``.
+
+    Pass a :class:`FitBoxTrace` to *trace* to count every rejected candidate and
+    retain a bounded preference-ordered sample with the obstacle names that
+    blocked it.  This keeps diagnostics derived from the exact solve rather than
+    from a second explanatory model.
 
     An optimal placement always has each box edge flush against a region or
-    obstacle edge, so the candidate top-left positions are exactly
+    obstacle edge, so the candidate lower-left positions are exactly
     ``{edge, edge - boxsize}`` per axis — O(n) each, O(n²) positions, each
     checked against the obstacles in O(n). That is O(n³), tractable for the
     dozens-of-annotations obstacle sets the hole table feeds it (the old
@@ -668,12 +714,29 @@ def fit_box(size, region, obstacles, prefer="br"):
     """
     w, h = size
     rx0, ry0, rx1, ry1 = region
+    if trace is not None:
+        trace.attempted_candidates = 0
+        trace.rejected_candidates = 0
+        trace.rejected.clear()
+        trace.violation = None
     if w > rx1 - rx0 or h > ry1 - ry0:
+        if trace is not None:
+            violations = []
+            if w > rx1 - rx0:
+                violations.append(f"width exceeds usable region by {w - (rx1 - rx0):.1f} mm")
+            if h > ry1 - ry0:
+                violations.append(f"height exceeds usable region by {h - (ry1 - ry0):.1f} mm")
+            trace.violation = "; ".join(violations)
         return None
     # Only obstacles that can intersect the region constrain the placement.
-    obs = [o for o in obstacles if o[0] < rx1 and rx0 < o[2] and o[1] < ry1 and ry0 < o[3]]
-    x_edges = {rx0, rx1, *(o[0] for o in obs), *(o[2] for o in obs)}
-    y_edges = {ry0, ry1, *(o[1] for o in obs), *(o[3] for o in obs)}
+    named = [_fit_box_obstacle(item, index) for index, item in enumerate(obstacles)]
+    obs = [
+        (name, box)
+        for name, box in named
+        if box[0] < rx1 and rx0 < box[2] and box[1] < ry1 and ry0 < box[3]
+    ]
+    x_edges = {rx0, rx1, *(o[0] for _name, o in obs), *(o[2] for _name, o in obs)}
+    y_edges = {ry0, ry1, *(o[1] for _name, o in obs), *(o[3] for _name, o in obs)}
     xs = sorted({x for e in x_edges for x in (e, e - w) if rx0 <= x <= rx1 - w})
     ys = sorted({y for e in y_edges for y in (e, e - h) if ry0 <= y <= ry1 - h})
 
@@ -681,16 +744,37 @@ def fit_box(size, region, obstacles, prefer="br"):
     top = prefer in ("tl", "tr")
     cx = rx1 if right else rx0
     cy = ry1 if top else ry0
-    best = None
-    best_score = None
+    candidates = []
     for bx in xs:
         for by in ys:
-            if any(bx < o[2] and o[0] < bx + w and by < o[3] and o[1] < by + h for o in obs):
-                continue
             bcx = bx + w if right else bx
             bcy = by + h if top else by
             score = (bcx - cx) ** 2 + (bcy - cy) ** 2
-            if best_score is None or score < best_score:
-                best_score = score
-                best = (bx, by)
-    return best
+            candidates.append((score, bx, by))
+
+    # Sorting by score first is equivalent to the old full scan/minimum update;
+    # bx/by preserve its deterministic ascending tie-break.  It also lets the
+    # trace say which candidates the preference policy actually tried first.
+    for _score, bx, by in sorted(candidates):
+        if trace is None:
+            if any(
+                bx < o[2] and o[0] < bx + w and by < o[3] and o[1] < by + h for _name, o in obs
+            ):
+                continue
+            return (bx, by)
+        blockers = tuple(
+            sorted(
+                {
+                    name
+                    for name, o in obs
+                    if bx < o[2] and o[0] < bx + w and by < o[3] and o[1] < by + h
+                }
+            )
+        )
+        trace.attempted_candidates += 1
+        if not blockers:
+            return (bx, by)
+        trace.rejected_candidates += 1
+        if len(trace.rejected) < trace.max_rejections:
+            trace.rejected.append(FitBoxRejection((bx, by, bx + w, by + h), blockers))
+    return None

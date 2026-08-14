@@ -67,7 +67,7 @@ from draftwright.export import (
     write_dxf,
 )
 from draftwright.intents import Intent
-from draftwright.layout import fit_box
+from draftwright.layout import FitBoxTrace, fit_box
 from draftwright.linting import (
     CoverageState,
     LintIssue,
@@ -2521,15 +2521,17 @@ class Drawing:
         return name
 
     def add_table(self, rows, *, prefer="tr", name="table", block_cols=None):
-        """Add a generic data table, placed in a free corner (#93).
+        """Add a generic data table in the preferred available sheet region (#93/#1145).
 
         *rows* is a list of equal-length string tuples (``rows[0]`` is the
-        header). The table is positioned by :func:`fit_box` clear of the views,
-        title block, and existing annotations; *prefer* is the page corner to sit
-        nearest. Returns the table annotation, or ``None`` if it has no rows or
-        will not fit (recorded as ``table_dropped`` lint). Gear-data, BOM, and
-        revision tables all go through here; :meth:`add_hole_table` is the
-        hole-specific convenience built on it.
+        header). The measured page-space footprint is positioned by :func:`fit_box`
+        clear of the views, title block, and existing annotations; *prefer* ranks
+        candidates by their distance from that page corner but does not restrict
+        placement to the corner. Returns the table annotation, or ``None`` if it
+        has no rows or will not fit. A failed solve records ``table_dropped`` with
+        the footprint, attempted candidate regions, and their named blockers.
+        Gear-data, BOM, and revision tables all go through here;
+        :meth:`add_hole_table` is the hole-specific convenience built on it.
         """
         if not rows:
             return None
@@ -2540,18 +2542,65 @@ class Drawing:
         pw = a.PAGE_W if a is not None else self.page_w
         ph = a.PAGE_H if a is not None else self.page_h
         region = (margin, margin, pw - margin, ph - margin)
-        obstacles = [b for v in self.views if (b := self.view_bounds(v)) is not None]
-        obstacles.extend(strip_obstacles(self))
-        for o in self.items:
-            try:
-                bb = o.bounding_box()
-            except Exception:  # noqa: BLE001 — not every annotation bbox-es cleanly
+        obstacles = [
+            (f"view:{view}", box)
+            for view in self.views
+            if (box := self.view_bounds(view)) is not None
+        ]
+        for annotation_name, box in strip_obstacles(self, named=True):
+            annotation = self.get_annotation(annotation_name)
+            # The border and zone ruler DEFINE the usable region above; treating
+            # either one's page-spanning Compound bbox as a solid obstacle makes
+            # every interior free rectangle disappear (#1145).  Their clearance
+            # is already encoded by ``a.margin``.
+            if any(
+                getattr(annotation, rider, False) for rider in ("is_sheet_frame", "is_zone_grid")
+            ):
                 continue
-            obstacles.append((bb.min.X, bb.min.Y, bb.max.X, bb.max.Y))
-        pos = fit_box((w, h), region, obstacles, prefer)
+            obstacles.append((f"annotation:{annotation_name}", box))
+
+        # A title block's decomposed grid lines bound text-filled cells; the whole
+        # block is furniture, not a collection of free pockets.  Keep its rendered
+        # hull as one named obstacle while other leaders/dimensions retain the more
+        # precise segment + label occupancy from ``strip_obstacles``.
+        title_block = self.get_annotation("title_block")
+        if title_block is not None:
+            try:
+                bb = title_block.bounding_box()
+            except Exception:  # noqa: BLE001 — the decomposed occupancy remains available
+                pass
+            else:
+                obstacles.append(
+                    ("annotation:title_block", (bb.min.X, bb.min.Y, bb.max.X, bb.max.Y))
+                )
+
+        trace = FitBoxTrace()
+        pos = fit_box((w, h), region, obstacles, prefer, trace=trace)
         if pos is None:
+            measured = f"width={w:.1f} mm, height={h:.1f} mm"
+            detail = trace.violation
+            if detail is None and trace.rejected:
+                shown = trace.rejected[:4]
+                rejected = []
+                for attempt in shown:
+                    x0, y0, x1, y1 = attempt.region
+                    rejected.append(
+                        f"[{x0:.1f},{y0:.1f}–{x1:.1f},{y1:.1f}] blocked by "
+                        f"{', '.join(attempt.blockers)}"
+                    )
+                remaining = trace.rejected_candidates - len(shown)
+                suffix = f"; +{remaining} more" if remaining else ""
+                detail = (
+                    f"attempted {trace.attempted_candidates} candidate regions; rejected: "
+                    f"{'; '.join(rejected)}{suffix}"
+                )
+            if detail is None:
+                detail = "solver returned no placement trace"
             self._record_build_issue(
-                "warning", "table_dropped", f"table {name!r} did not fit the sheet"
+                "warning",
+                "table_dropped",
+                f"table {name!r} did not fit the sheet; measured page-space footprint "
+                f"{measured}; {detail}",
             )
             return None
         return self._add(table.locate(Location((pos[0], pos[1], 0))), name)

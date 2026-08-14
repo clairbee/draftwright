@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **Generic notes/data tables use every viable free sheet region and explain failed placement**
+  (#1145). A drawn sheet frame or zone ruler now defines the usable inset instead of becoming a
+  page-sized solid obstacle, so a measured four-row notes block can use clear lower-left A4
+  space. Failed table diagnostics report the measured page-space footprint, attempted candidate
+  regions, and the named annotations that blocked the nearest candidates.
+
 - **Automatic hole-table escalation is transactional per semantic requirement** (#1144). The
   engine suppresses replaceable callouts and location dimensions only after the table fits and
   every visible row has its required feature-owned balloon. A failed or partial balloon attempt

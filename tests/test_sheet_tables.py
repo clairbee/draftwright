@@ -30,6 +30,68 @@ def test_notes_block_places_lint_clean():
     ]
 
 
+def test_four_row_notes_block_uses_clear_lower_left_a4_space_inside_frame():
+    # #1145 real failure seam: the sheet-frame Compound spans the page, but it is
+    # a boundary whose inset is already represented by analysis.margin—not a
+    # solid obstacle.  Three notes + title are the reported four-row inventory.
+    s = Sheet(
+        Box(80, 50, 12) - Pos(0, 0, 0) * Cylinder(4, 12),
+        title="Plate",
+        number="DWG-A4-NOTES",
+        page="A4",
+        frame=True,
+    ).authored_dimensions()
+    s.envelope()
+    s.hole(Pos(0, 0, 0) * Cylinder(4, 12))
+    s.notes(["BREAK ALL EDGES 0.3", "DEBURR", "M3x0.5 TAP"], prefer="bl")
+
+    drawing = s.build()
+    table = drawing.get_annotation("notes0")
+
+    assert table is not None
+    assert table.table_size == pytest.approx((43.1950001, 28.0))
+    box = table.bounding_box()
+    # The frame-enabled public A4 content inset is 16 mm; pin the rendered
+    # result without reaching through Drawing's private analysis state.
+    assert (box.min.X, box.min.Y) == pytest.approx((16.0, 16.0), abs=1e-6)
+    assert not [issue for issue in drawing.lint() if issue.code == "table_dropped"]
+
+
+def test_failed_table_diagnostic_names_size_candidate_regions_and_blockers():
+    # Free-form notes are the sanctioned user-positioned text surface.  These
+    # intentionally fill the A4 usable region in horizontal bands so the real
+    # generic table path has candidates, rejects them, and attributes the exact
+    # blocking annotations in its public lint diagnostic.
+    from draftwright import build_drawing
+
+    drawing = build_drawing(Box(40, 30, 10), page="A4", auto_dims=False, frame=True)
+    for index, y in enumerate(range(20, 191, 8)):
+        drawing.note("M" * 180, (148.5, y), name=f"block_{index}")
+
+    assert drawing.add_table([("H",), ("x",)], name="blocked") is None
+    issue = next(
+        issue
+        for issue in drawing.registry.issues
+        if issue.code == "table_dropped" and "'blocked'" in issue.message
+    )
+    assert "measured page-space footprint width=7.5 mm, height=14.0 mm" in issue.message
+    assert "attempted " in issue.message and "candidate regions; rejected:" in issue.message
+    assert "blocked by annotation:block_" in issue.message
+
+
+def test_oversized_table_diagnostic_reports_both_measured_dimensions_and_violation():
+    s = _sheet()
+    s.table([("H",)] + [(str(i),) for i in range(300)], name="oversized")
+    drawing = s.build()
+    issue = next(
+        issue
+        for issue in drawing.registry.issues
+        if issue.code == "table_dropped" and "'oversized'" in issue.message
+    )
+    assert "measured page-space footprint" in issue.message
+    assert "height exceeds usable region by" in issue.message
+
+
 def test_notes_autonumbers_under_a_title():
     s = _sheet()
     s.notes(["A", "B"], title="NOTES")
