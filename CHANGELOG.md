@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Automatic hole-table escalation is transactional per semantic requirement** (#1144). The
+  engine suppresses replaceable callouts and location dimensions only after the table fits and
+  every visible row has its required feature-owned balloon. A failed or partial balloon attempt
+  rolls the shared table back as a unit and restores the exact annotations, ordering, registry
+  identities, coverage, and issues. Precise ring, glyph, and leader-segment tests keep placement
+  clear of retained callout labels, leader shafts, and existing public-balloon components without
+  changing the existing additive `add_hole_table()`/`add_balloons()` behavior; malformed component
+  metadata—including Boolean cardinalities or coordinate payloads—falls back conservatively or fails the
+  optional replacement closed. New balloon shafts must also remain mutually crossing-free.
+  Compound, thread,
+  profile, pattern, tolerance, and fit facts the table cannot state remain active, while
+  independently replaceable X/Y locations may still move to the table. Guarded interval solving
+  has deterministic pre-lane, pre-carve, and work/state budgets; an adversarially fragmented label
+  inventory or band fails the replacement closed before excessive work or allocation. Required row-key
+  balloons take priority over optional non-certifying pattern markers, so an independently complete
+  table cannot be displaced by an auxiliary marker.
+  Hole outcomes identify the winning representation per requirement;
+  mixed table/feature evidence deliberately claims no single winner. Exceptions restore those
+  semantic markers, and automatic escalation fails closed rather than overwrite an existing
+  annotation that owns a reserved table or balloon name.
+
 ### Changed
 
 - **Pairwise lint detail no longer multiplies the legibility score penalty** (#1147). Raw

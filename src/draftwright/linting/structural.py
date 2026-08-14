@@ -16,7 +16,7 @@ import re
 from build123d import GeomType
 
 from draftwright._core import _shape_box2d
-from draftwright._geometry import _boxes_overlap, _segment_clips_box
+from draftwright._geometry import _boxes_overlap, _segment_clip_extent, _segment_clips_box
 from draftwright.linting.issues import LintIssue, _IssueAggregation
 
 _log = logging.getLogger(__name__)
@@ -90,14 +90,18 @@ def _ann_box(item, cache):
 def _centerline_extent(cl_item, box_cache=None):
     """Return (min_x, min_y, max_x, max_y) for a centreline.
 
-    Prefers the zero-width ``.segments`` (the true centreline) so a thin-faced
-    centreline still reads as a zero-width vertical/horizontal line; falls back
-    to the rendered ``.bounding_box()`` (which is line_width wide).
+    Prefers precise component metadata (``centerline_segments`` plus optional
+    ``centerline_boxes``), then the conventional zero-width ``.segments``, so a
+    thin-faced centreline still reads as a line while a compound balloon retains
+    its compact ring/text glyph. Falls back to rendered ``.bounding_box()``.
     """
-    segs = getattr(cl_item, "segments", None)
-    if segs:
-        xs = [p[0] for s in segs for p in s]
-        ys = [p[1] for s in segs for p in s]
+    segs = getattr(cl_item, "centerline_segments", getattr(cl_item, "segments", None))
+    component_boxes = getattr(cl_item, "centerline_boxes", ())
+    if segs or component_boxes:
+        xs = [p[0] for s in (segs or ()) for p in s]
+        ys = [p[1] for s in (segs or ()) for p in s]
+        xs.extend(value for box in component_boxes for value in (box[0], box[2]))
+        ys.extend(value for box in component_boxes for value in (box[1], box[3]))
         return (min(xs), min(ys), max(xs), max(ys))
     box = _ann_box(cl_item, box_cache if box_cache is not None else {})
     if box is None:
@@ -739,37 +743,9 @@ def _lint_centerline_dim_overlap(
     arithmetic runs unguarded so a bug fails loudly instead of silently
     disabling the check.
     """
-    if box_cache is None:
-        box_cache = {}
-    try:
-        cl_min_x, cl_min_y, cl_max_x, cl_max_y = _centerline_extent(cl_item, box_cache)
-    except Exception as exc:  # noqa: BLE001 — duck-typed centreline may not measure
-        _log.debug("lint: centreline did not measure (%s); overlap check skips it", exc)
-        return
-
-    label_bbox = _label_bbox(dim_item, warned)
-    if label_bbox is None:
-        label_bbox = _ann_box(dim_item, box_cache)
-    if label_bbox is None:
-        return
-    lmin_x, lmin_y, lmax_x, lmax_y = label_bbox
-
-    cl_w = cl_max_x - cl_min_x
-    cl_h = cl_max_y - cl_min_y
-
-    if cl_w < 0.1:
-        cl_x = (cl_min_x + cl_max_x) / 2.0
-        ox = min(cl_x - lmin_x, lmax_x - cl_x) if lmin_x < cl_x < lmax_x else 0.0
-    else:
-        ox = max(0.0, min(lmax_x, cl_max_x) - max(lmin_x, cl_min_x))
-
-    if cl_h < 0.1:
-        cl_y = (cl_min_y + cl_max_y) / 2.0
-        oy = min(cl_y - lmin_y, lmax_y - cl_y) if lmin_y < cl_y < lmax_y else 0.0
-    else:
-        oy = max(0.0, min(lmax_y, cl_max_y) - max(lmin_y, cl_min_y))
-
-    if ox > 0.5 and oy > 0.5:
+    overlap = _label_centerline_overlap(dim_item, cl_item, box_cache, warned)
+    if overlap is not None:
+        ox, oy, location = overlap
         dim_label = getattr(dim_item, "label", "?")
         issue = LintIssue(
             severity="warning",
@@ -780,10 +756,7 @@ def _lint_centerline_dim_overlap(
             ),
             # Pair detail stays in the raw issue: this is the compared centre mark's
             # extent centre, so equal-looking findings can still be traced spatially.
-            location=(
-                (cl_min_x + cl_max_x) / 2.0,
-                (cl_min_y + cl_max_y) / 2.0,
-            ),
+            location=location,
             code="label_centerline_overlap",
         )
         issues.append(issue)
@@ -791,6 +764,85 @@ def _lint_centerline_dim_overlap(
             # The side ledger sees which half of the pair owns the readability defect;
             # neither the annotation nor its run-local identity enters public diagnostics.
             aggregation.record_pair(issue, subject_token)
+
+
+def _label_centerline_overlap(dim_item, cl_item, box_cache=None, warned=None):
+    """Return the lint-significant label/centreline overlap, or ``None``.
+
+    Balloon placement uses the same predicate before committing a leadered glyph. Keeping
+    the tolerance and thin-line handling here prevents placement and critique from making
+    contradictory decisions about the final annotation inventory (#1144).
+    """
+    if box_cache is None:
+        box_cache = {}
+    try:
+        cl_min_x, cl_min_y, cl_max_x, cl_max_y = _centerline_extent(cl_item, box_cache)
+    except Exception as exc:  # noqa: BLE001 — duck-typed centreline may not measure
+        _log.debug("lint: centreline did not measure (%s); overlap check skips it", exc)
+        return None
+
+    label_bbox = _label_bbox(dim_item, warned)
+    if label_bbox is None:
+        label_bbox = _ann_box(dim_item, box_cache)
+    if label_bbox is None:
+        return None
+    lmin_x, lmin_y, lmax_x, lmax_y = label_bbox
+
+    # A diagonal or elbowed centreline's aggregate AABB contains a large empty
+    # triangle. ADR 0009 makes its real components authoritative for BOTH the hit
+    # gate and the reported magnitude: a remote shaft must not inflate a 0.1 mm
+    # ring-edge touch into a legibility warning.
+    segments = getattr(
+        cl_item,
+        "centerline_segments",
+        getattr(cl_item, "segments", None),
+    )
+    component_boxes = getattr(cl_item, "centerline_boxes", ())
+
+    aggregate_location = ((cl_min_x + cl_max_x) / 2.0, (cl_min_y + cl_max_y) / 2.0)
+
+    def overlap(extent, *, segment=False):
+        min_x, min_y, max_x, max_y = extent
+        width = max_x - min_x
+        height = max_y - min_y
+        # A segment is a zero-width stroke, not a filled version of its clipped
+        # AABB.  Measure penetration on the stroke's minor axis and travelled
+        # distance on its major axis.  This keeps a deep near-vertical crossing
+        # significant without reviving the empty diagonal-triangle false positive.
+        line_x = segment and width < height
+        line_y = segment and height < width
+        if line_x or (not segment and width < 0.1):
+            centre_x = (min_x + max_x) / 2.0
+            ox = min(centre_x - lmin_x, lmax_x - centre_x) if lmin_x < centre_x < lmax_x else 0.0
+        else:
+            ox = max(0.0, min(lmax_x, max_x) - max(lmin_x, min_x))
+        if line_y or (not segment and height < 0.1):
+            centre_y = (min_y + max_y) / 2.0
+            oy = min(centre_y - lmin_y, lmax_y - centre_y) if lmin_y < centre_y < lmax_y else 0.0
+        else:
+            oy = max(0.0, min(lmax_y, max_y) - max(lmin_y, min_y))
+        if ox <= 0.5 or oy <= 0.5:
+            return None
+        return ox, oy, aggregate_location
+
+    if segments or component_boxes:
+        segment_extents = [
+            extent
+            for start, end in (segments or ())
+            if (extent := _segment_clip_extent(start, end, label_bbox)) is not None
+        ]
+        box_extents = [box for box in component_boxes if _boxes_overlap(box, label_bbox)]
+        significant = [
+            result for extent in segment_extents if (result := overlap(extent, segment=True))
+        ]
+        significant.extend(result for extent in box_extents if (result := overlap(extent)))
+        return (
+            max(significant, key=lambda result: (result[0] * result[1], result))
+            if significant
+            else None
+        )
+
+    return overlap((cl_min_x, cl_min_y, cl_max_x, cl_max_y))
 
 
 def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=None) -> None:

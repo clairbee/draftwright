@@ -51,6 +51,11 @@ from typing import Literal, NamedTuple
 Axis = Literal["x", "y"]
 _LAYOUT_EPSILON = 1e-9
 _FLOW_COST_SCALE = 1000
+# The guarded DP allocates three count×coordinate matrices; these caps keep that
+# inventory to tens—not thousands—of MiB and bound the preceding interval scan.
+# They are safety limits, not layout heuristics: hitting either returns infeasible.
+_GUARDED_STRIP_MAX_STATES = 500_000
+_GUARDED_STRIP_MAX_INTERVAL_PROBES = 2_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,131 @@ def _solve_strip_1d(naturals, min_gap, lo, hi):
     if not naturals:
         return []
     return _solve_strip_1d_pava(naturals, [min_gap] * (len(naturals) - 1), lo, hi)
+
+
+def _solve_guarded_strip_1d(naturals, min_gap, allowed_segments):
+    """Place an ordered strip when each member has its own allowed intervals.
+
+    Returns one coordinate per member, or ``None`` when the complete set cannot
+    fit.  The solve is joint: moving an earlier member may make room for a later
+    one.  Candidate coordinates are derived from interval boundaries, natural
+    positions, and the exact separation constraint; there is no sampling grid.
+
+    The finite candidate set is complete for this interval-constrained L1
+    problem: a feasible placement can be translated until a coordinate reaches
+    an interval boundary, its natural position, or another coordinate's
+    ``min_gap`` boundary.  Adding every such source shifted by up to ``n`` gaps
+    therefore contains a feasible representative whenever one exists.
+
+    Candidate expansion is deliberately resource-bounded.  A dense inventory
+    crossed with many disjoint label keep-outs can otherwise create millions of
+    Python DP cells before the caller gets a chance to restore its fallbacks.
+    Returning ``None`` at the budget is the conservative result: guarded balloon
+    placement treats it exactly like any other infeasible inventory and fails the
+    replacement transaction closed (ADR 0014 Policy B).
+    """
+    if not naturals:
+        return []
+    if len(naturals) != len(allowed_segments):
+        raise ValueError("naturals and allowed_segments must have equal length")
+    if min_gap <= 0:
+        raise ValueError("min_gap must be positive")
+    if any(not segments for segments in allowed_segments):
+        return None
+
+    count = len(naturals)
+    total_segments = sum(len(segments) for segments in allowed_segments)
+    for segments in allowed_segments:
+        for lo, hi in segments:
+            if hi < lo:
+                raise ValueError("allowed segment has descending bounds")
+    coordinate_budget = min(
+        _GUARDED_STRIP_MAX_STATES // count,
+        _GUARDED_STRIP_MAX_INTERVAL_PROBES // total_segments,
+    )
+    if coordinate_budget <= 0:
+        return None
+
+    coordinate_set: set[float] = set()
+    sources: set[float] = set()
+
+    def add_source(source) -> bool:
+        source = float(source)
+        if source in sources:
+            return True
+        sources.add(source)
+        for offset in range(-count, count + 1):
+            coordinate_set.add(source + offset * min_gap)
+            if len(coordinate_set) > coordinate_budget:
+                return False
+        return True
+
+    for natural, segments in zip(naturals, allowed_segments, strict=True):
+        natural = float(natural)
+        if not add_source(natural):
+            return None
+        for lo, hi in segments:
+            lo = float(lo)
+            hi = float(hi)
+            if (
+                not add_source(lo)
+                or not add_source(hi)
+                or not add_source(min(max(natural, lo), hi))
+            ):
+                return None
+    coordinates = sorted(coordinate_set)
+
+    allowed = [
+        [any(lo <= value <= hi for lo, hi in segments) for value in coordinates]
+        for segments in allowed_segments
+    ]
+    previous = []
+    left = 0
+    for index, value in enumerate(coordinates):
+        while left < index and coordinates[left] <= value - min_gap + _LAYOUT_EPSILON:
+            left += 1
+        previous.append(left - 1)
+
+    # DP over ordered members and ordered coordinates.  Each state carries the
+    # minimum L1 displacement for a complete prefix; ``None`` means infeasible.
+    infinity = float("inf")
+    costs = [[infinity] * len(coordinates) for _ in range(count)]
+    parents: list[list[int | None]] = [[None] * len(coordinates) for _ in range(count)]
+    for coordinate_index, value in enumerate(coordinates):
+        if allowed[0][coordinate_index]:
+            costs[0][coordinate_index] = abs(value - naturals[0])
+    for member_index in range(1, count):
+        best_cost = infinity
+        best_index = None
+        scan = 0
+        for coordinate_index, value in enumerate(coordinates):
+            limit = previous[coordinate_index]
+            while scan <= limit:
+                candidate = costs[member_index - 1][scan]
+                if candidate < best_cost - _LAYOUT_EPSILON:
+                    best_cost = candidate
+                    best_index = scan
+                scan += 1
+            if allowed[member_index][coordinate_index] and best_index is not None:
+                costs[member_index][coordinate_index] = best_cost + abs(
+                    value - naturals[member_index]
+                )
+                parents[member_index][coordinate_index] = best_index
+
+    final_index = min(
+        range(len(coordinates)),
+        key=lambda index: (costs[-1][index], coordinates[index]),
+    )
+    if math.isinf(costs[-1][final_index]):
+        return None
+    result = [0.0] * count
+    for member_index in range(count - 1, -1, -1):
+        result[member_index] = coordinates[final_index]
+        parent = parents[member_index][final_index]
+        if member_index:
+            assert parent is not None
+            final_index = parent
+    return result
 
 
 _ANCHOR_WEIGHT = 1.0e6
@@ -273,14 +403,22 @@ def _assign_balloon_bands(
     *,
     prefer_bands=(),
     preference_limit=0.0,
+    required_count=0,
 ):
     """Globally assign balloons to side bands (#516/#901).
 
-    The primary objective is maximum cardinality. Within that maximum flow, the
-    first member assigned to a band named by *prefer_bands* receives a bounded
-    *preference_limit* distance credit before leader length is minimised. This is
-    a preference, not a lexicographic override: a remote band stays unused.
+    The primary objective is maximum cardinality, followed by maximum placement
+    of the first *required_count* members. Within those lexicographic objectives,
+    the first member assigned to a band named by *prefer_bands* receives a
+    bounded *preference_limit* distance credit before leader length is minimised.
+    This is a preference, not a lexicographic override: a remote band stays
+    unused. Required-member priority lets a shared automatic table inventory
+    include optional non-certifying pattern markers without allowing one to
+    displace a row-key balloon (#1144).
     """
+
+    if not 0 <= required_count <= len(members):
+        raise ValueError("required_count must be between zero and len(members)")
 
     band_order = ("left", "right", "top", "bottom")
     bands = [b for b in band_order if capacities.get(b, 0) > 0]
@@ -301,6 +439,19 @@ def _assign_balloon_bands(
         graph[to].append(rev)
         return fwd
 
+    preference_bonus = int(round(max(0.0, preference_limit) * _FLOW_COST_SCALE))
+    base_costs = [
+        int(round(max(0.0, distance) * _FLOW_COST_SCALE)) + band_order.index(band)
+        for choices in choices_by_member
+        for band, distance in choices.items()
+        if band in bands
+    ]
+    max_flow = min(len(members), sum(capacities.get(b, 0) for b in bands))
+    # One optional-member penalty dominates the complete possible spread of
+    # leader/preference cost across an equal-cardinality flow. It does not alter
+    # the primary max-flow objective; it only decides which members survive.
+    optional_penalty = max_flow * (max(base_costs, default=0) + preference_bonus + 1) + 1
+
     used_edges: dict[tuple[int, str], _FlowEdge] = {}
     for i, choices in enumerate(choices_by_member):
         add_edge(source, member0 + i, 1, 0)
@@ -310,13 +461,14 @@ def _assign_balloon_bands(
             # Costs are integerised for deterministic shortest paths; the tiny band
             # ordinal keeps exact ties stable without changing real distance order.
             cost = int(round(max(0.0, choices[band]) * _FLOW_COST_SCALE)) + band_order.index(band)
+            if i >= required_count:
+                cost += optional_penalty
             used_edges[(i, band)] = add_edge(member0 + i, band0 + j, 1, cost)
 
     # Give the first balloon in each preferred band a bounded distance credit.
     # Unlike the old lexicographically dominant activation bonus (#901 review),
     # this cannot justify a leader more than `preference_limit` longer merely to
     # occupy another side. SPFA supports the negative residual edges.
-    preference_bonus = int(round(max(0.0, preference_limit) * _FLOW_COST_SCALE))
     preferred = set(prefer_bands)
     for j, band in enumerate(bands):
         capacity = capacities[band]
@@ -349,7 +501,6 @@ def _assign_balloon_bands(
                     in_queue[edge.to] = True
         return prev if prev[sink] is not None else None
 
-    max_flow = min(len(members), sum(capacities.get(b, 0) for b in bands))
     flow = 0
     while flow < max_flow and (prev := shortest_path()) is not None:
         v = sink

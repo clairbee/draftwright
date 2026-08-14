@@ -2644,7 +2644,7 @@ class Drawing:
 
         # Calling the public verb is an explicit edit: the table itself authors every
         # measurement it visibly prints, even when the original dimension set omitted a
-        # generated callout.  Construct the same stable identities the compiler uses so
+        # generated callout. Construct the same stable identities the compiler uses so
         # holes and patterns join the physical outcome ledger through one seam.
         measurements = tuple(
             DimensionId(owner, parameter)

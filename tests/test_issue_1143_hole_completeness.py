@@ -1,6 +1,5 @@
 """Regression coverage for hole-family semantic outcomes (#1143)."""
 
-import itertools
 from collections import Counter
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,6 +25,25 @@ from draftwright.recognition import (
 from draftwright.registry import AnnotationRegistry
 
 _XYZ_MIN = (Align.CENTER, Align.CENTER, Align.MIN)
+
+_TABLE_SAFE_POSITIONS = (
+    (-42.7, -27.4),
+    (-15.1, -31.9),
+    (11.0, -28.7),
+    (44.8, -27.9),
+    (-46.0, 32.2),
+    (-16.8, 32.4),
+    (16.8, 29.3),
+    (45.3, 31.5),
+    (-56.5, -17.6),
+    (-51.6, -7.9),
+    (-51.6, 7.5),
+    (-51.2, 16.7),
+    (50.7, -15.6),
+    (56.4, -6.4),
+    (50.8, 3.6),
+    (55.1, 16.3),
+)
 
 
 def _pattern_and_central_bore():
@@ -131,29 +149,26 @@ def _countersunk_pattern():
 
 
 def _dense_scattered_plate():
-    part = Box(90, 60, 12)
-    columns = [-40 + i * 20 for i in range(5)]
-    for i, (column, y) in enumerate(itertools.product(range(5), (-18, -6, 6, 18))):
-        part -= Pos(columns[column], y, 0) * Cylinder(1.0 + i * 0.2, 20)
+    part = Box(120, 80, 12)
+    for i, (x, y) in enumerate(_TABLE_SAFE_POSITIONS):
+        part -= Pos(x, y, 0) * Cylinder(1.0 + i * 0.15, 20)
     return part
 
 
 def _dense_scattered_blind_plate():
-    part = Box(90, 60, 12, align=_XYZ_MIN)
-    columns = [-40 + i * 20 for i in range(5)]
-    for i, (column, y) in enumerate(itertools.product(range(5), (-18, -6, 6, 18))):
-        part -= Pos(columns[column], y, 6) * Cylinder(1.0 + i * 0.2, 6, align=_XYZ_MIN)
+    part = Box(120, 80, 12, align=_XYZ_MIN)
+    for i, (x, y) in enumerate(_TABLE_SAFE_POSITIONS):
+        part -= Pos(x, y, 6) * Cylinder(1.0 + i * 0.15, 6, align=_XYZ_MIN)
     return part
 
 
 def _dense_scattered_plate_with_bolt_circle(near_scattered):
-    part = Box(180, 120, 10, align=_XYZ_MIN)
-    scattered = list(itertools.product((-75, -55, -35, -15, 55), (-40, -20, 0, 20)))[:15]
-    scattered.append(near_scattered)
+    part = Box(120, 80, 10, align=_XYZ_MIN)
+    scattered = [*_TABLE_SAFE_POSITIONS[:15], near_scattered]
     for i, (x, y) in enumerate(scattered):
         part -= Pos(x, y, 0) * Cylinder(1.0 + i * 0.1, 10, align=_XYZ_MIN)
-    for x, y in ((35, 10), (20, 25), (5, 10), (20, -5)):
-        part -= Pos(x, y, 0) * Cylinder(3, 10, align=_XYZ_MIN)
+    for x, y in ((25, 10), (20, 15), (15, 10), (20, 5)):
+        part -= Pos(x, y, 0) * Cylinder(0.8, 10, align=_XYZ_MIN)
     return part
 
 
@@ -2076,22 +2091,34 @@ def test_grouped_loose_holes_require_every_member_location_mark():
 
 
 def test_successful_hole_table_escalation_carries_every_replaced_requirement():
-    drawing = build_drawing(_dense_scattered_plate())
+    drawing = build_drawing(_dense_scattered_plate(), page="A3")
 
     assert "hole_table_plan" in drawing.annotations()
+    hole_count = len([feature for feature in drawing.model().features if feature.kind == "hole"])
+    assert hole_count == 16
     keys = drawing.measurement_keys("hole_table_plan")
-    assert len(keys) == 40
+    assert len(keys) == hole_count * 2
     assert len({(key["feature"], key["parameter_id"]) for key in keys}) == len(keys)
     outcomes = _outcomes(drawing)
-    assert len(outcomes) == 80
+    assert len(outcomes) == hole_count * 4
     assert all(item.state == "placed" for item in outcomes)
     assert not [issue for issue in drawing.lint() if issue.code.startswith("hole_requirement_")]
     assert _completeness(drawing)["audited_score"] == 1.0
 
 
 def test_scattered_hole_table_preserves_placed_pattern_location_evidence():
-    drawing = build_drawing(_dense_scattered_plate_with_bolt_circle((20.4, 10.4)), page="A3")
+    drawing = build_drawing(
+        _dense_scattered_plate_with_bolt_circle((20.4, 10.4)),
+        page="A3",
+        auto_dims=False,
+    )
     pattern = next(feature for feature in drawing.model().features if feature.kind == "pattern")
+    assert len(drawing.locate(pattern)) == 2
+    with drawing.deferred():
+        for feature in drawing.model().features:
+            if feature.kind == "hole":
+                drawing.callout(feature)
+                drawing.locate(feature)
 
     assert "hole_table_plan" in drawing.annotations()
     pattern_location_facts = [
@@ -2255,7 +2282,7 @@ def test_blind_hole_table_prints_every_depth_it_claims(monkeypatch):
         return original(self, rows, **kwargs)
 
     monkeypatch.setattr(Drawing, "add_table", capture_rows)
-    drawing = build_drawing(_dense_scattered_blind_plate(), page="A3")
+    drawing = build_drawing(_dense_scattered_blind_plate(), page="A2")
 
     assert "hole_table_plan" in drawing.annotations()
     rows = captured_rows[-1]
@@ -2268,7 +2295,7 @@ def test_blind_hole_table_prints_every_depth_it_claims(monkeypatch):
         if row[offset]
     } == {"6"}
     outcomes = _outcomes(drawing)
-    assert len(outcomes) == 80
+    assert len(outcomes) == 16 * 4
     assert all(item.state == "placed" for item in outcomes)
 
 
@@ -2307,7 +2334,7 @@ def test_failed_hole_table_escalation_restores_semantic_fallback_evidence(monkey
     import draftwright.drawing as drawing_module
 
     monkeypatch.setattr(drawing_module, "fit_box", lambda *_args, **_kwargs: None)
-    drawing = build_drawing(_dense_scattered_plate())
+    drawing = build_drawing(_dense_scattered_plate(), page="A3")
 
     assert "hole_table_plan" not in drawing.annotations()
     assert "table_dropped" in {issue.code for issue in drawing.lint()}

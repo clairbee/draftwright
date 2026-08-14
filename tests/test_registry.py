@@ -215,7 +215,13 @@ def test_every_remove_and_restore_site_goes_through_the_identity_pair():
 
     # function name -> why it may remove without restoring identity
     EXEMPT = {
-        "_clear_section_reservation": "deletes the reserved section marks outright; no restore"
+        "_clear_section_reservation": "deletes the reserved section marks outright; no restore",
+        "_discard_attempt_annotations": (
+            "permanently deletes table/balloon geometry from an uncommitted attempt"
+        ),
+        "_stash_annotations": (
+            "captures the identity half of the shared stash/restore transaction; paired below"
+        ),
     }
 
     root = pathlib.Path("src/draftwright/annotations")
@@ -238,3 +244,24 @@ def test_every_remove_and_restore_site_goes_through_the_identity_pair():
         "these remove a named annotation without round-tripping its identity: "
         + ", ".join(offenders)
     )
+
+    # #1144: a replacement transaction spans table/balloon placement before it knows
+    # whether the shared result can commit. Keep its one stash/snapshot seam load-bearing so
+    # moving the old hand-rolled identity bug into a helper cannot satisfy this ratchet by
+    # exemption alone.
+    common_tree = ast.parse((root / "_common.py").read_text(encoding="utf-8"))
+    functions = {
+        fn.name: fn
+        for fn in ast.walk(common_tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def calls(function_name):
+        return {
+            node.func.attr
+            for node in ast.walk(functions[function_name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+    assert {"identity_of", "remove"} <= calls("_stash_annotations")
+    assert {"restore", "restore_issues"} <= calls("_restore_annotation_transaction")

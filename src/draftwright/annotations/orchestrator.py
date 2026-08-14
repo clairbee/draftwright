@@ -36,8 +36,17 @@ from draftwright._core import (
 from draftwright.analysis import _sizing_bores
 from draftwright.annotations._common import (
     PlacementContext,
+    _annotation_hole_features,
+    _discard_attempt_annotations,
+    _fully_ballooned_features,
     _hole_location_coverage_fact,
+    _hole_table_replaceable_annotation,
+    _hole_table_replaceable_feature,
+    _hole_table_replaceable_location_annotation,
     _register_hole_table_coverage,
+    _restore_annotation_transaction,
+    _snapshot_annotation_transaction,
+    _stash_annotations,
 )
 from draftwright.annotations.balloons import render_balloons
 from draftwright.annotations.from_model import (
@@ -692,6 +701,23 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
 
 
 def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
+    """Run hole-table escalation as one exception-atomic annotation transaction.
+
+    Ordinary fit/balloon failures roll the shared table transaction back as a unit.
+    An exception additionally restores the outer snapshot before re-raising, so none
+    of the attempted table state or temporary semantic markers may survive it.
+    """
+    if not any(escalation.kind in {"callout", "location"} for escalation in ctx.escalations):
+        return
+    snapshot = _snapshot_annotation_transaction(dwg, ctx.coverage)
+    try:
+        return _maybe_tabulate_holes_impl(dwg, a, ctx=ctx, plan=plan)
+    except BaseException:
+        _restore_annotation_transaction(dwg, ctx.coverage, snapshot, {})
+        raise
+
+
+def _maybe_tabulate_holes_impl(dwg, a: Analysis, *, ctx, plan=None):
     """Escalate to a per-instance hole table + balloons when the plan view is too
     dense to dimension every hole individually (#93); a dropped ISO pattern
     callout gets one grouped balloon of its own (#351 PR-3, ADR 0009 Amdt 1
@@ -762,8 +788,9 @@ def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
     tags = _tag_sequence(n_scattered + len(pattern_feats))
     scattered_tags, pattern_tags = tags[:n_scattered], tags[n_scattered:]
     # One balloon per pattern, tagged with its member count so the ring reads
-    # "6×A" rather than one glyph per member (#348) — no table row needed, the
-    # count + diameter travel with the balloon itself.
+    # "6×A" rather than one glyph per member (#348).  Without a table/legend the
+    # marker does not state the pattern's diameter, depth or arrangement; it is
+    # deliberately non-certifying and cannot clear the original callout drop.
     pattern_specs = [
         (
             f"{feat.count}×{tag}",
@@ -783,6 +810,42 @@ def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
 
     scattered_specs: list = []
     table_placed = False
+    table = None
+    table_features: tuple = ()
+    replaceable_callout_features: set = set()
+    table_callout_replacement_features: set = set()
+    table_location_replacement_features: set = set()
+    replaced = {}
+    table_transaction_snap = None
+
+    # Automatic/finalize escalation uses deterministic internal names. A sanctioned
+    # public edit may already own one of them; replacing that object would destroy user
+    # state and a pre-existing name is not evidence from this placement attempt. Fail
+    # closed before stashing anything. A later naming-policy change can allocate a fresh
+    # namespace here without weakening the attempt-local ownership contract.
+    reserved_attempt_names = {f"balloon_plan_{tag}_0" for tag in scattered_tags} | {
+        f"balloon_plan_{feature.count}×{tag}_0"
+        for tag, feature in zip(pattern_tags, pattern_feats, strict=True)
+    }
+    if tabulate_scattered:
+        reserved_attempt_names.add("hole_table_plan")
+    colliding_names = reserved_attempt_names.intersection(dwg.registry.names())
+    if colliding_names:
+        names = ", ".join(sorted(colliding_names))
+        if tabulate_scattered:
+            ctx.record_issue(
+                "warning",
+                "table_dropped",
+                f"hole table reserved annotation name(s) already exist: {names}",
+            )
+        else:
+            ctx.record_issue(
+                "warning",
+                "balloon_dropped",
+                f"hole balloon reserved annotation name(s) already exist: {names}",
+            )
+        return
+
     if tabulate_scattered:
         compiled = plan if plan is not None else compile_dimensions(_model)
         approved_hole_dimensions = {
@@ -790,6 +853,20 @@ def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
                 dimension.parameter_id: dimension for dimension in group.dims
             }
             for group in compiled.of_kind("hole")
+        }
+        compiled_dimensions_by_feature: dict[object, list] = {
+            resolve_feature(group.ref): list(group.dims) for group in compiled.of_kind("hole")
+        }
+        for location in compiled.locations:
+            feature = resolve_feature(location.ref)
+            if getattr(feature, "kind", None) == "hole":
+                compiled_dimensions_by_feature.setdefault(feature, []).append(location)
+        replaceable_callout_features = {
+            hole.feature
+            for hole in holes
+            if _hole_table_replaceable_feature(
+                hole.feature, compiled_dimensions_by_feature.get(hole.feature, ())
+            )
         }
         approved_locations = {
             (resolve_feature(location.ref), tuple(location.span[1]), location.discriminator): (
@@ -827,115 +904,83 @@ def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
         # Structured coverage state (registered at placement time, #351 PR-4c), not
         # an annotation-name-prefix grep — the last stringly-typed inference this
         # resolver relied on (ADR 0009 Amdt 1).
-        replaced = {
-            n: o for n, o in list(dwg.iter_annotations()) if ctx.coverage.is_scattered_hole_doc(n)
-        }
-        # Identity as a UNIT (#1002). This captured the view alone, so a restored dim came
-        # back stripped of the feature provenance added in #398 and of the measurement id
-        # added here — the audit would then read it as "nothing claims it" (Codex r2).
-        replaced_identity = {n: dwg.registry.identity_of(n) for n in replaced}
-        for n in replaced:
-            dwg.remove(n)
+        table_transaction_snap = _snapshot_annotation_transaction(dwg, ctx.coverage)
+        replaced = _stash_annotations(
+            dwg,
+            [
+                n
+                for n, annotation in list(dwg.iter_annotations())
+                if ctx.coverage.is_scattered_hole_doc(n)
+                and (
+                    _hole_table_replaceable_location_annotation(dwg.registry, n, annotation)
+                    or (
+                        _hole_table_replaceable_annotation(dwg.registry, n, annotation)
+                        and _annotation_hole_features(dwg.registry, n, annotation)
+                        <= replaceable_callout_features
+                    )
+                )
+            ],
+        )
 
         # Widen the chart into more column-blocks until it fits the page.
-        table = None
+        table_issue_base = dwg.registry.issues
         for ncols in (1, 2, 3, 4):
             table = dwg.add_table(
                 _wrap_rows(header, data, ncols), name="hole_table_plan", block_cols=len(header)
             )
             if table is not None:
                 break
-        ctx.drop_issues("table_dropped")
+        # ``add_table`` records one diagnostic for every rejected wrapping attempt.
+        # Restore the exact pre-attempt issue inventory instead of clearing every
+        # table_dropped finding: an unrelated failed public table remains actionable.
+        dwg.registry.restore_issues(table_issue_base)
         if table is None:
             # Even wrapped it will not fit — restore the callouts/dims and keep the
             # drop lint, so the sheet is never left with neither. The pattern
             # balloons below are unaffected — nothing of theirs was removed.
-            for n, obj in replaced.items():
-                ctx.place(obj, n)
-                dwg.registry.reapply(n, replaced_identity[n])
+            assert table_transaction_snap is not None
+            _restore_annotation_transaction(
+                dwg,
+                ctx.coverage,
+                table_transaction_snap,
+                replaced,
+                reason="table_not_placed",
+            )
             ctx.record_issue("warning", "table_dropped", "hole table did not fit the sheet")
         else:
-            # One entry per hole (with repeats) so the coverage *count* check sees
-            # that the table documents every instance, not just each distinct
-            # diameter.
-            table.covers_diameters = tuple(
-                h.diameter
-                for h in holes
-                if "bore.diameter" in approved_hole_dimensions.get(h.feature, {})
-            )
             table_features = tuple(dict.fromkeys(h.feature for h in holes))
-            table_measurements = tuple(
-                dict.fromkeys(
-                    [
-                        dim.id
-                        for group in compiled.of_kind("hole")
-                        if resolve_feature(group.ref) in table_features
-                        for dim in group.dims
-                        if dim.id is not None
-                        and dim.parameter_id in {"bore.diameter", "bore.depth"}
-                    ]
-                    + [
-                        location.id
-                        for location in compiled.locations
-                        if location.id is not None
-                        and resolve_feature(location.ref) in table_features
-                    ]
-                )
-            )
-            table_locations = tuple(
-                _hole_location_coverage_fact(location)
-                for location in compiled.locations
-                if location.id is not None
-                and location.span is not None
-                and resolve_feature(location.ref) in table_features
-            )
-            table_requirements = tuple(
-                (feature, "bore.through", 1)
-                for feature in table_features
-                if feature.through and "bore.diameter" in approved_hole_dimensions.get(feature, {})
-            ) + tuple(
-                (
-                    feature,
-                    "grouping.count",
-                    int(feature.count or len(feature.members) or 1),
-                )
-                for feature in table_features
-                if int(feature.count or len(feature.members) or 1) > 1
-                and "bore.diameter" in approved_hole_dimensions.get(feature, {})
-            )
-            _register_hole_table_coverage(
-                table,
-                dwg.registry,
-                "hole_table_plan",
-                measurements=table_measurements,
-                locations=table_locations,
-                requirements=table_requirements,
-            )
             scattered_specs = [(tag, 0, h) for tag, h in zip(scattered_tags, holes, strict=True)]
             table_placed = True
-            # The table's X/Y columns document every scattered hole's location, so only
-            # drop findings whose complete semantic requirement set belongs to those
-            # table features are resolved here. A pattern or other non-table requirement
-            # may share the same layout pass and must keep its observed drop provenance.
-            # `callout_dropped`, however, is cleared
-            # below — only after the balloons are placed and per feature — because a
-            # pattern balloon sharing this resolver's combined band can still drop
-            # (review follow-up: this used to clear callout_dropped wholesale here,
-            # masking a dropped pattern balloon).
-            table_feature_set = set(table_features)
-            ctx.drop_issues_where(
-                "location_ref_dropped",
-                lambda issue: (
-                    bool(issue.hole_requirement_ids)
-                    and all(
-                        requirement[0] in table_feature_set
-                        for requirement in issue.hole_requirement_ids
-                    )
-                ),
-            )
 
     balloon_specs = scattered_specs + pattern_specs
     placed_names: set = set()
+    balloon_issue_base = dwg.registry.issues
+
+    def _place_balloon_attempt(specs, *, perimeter, required_count=0):
+        nonlocal placed_names
+        attempted = {f"balloon_plan_{tag}_{member_index}" for tag, member_index, _ in specs}
+        dwg.registry.restore_issues(balloon_issue_base)
+        _discard_attempt_annotations(dwg, attempted)
+        previous_objects = {name: dwg.registry.named(name) for name in attempted}
+        render_balloons(
+            dwg,
+            a,
+            "plan",
+            specs,
+            ctx,
+            perimeter=perimeter,
+            # Every automatic escalation balloon is replacement evidence. Pattern-only
+            # attempts have no table, but must still fail closed against retained labels
+            # before their landed name/owner may clear a callout drop.
+            avoid_annotation_labels=True,
+            required_count=required_count,
+        )
+        placed_names = {
+            name
+            for name, previous in previous_objects.items()
+            if dwg.registry.named(name) is not None and dwg.registry.named(name) is not previous
+        }
+
     if balloon_specs:
         # One call: the strip solver must see every band member together, or two
         # independent render_balloons calls could stack a pattern balloon on a
@@ -945,32 +990,254 @@ def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
         # balloon request: spread its tags around the usable perimeter so a
         # deep occupied strip cannot collapse the ring onto two near sides
         # (#901). Pattern-only and public-verb balloons keep nearest-band cost.
-        render_balloons(dwg, a, "plan", balloon_specs, ctx, perimeter=table_placed)
-        placed_names = {n for n, _ in dwg.iter_annotations()}
+        _place_balloon_attempt(
+            balloon_specs,
+            perimeter=table_placed,
+            required_count=len(scattered_specs),
+        )
 
-    # Clear `callout_dropped` only when EVERY dropped plan-view callout is now
-    # documented — one unified check across both remedies (the scattered table and the
-    # pattern balloons), so neither hides the other. A plan-view callout escalation is
-    # resolved iff:
-    #   - it is a pattern whose balloon actually LANDED on the sheet (a crowded band
-    #     can drop the tail — _place_band's strip-solver prefix fallback — leaving the
-    #     pattern undocumented), or
-    #   - it is a scattered hole and the table was placed (its X/Y row documents it).
+    # Commit the shared table replacement only after every balloon that maps its
+    # visible rows back to physical holes has landed (#1144).
+    table_success_features: set = set()
+    if table_placed and table is not None:
+        table_tagged_holes = [
+            (tag, 0, hole, hole.feature) for tag, hole in zip(scattered_tags, holes, strict=True)
+        ]
+        expected_counts = {
+            feature: int(feature.count or len(feature.members) or 1) for feature in table_features
+        }
+        table_success_features = _fully_ballooned_features(
+            "plan",
+            table_tagged_holes,
+            placed_names,
+            dwg.registry,
+            expected_counts,
+        )
+        # A hole table is one shared visual/index artifact. If even one visible
+        # row lacks its required feature-owned balloon, keeping a partial table
+        # creates a drawing-level object that cannot participate honestly in
+        # per-feature fallback placement—and outer compose-then-pack may later
+        # move a view into that orphan footprint. Fail the shared transaction
+        # closed: restore every feature-backed fallback and discard every table
+        # balloon. This still satisfies partial-result semantics because no
+        # uncovered requirement is suppressed; the complete original inventory
+        # wins as a unit.
+        if table_success_features != set(table_features):
+            assert table_transaction_snap is not None
+            _restore_annotation_transaction(
+                dwg,
+                ctx.coverage,
+                table_transaction_snap,
+                replaced,
+                reason="required_balloon_not_placed",
+            )
+            ctx.record_issue(
+                "warning",
+                "table_dropped",
+                "hole table lacked complete feature-owned balloon evidence",
+            )
+            ctx.record_issue(
+                "warning",
+                "balloon_dropped",
+                "one or more required hole-table balloons could not be placed",
+            )
+            table_placed = False
+            table = None
+            table_success_features = set()
+            placed_names = set()
+            if pattern_specs:
+                balloon_issue_base = dwg.registry.issues
+                _place_balloon_attempt(pattern_specs, perimeter=False)
+
+    if table_placed and table is not None:
+        ordered_table_success_features = tuple(
+            feature for feature in table_features if feature in table_success_features
+        )
+
+        # One entry per successfully keyed hole (with repeats) so the legacy count check
+        # and the semantic ledger agree about the exact committed subset.
+        table.covers_diameters = tuple(
+            h.diameter
+            for h in holes
+            if h.feature in table_success_features
+            and "bore.diameter" in approved_hole_dimensions.get(h.feature, {})
+        )
+        table_measurements = tuple(
+            dict.fromkeys(
+                [
+                    dim.id
+                    for group in compiled.of_kind("hole")
+                    if resolve_feature(group.ref) in table_success_features
+                    for dim in group.dims
+                    if dim.id is not None and dim.parameter_id in {"bore.diameter", "bore.depth"}
+                ]
+                + [
+                    location.id
+                    for location in compiled.locations
+                    if location.id is not None
+                    and resolve_feature(location.ref) in table_success_features
+                ]
+            )
+        )
+        table_locations = tuple(
+            _hole_location_coverage_fact(location)
+            for location in compiled.locations
+            if location.id is not None
+            and location.span is not None
+            and resolve_feature(location.ref) in table_success_features
+        )
+        table_requirements = tuple(
+            (feature, "bore.through", 1)
+            for feature in ordered_table_success_features
+            if feature.through and "bore.diameter" in approved_hole_dimensions.get(feature, {})
+        ) + tuple(
+            (
+                feature,
+                "grouping.count",
+                int(feature.count or len(feature.members) or 1),
+            )
+            for feature in ordered_table_success_features
+            if int(feature.count or len(feature.members) or 1) > 1
+            and "bore.diameter" in approved_hole_dimensions.get(feature, {})
+        )
+        stashed_callout_features = {
+            feature
+            for record in replaced.values()
+            if any(
+                isinstance(parameter := getattr(measurement, "parameter", None), str)
+                and parameter.startswith("bore.")
+                for measurement in record.identity.get("measurement", ())
+            )
+            for feature in record.features
+        }
+        stashed_location_features = {
+            feature
+            for record in replaced.values()
+            if any(
+                isinstance(parameter := getattr(measurement, "parameter", None), str)
+                and parameter.startswith("location")
+                for measurement in record.identity.get("measurement", ())
+            )
+            for feature in record.features
+        }
+        escalated_callout_features = {
+            escalation.feature
+            for escalation in escalations
+            if escalation.kind == "callout"
+            and escalation.view == "plan"
+            and escalation.feature in replaceable_callout_features
+        }
+        escalated_location_features = {
+            escalation.feature
+            for escalation in escalations
+            if escalation.kind == "location"
+            and escalation.view == "plan"
+            and escalation.feature in table_features
+        }
+        dropped_callout_features = {
+            feature
+            for issue in ctx.registry.issues
+            if issue.code == "callout_dropped"
+            for feature in (
+                *(getattr(measurement, "feature", None) for measurement in issue.measurement_ids),
+                *(requirement[0] for requirement in issue.hole_requirement_ids),
+            )
+            if feature in replaceable_callout_features
+        }
+        dropped_location_features = {
+            feature
+            for issue in ctx.registry.issues
+            if issue.code == "location_ref_dropped"
+            for feature in (
+                *(getattr(measurement, "feature", None) for measurement in issue.measurement_ids),
+                *(requirement[0] for requirement in issue.hole_requirement_ids),
+            )
+            if feature in table_features
+        }
+        table_callout_replacement_features = table_success_features & (
+            stashed_callout_features | escalated_callout_features | dropped_callout_features
+        )
+        table_location_replacement_features = table_success_features & (
+            stashed_location_features | escalated_location_features | dropped_location_features
+        )
+        representation_requirements = tuple(
+            dict.fromkeys(
+                [
+                    (measurement.feature, measurement.parameter)
+                    for measurement in table_measurements
+                    if (
+                        measurement.parameter.startswith("location")
+                        and measurement.feature in table_location_replacement_features
+                    )
+                    or (
+                        not measurement.parameter.startswith("location")
+                        and measurement.feature in table_callout_replacement_features
+                    )
+                ]
+                + [
+                    (feature, parameter)
+                    for feature, parameter, _point in table_locations
+                    if feature in table_location_replacement_features
+                ]
+                + [
+                    (feature, parameter)
+                    for feature, parameter, _count in table_requirements
+                    if feature in table_callout_replacement_features
+                ]
+            )
+        )
+        _register_hole_table_coverage(
+            table,
+            dwg.registry,
+            "hole_table_plan",
+            measurements=table_measurements,
+            locations=table_locations,
+            requirements=table_requirements,
+            representation_reason="required_balloons_placed",
+            representation_requirements=representation_requirements,
+        )
+
+        # Resolve only drops whose complete semantic requirement set belongs to the
+        # successfully keyed subset. Unrelated or partially covered failures remain honest.
+        ctx.drop_issues_where(
+            "location_ref_dropped",
+            lambda issue: (
+                bool(issue.hole_requirement_ids)
+                and all(
+                    requirement[0] in table_location_replacement_features
+                    for requirement in issue.hole_requirement_ids
+                )
+            ),
+        )
+
+    # Clear `callout_dropped` only when the complete dropped callout is now documented
+    # by a successfully keyed scattered-hole table row.  A grouped pattern marker such
+    # as ``6×A`` has no defining table row and therefore remains deliberately
+    # non-certifying: it may provide the ADR-0009 visual grouping cue, but the original
+    # callout drop and its physical-requirement outcomes must remain actionable.
     # A drop this resolver does not cover — a table that didn't fit, a balloon that
     # didn't land, or any callout dropped in a non-plan view — leaves the lint standing.
-    resolved_feats = {
-        feat
-        for (full_tag, _, _), feat in zip(pattern_specs, pattern_feats, strict=True)
-        if f"balloon_plan_{full_tag}_0" in placed_names
-    }
-
-    def _resolved(e) -> bool:
-        if e.view != "plan":
-            return False
-        if isinstance(e.feature, PatternFeature):
-            return e.feature in resolved_feats
-        return table_placed  # a scattered plan-hole callout is documented by the table
-
-    unresolved = [e for e in escalations if e.kind == "callout" and not _resolved(e)]
-    if not unresolved:
-        ctx.drop_issues("callout_dropped")
+    callout_escalations = [e for e in escalations if e.kind == "callout"]
+    available_issues = [issue for issue in ctx.registry.issues if issue.code == "callout_dropped"]
+    resolved_issue_ids = set()
+    for escalation in callout_escalations:
+        candidates = [
+            issue
+            for issue in available_issues
+            if tuple(issue.measurement_ids) == tuple(escalation.targets)
+        ]
+        if len(candidates) != 1:
+            continue  # ambiguous producer correspondence fails closed
+        issue = candidates[0]
+        available_issues = [candidate for candidate in available_issues if candidate is not issue]
+        if escalation.view != "plan":
+            continue
+        if isinstance(escalation.feature, PatternFeature):
+            continue
+        issue_features = {
+            getattr(measurement, "feature", None) for measurement in issue.measurement_ids
+        }
+        issue_features.discard(None)
+        if issue_features and issue_features <= table_callout_replacement_features:
+            resolved_issue_ids.add(id(issue))
+    ctx.drop_issues_where("callout_dropped", lambda issue: id(issue) in resolved_issue_ids)

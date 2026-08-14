@@ -11043,30 +11043,56 @@ class TestPatternGroupBalloon:
             members=members,
         )
 
-    def test_dropped_pattern_gets_one_grouped_balloon(self):
+    def test_dropped_pattern_gets_one_grouped_balloon(self, monkeypatch):
+        from dataclasses import replace
+
         from draftwright.annotations._common import Escalation, PlacementContext
         from draftwright.annotations.orchestrator import _maybe_tabulate_holes
 
         dwg = build_drawing(_multi_hole_plate())  # sparse — density gate stays shut
         before = set(dwg.annotations())
         feat = self._fake_pattern(count=6, diameter=5.0)
+        overlapping_hole = replace(
+            feat.member, frame=replace(feat.member.frame, origin=feat.members[0])
+        )
+        correct_model = replace(dwg.model(), features=[*dwg.model().features, feat])
         ctx = PlacementContext(
             registry=dwg.registry,
             coverage=dwg.coverage,
             items=dwg.items,
-            part_model=dwg.model(),  # (#639) the tabulation resolver reads the model off ctx now
+            part_model=replace(
+                correct_model, features=[*correct_model.features, overlapping_hole]
+            ),
             escalations=[
                 Escalation(kind="callout", view="plan", feature=feat, reason="strip_full")
             ],
         )
         # Mirror what _record_callout_drop does in production, so clearing it below
         # actually exercises the resolve path rather than trivially passing.
-        dwg.registry.record_issue(
-            LintIssue(
-                severity="warning", code="callout_dropped", message="synthetic plan-view drop"
-            )
+        issue = LintIssue(
+            severity="warning", code="callout_dropped", message="synthetic plan-view drop"
         )
-        _maybe_tabulate_holes(dwg, dwg._analysis, ctx=ctx)
+        dwg.registry.record_issue(issue)
+        analysis = dwg._analysis
+
+        # The last IR owner at the shared member position wins balloon attribution. A name
+        # landing is not enough: the wrong feature must leave the pattern drop unresolved.
+        _maybe_tabulate_holes(dwg, analysis, ctx=ctx)
+        balloon_name = "balloon_plan_6×A_0"
+        assert dwg.registry.feature_of(balloon_name) == overlapping_hole
+        assert issue in dwg.registry.issues
+
+        dwg.remove(balloon_name)
+        ctx = PlacementContext(
+            registry=dwg.registry,
+            coverage=dwg.coverage,
+            items=dwg.items,
+            part_model=correct_model,
+            escalations=[
+                Escalation(kind="callout", view="plan", feature=feat, reason="strip_full")
+            ],
+        )
+        _maybe_tabulate_holes(dwg, analysis, ctx=ctx)
 
         assert "hole_table_plan" not in dwg.annotations()  # density gate untouched
         new_balloons = [
@@ -11074,7 +11100,33 @@ class TestPatternGroupBalloon:
         ]
         assert len(new_balloons) == 1
         assert new_balloons[0].split("_")[2] == "6×A"
-        assert "callout_dropped" not in {i.code for i in dwg.lint()}  # resolved, not just hidden
+        assert dwg.registry.feature_of(new_balloons[0]) == feat
+        # ADR 0009 retains one grouped visual marker, but ``6×A`` has no
+        # defining table/legend and therefore cannot certify the dropped
+        # diameter/depth/pattern requirements.
+        assert issue in dwg.registry.issues
+        assert dwg.measurement_keys(new_balloons[0]) == []
+
+        # A pattern-only escalation has no scattered-hole table. It must still use
+        # the automatic retained-label guard before a landed name may clear the
+        # original callout drop (#1144).
+        import draftwright.annotations.balloons as balloons
+
+        dwg.remove(new_balloons[0])
+        guarded_issue = LintIssue(
+            severity="warning", code="callout_dropped", message="guarded pattern drop"
+        )
+        dwg.registry.record_issue(guarded_issue)
+        monkeypatch.setattr(
+            balloons,
+            "balloon_annotation_label_boxes",
+            lambda *_args: ((-1000.0, -1000.0, 1000.0, 1000.0),),
+        )
+        _maybe_tabulate_holes(dwg, analysis, ctx=ctx)
+
+        assert not [name for name in dwg.annotations() if name.startswith("balloon_plan_6×A")]
+        assert guarded_issue in dwg.registry.issues
+        assert "balloon_dropped" in {finding.code for finding in dwg.registry.issues}
 
     def test_multiple_dropped_patterns_get_distinct_non_overlapping_balloons(self):
         from draftwright.annotations._common import Escalation, PlacementContext

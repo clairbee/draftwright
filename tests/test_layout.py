@@ -11,6 +11,7 @@ from draftwright.layout import (
     _ANCHOR_WEIGHT,
     _assign_balloon_bands,
     _greedy_strip_1d,
+    _solve_guarded_strip_1d,
     _solve_segmented_strip_1d,
     _solve_strip_1d,
     _solve_strip_1d_pava,
@@ -64,6 +65,26 @@ class TestAssignBalloonBands:
         assert bands["left"] == members
         assert bands["top"] == []
         assert dropped == 0
+
+    def test_required_members_win_before_optional_leader_cost(self):
+        members = ["required-row", "optional-marker"]
+        choices = [{"left": 100.0}, {"left": 1.0}]
+
+        ordinary, ordinary_dropped = _assign_balloon_bands(members, choices, {"left": 1})
+        prioritised, prioritised_dropped = _assign_balloon_bands(
+            members,
+            choices,
+            {"left": 1},
+            required_count=1,
+        )
+
+        assert ordinary["left"] == ["optional-marker"]
+        assert prioritised["left"] == ["required-row"]
+        assert ordinary_dropped == prioritised_dropped == 1
+
+    def test_required_count_must_address_the_member_prefix(self):
+        with pytest.raises(ValueError, match="required_count"):
+            _assign_balloon_bands(["row"], [{"left": 1.0}], {"left": 1}, required_count=2)
 
 
 class TestSolveSegmentedStrip1d:
@@ -119,6 +140,121 @@ class TestSolveStrip1d:
 
     def test_empty_returns_empty(self):
         assert _solve_strip_1d([], min_gap=5, lo=0, hi=10) == []
+
+    def test_guarded_solve_reassigns_earlier_coordinate_jointly(self):
+        # A greedy retry holds B's original 5 mm coordinate, drops A, then moves
+        # B to 10.  The joint solve sees the complete inventory and places both.
+        assert _solve_guarded_strip_1d(
+            [0.0, 5.0],
+            5.0,
+            [[(5.0, 5.0)], [(0.0, 0.0), (10.0, 10.0)]],
+        ) == [5.0, 10.0]
+
+    def test_guarded_solve_uses_geometry_endpoints_not_a_sampling_grid(self):
+        assert _solve_guarded_strip_1d(
+            [0.0, 5.0],
+            5.0,
+            [[(0.3, 0.3)], [(5.3, 5.3)]],
+        ) == [0.3, 5.3]
+
+    def test_guarded_solve_rejects_invalid_or_empty_constraints(self):
+        with pytest.raises(ValueError, match="equal length"):
+            _solve_guarded_strip_1d([0.0], 5.0, [])
+        assert _solve_guarded_strip_1d([0.0], 5.0, [[]]) is None
+        with pytest.raises(ValueError, match="positive"):
+            _solve_guarded_strip_1d([0.0], 0.0, [[(0.0, 1.0)]])
+        with pytest.raises(ValueError, match="descending"):
+            _solve_guarded_strip_1d([0.0], 5.0, [[(2.0, 1.0)]])
+
+    def test_guarded_solve_fails_closed_before_fragmented_interval_scan_explodes(self):
+        # A valid dense sheet may leave dozens of disjoint free intervals per
+        # balloon after retained-label keep-outs are carved.  This inventory
+        # exceeds the deterministic interval-membership work budget.
+        count = 61
+        allowed = [
+            [
+                (float(interval * 30 + member), float(interval * 30 + member + 20))
+                for interval in range(40)
+            ]
+            for member in range(count)
+        ]
+
+        assert (
+            _solve_guarded_strip_1d(
+                [float(member * 11) for member in range(count)],
+                11.0,
+                allowed,
+            )
+            is None
+        )
+
+    def test_guarded_solve_applies_budget_before_materialising_endpoint_sources(self, monkeypatch):
+        import draftwright.layout as layout_module
+
+        class Endpoint(float):
+            def __float__(self):
+                raise AssertionError("budgeted endpoint was materialised")
+
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_INTERVAL_PROBES", 1)
+
+        assert (
+            _solve_guarded_strip_1d(
+                [0.0],
+                1.0,
+                [[(Endpoint(0.0), Endpoint(1.0)), (Endpoint(2.0), Endpoint(3.0))]],
+            )
+            is None
+        )
+
+    def test_guarded_solve_state_budget_is_independently_load_bearing(self, monkeypatch):
+        import draftwright.layout as layout_module
+
+        count = 20
+        naturals = [member * 11.037 for member in range(count)]
+        allowed = [
+            [
+                (
+                    block * 400.123 + member * 0.137,
+                    block * 400.123 + member * 0.137 + 300.0,
+                )
+                for block in range(3)
+            ]
+            for member in range(count)
+        ]
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_INTERVAL_PROBES", 10_000_000)
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_STATES", 20_000)
+        assert _solve_guarded_strip_1d(naturals, 11.0, allowed) is None
+
+        # The inventory is feasible; only the explicit state budget rejects it.
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_STATES", 10_000_000)
+        assert _solve_guarded_strip_1d(naturals, 11.0, allowed) == naturals
+
+    def test_guarded_solve_caps_the_first_source_expansion(self, monkeypatch):
+        import draftwright.layout as layout_module
+
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_STATES", 4)
+        monkeypatch.setattr(layout_module, "_GUARDED_STRIP_MAX_INTERVAL_PROBES", 1_000)
+
+        assert (
+            _solve_guarded_strip_1d(
+                [0.0, 5.0],
+                5.0,
+                [[(0.0, 10.0)], [(0.0, 10.0)]],
+            )
+            is None
+        )
+
+    def test_guarded_solve_keeps_a_dense_unfragmented_band_within_budget(self):
+        naturals = [float(member * 11) for member in range(61)]
+
+        assert (
+            _solve_guarded_strip_1d(
+                naturals,
+                11.0,
+                [[(0.0, 1000.0)] for _member in naturals],
+            )
+            == naturals
+        )
 
     def test_deterministic_across_runs(self):
         args = ([1.0, 1.0, 1.0, 1.0], 3.0, 0.0, 100.0)

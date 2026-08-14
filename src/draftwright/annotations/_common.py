@@ -23,10 +23,17 @@ from draftwright._core import (  # noqa: F401 — _anno_box re-exported (#700)
     _text_size,
     place_annotation,
 )
-from draftwright._geometry import _boxes_overlap, _segment_crosses_box  # noqa: F401
+from draftwright._geometry import (  # noqa: F401
+    _boxes_overlap,
+    _segment_clips_box,
+    _segment_crosses_box,
+)
 from draftwright.layout import StripCandidate, plan_strip
 from draftwright.linting.issues import LintIssue
-from draftwright.linting.structural import _ann_box, _centerline_extent
+from draftwright.linting.structural import (
+    _ann_box,
+    _centerline_extent,
+)
 from draftwright.model.compiled import resolve_feature
 
 _log = logging.getLogger(__name__)
@@ -84,18 +91,253 @@ def _register_hole_table_coverage(
     measurements=(),
     locations=(),
     requirements=(),
+    representation_reason=None,
+    representation_features=(),
+    representation_requirements=(),
 ):
     """Register the semantic facts visibly carried by a placed hole table.
 
     Automatic escalation and the public table verb share this seam so the table object,
-    registry measurement inventory, and physical hole ledger cannot drift apart.
+    registry measurement inventory, requirement-scoped replacement evidence, and physical hole
+    ledger cannot drift apart.
     """
     table.covers_hole_locations = tuple(locations)
     table.covers_hole_requirements_by_feature = tuple(requirements)
+    table.covers_hole_representations_by_feature = tuple(
+        (feature, "hole_table", representation_reason)
+        for feature in representation_features
+        if representation_reason is not None
+    )
+    table.covers_hole_representations_by_requirement = tuple(
+        (feature, parameter, "hole_table", representation_reason)
+        for feature, parameter in representation_requirements
+        if representation_reason is not None
+    )
     identity = registry.identity_of(name)
     identity["measurement"] = tuple(measurements)
     registry.reapply(name, identity)
     return table
+
+
+def _annotation_hole_features(registry, name, annotation) -> frozenset:
+    """Semantic hole/pattern owners carried by one placed annotation.
+
+    Registry ownership is intentionally singular and may be empty for a visible mark shared
+    by several features. Measurement and structured-coverage provenance are therefore the
+    authoritative union used by replacement transactions.
+    """
+    features = set()
+    owner = registry.feature_of(name)
+    if getattr(owner, "kind", None) in {"hole", "pattern"}:
+        features.add(owner)
+    for measurement in registry.measurement_of(name):
+        feature = getattr(measurement, "feature", None)
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    for fact in getattr(annotation, "covers_hole_locations", ()):
+        feature = fact[0] if len(fact) == 3 else getattr(fact[0], "feature", None)
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    for feature, _requirement, _count in getattr(
+        annotation, "covers_hole_requirements_by_feature", ()
+    ):
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    for feature, _representation, _reason in getattr(
+        annotation, "covers_hole_representations_by_feature", ()
+    ):
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    for feature, _parameter, _representation, _reason in getattr(
+        annotation, "covers_hole_representations_by_requirement", ()
+    ):
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    for feature, _point, _view in getattr(annotation, "covers_hole_centers", ()):
+        if getattr(feature, "kind", None) in {"hole", "pattern"}:
+            features.add(feature)
+    return frozenset(features)
+
+
+def _hole_table_replaceable_annotation(registry, name, annotation) -> bool:
+    """Whether a table can replace *all* semantic facts carried by an annotation.
+
+    The current hole-table schema states only a plain circular bore's diameter/depth,
+    through state, quantity, and (on the automatic table) X/Y positions. A compound
+    callout is indivisible: counterbores, spotfaces, countersinks, profiles, threads, and
+    pattern geometry must keep their leader even when a useful table row is also added.
+    """
+    features = _annotation_hole_features(registry, name, annotation)
+    if not features:
+        return False
+    for feature in features:
+        if getattr(feature, "kind", None) != "hole":
+            return False
+        if any(
+            getattr(feature, attribute, None) is not None
+            for attribute in ("cbore", "spotface", "csink", "thread", "profile")
+        ):
+            return False
+    table_parameters = {
+        "bore.diameter",
+        "bore.depth",
+        "location.location",
+        "location_pattern.location",
+    }
+    return all(
+        getattr(measurement, "parameter", None) in table_parameters
+        for measurement in registry.measurement_of(name)
+    )
+
+
+def _hole_table_replaceable_location_annotation(registry, name, annotation) -> bool:
+    """Whether *annotation* carries only table-rendered X/Y location facts.
+
+    Location eligibility is intentionally independent of bore-callout eligibility: a
+    fitted, toleranced, threaded, or compound hole keeps its manufacturing callout while
+    the table may still replace a separately dropped ordinate for the same feature.
+    """
+    features = _annotation_hole_features(registry, name, annotation)
+    if not features or any(getattr(feature, "kind", None) != "hole" for feature in features):
+        return False
+    measurements = tuple(registry.measurement_of(name))
+    return bool(measurements) and all(
+        getattr(measurement, "parameter", None) == "location.location"
+        for measurement in measurements
+    )
+
+
+def _hole_table_replaceable_feature(feature, dimensions=()) -> bool:
+    """Whether the current table schema can replace *feature*'s compiled callout facts.
+
+    Annotation metadata alone is insufficient: an authored tolerance or fit lives on the
+    compiler-approved dimension, and an automatic callout may have dropped before any
+    annotation object existed. Keep this predicate feature/plan based so the automatic
+    transaction does not parse rendered text.
+    """
+    if getattr(feature, "kind", None) != "hole":
+        return False
+    if any(
+        getattr(feature, attribute, None) is not None
+        for attribute in ("cbore", "spotface", "csink", "thread", "profile")
+    ):
+        return False
+    return all(getattr(dimension, "tolerance", None) is None for dimension in dimensions)
+
+
+@dataclass(frozen=True)
+class _StashedAnnotation:
+    """One reversible annotation removal with its complete registry identity."""
+
+    annotation: Any
+    identity: dict
+    features: frozenset
+
+
+_MISSING_REPRESENTATION = object()
+
+
+@dataclass(frozen=True)
+class _AnnotationTransactionSnapshot:
+    """Complete mutable drawing state needed by an annotation rollback."""
+
+    registry: dict
+    issues: tuple
+    items: tuple
+    coverage: Any
+    representations: tuple[tuple[Any, Any, Any], ...]
+
+
+def _snapshot_annotation_transaction(dwg, coverage) -> _AnnotationTransactionSnapshot:
+    """Capture identity/order, issues, render order, and semantic coverage."""
+    return _AnnotationTransactionSnapshot(
+        registry=dwg.registry.snapshot(),
+        issues=dwg.registry.issues,
+        items=tuple(dwg.items),
+        coverage=coverage.snapshot(),
+        representations=tuple(
+            (
+                annotation,
+                getattr(annotation, "hole_representation", _MISSING_REPRESENTATION),
+                getattr(
+                    annotation,
+                    "hole_representation_reason",
+                    _MISSING_REPRESENTATION,
+                ),
+            )
+            for _name, annotation in dwg.iter_annotations()
+        ),
+    )
+
+
+def _restore_annotation_transaction(dwg, coverage, snapshot, stashed, *, reason=None) -> None:
+    """Restore *snapshot* exactly, optionally marking visible fallback semantics."""
+    for annotation, representation, representation_reason in snapshot.representations:
+        for attribute, value in (
+            ("hole_representation", representation),
+            ("hole_representation_reason", representation_reason),
+        ):
+            if value is _MISSING_REPRESENTATION:
+                if hasattr(annotation, attribute):
+                    delattr(annotation, attribute)
+            else:
+                setattr(annotation, attribute, value)
+    dwg.registry.restore(snapshot.registry)
+    dwg.registry.restore_issues(snapshot.issues)
+    dwg.items[:] = snapshot.items
+    coverage.restore(snapshot.coverage)
+    if reason is not None:
+        for record in stashed.values():
+            record.annotation.hole_representation = "feature_annotation"
+            record.annotation.hole_representation_reason = reason
+
+
+def _stash_annotations(dwg, names) -> dict[str, _StashedAnnotation]:
+    """Remove *names* while retaining enough state for an exact semantic rollback."""
+    stashed = {}
+    for name in names:
+        annotation = dwg.registry.named(name)
+        if annotation is None:
+            continue
+        identity = dwg.registry.identity_of(name)
+        features = _annotation_hole_features(dwg.registry, name, annotation)
+        stashed[name] = _StashedAnnotation(
+            dwg.remove(name),
+            identity,
+            features,
+        )
+    return stashed
+
+
+def _fully_ballooned_features(view, tagged_holes, placed_names, registry, expected_counts) -> set:
+    """Features whose exact-cardinality balloons landed in this render attempt.
+
+    A name that happened to exist before the attempt is not evidence. Nor is a landed
+    balloon owned by another semantic feature. Both checks are deliberately made here,
+    beside the declared-QTY cardinality check, so every automatic commit uses one predicate.
+    """
+    attempted = set(placed_names)
+    names_by_feature: dict[object, set[str]] = {}
+    for tag, member_index, _hole, feature in tagged_holes:
+        names_by_feature.setdefault(feature, set()).add(f"balloon_{view}_{tag}_{member_index}")
+    return {
+        feature
+        for feature, required_names in names_by_feature.items()
+        if len(required_names) == expected_counts.get(feature, 0)
+        and all(
+            name in attempted and registry.feature_of(name) == feature for name in required_names
+        )
+    }
+
+
+def _discard_attempt_annotations(dwg, names) -> set[str]:
+    """Remove annotations created by an uncommitted placement attempt."""
+    removed = set()
+    for name in names:
+        if dwg.registry.named(name) is not None:
+            dwg.remove(name)
+            removed.add(name)
+    return removed
 
 
 @dataclass(frozen=True)
@@ -888,6 +1130,43 @@ def _box_hits(bb, boxes):
     does not count as an overlap, so a candidate never overprints — at worst it
     is dropped a hair early."""
     return bb is not None and any(_boxes_overlap(bb, c) for c in boxes)
+
+
+def balloon_annotation_label_boxes(dwg, view):
+    """Return the surviving annotation label boxes in *view*.
+
+    Public label metadata keeps dimensions compact (witness lines are not
+    obstacles); objects without it, such as notes/tables/section arrows, fall
+    back to their rendered box. Collecting once keeps guarded balloon solving
+    free of temporary OCC glyph construction and shared-box-cache churn.
+    """
+    cache = getattr(dwg, "box_cache", None)
+    boxes = []
+    for name, annotation in dwg.iter_annotations():
+        owner = dwg.view_of(name)
+        if owner is not None and owner != view:
+            continue
+        if getattr(annotation, "is_centerline", False):
+            continue
+        try:
+            label_box = getattr(annotation, "label_bbox", None)
+        except Exception:  # noqa: BLE001 — external leader metadata may be unreadable
+            label_box = None
+        if label_box is None:
+            label_box = _geom_box(annotation, cache)
+        if label_box is None:
+            continue
+        boxes.append(label_box)
+    return tuple(boxes)
+
+
+def balloon_geometry_hits_annotation_labels(glyph_boxes, segments, label_boxes) -> bool:
+    """Whether any rendered glyph component or real shaft crosses a retained label."""
+    return any(
+        any(_boxes_overlap(glyph_box, label_box) for glyph_box in glyph_boxes)
+        or any(_segment_clips_box(start, end, label_box, pad=0.0) for start, end in segments)
+        for label_box in label_boxes
+    )
 
 
 def box_within_page_and_clear(bb, page_box, obstacles) -> bool:
