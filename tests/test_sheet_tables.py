@@ -6,9 +6,9 @@ clear of the views + title block at build, and lint-checked.
 """
 
 import pytest
-from build123d import Box, Cylinder, Pos
+from build123d import Box, Cylinder, Location, Pos, Rectangle
 
-from draftwright import Sheet
+from draftwright import Sheet, build_drawing
 
 
 def _sheet():
@@ -40,6 +40,7 @@ def test_four_row_notes_block_uses_clear_lower_left_a4_space_inside_frame():
         number="DWG-A4-NOTES",
         page="A4",
         frame=True,
+        zones=True,
     ).authored_dimensions()
     s.envelope()
     s.hole(Pos(0, 0, 0) * Cylinder(4, 12))
@@ -57,13 +58,62 @@ def test_four_row_notes_block_uses_clear_lower_left_a4_space_inside_frame():
     assert not [issue for issue in drawing.lint() if issue.code == "table_dropped"]
 
 
+def test_default_preference_falls_back_to_the_only_clear_lower_left_region():
+    # A real public, zones-enabled A4 inventory whose free notes occupy every
+    # candidate above the bottom band and the bottom-right remainder.  ``prefer``
+    # is deliberately omitted: TR is rejected and the exact solver must reach
+    # the surviving lower-left region rather than restricting itself to corners.
+    drawing = build_drawing(Box(30, 20, 8), page="A4", auto_dims=False, frame=True, zones=True)
+    for index in range(19):
+        drawing.note("M" * 180, (148.5, 47.1 + 8 * index), name=f"top_band_{index}")
+    drawing.note("M" * 121, (170, 30), name="bottom_right_band")
+
+    table = drawing.add_table(
+        [("NOTES",), ("1  BREAK ALL EDGES 0.3",), ("2  DEBURR",), ("3  M3x0.5 TAP",)],
+        name="notes",
+    )
+
+    assert table is not None
+    box = table.bounding_box()
+    assert box.min.X < 20.0 and box.min.Y < 20.0
+    assert box.max.X < 62.0 and box.max.Y < 48.0
+
+
+def test_table_keeps_external_clearance_from_existing_annotation():
+    drawing = build_drawing(Box(30, 20, 8), page="A4", auto_dims=False, frame=True)
+    drawing.note("BLOCKER TEXT", (30, 22), name="blocker")
+
+    table = drawing.add_table([("HEAD",), ("row",)], prefer="bl", name="clearance_table")
+
+    assert table is not None
+    table_box = table.bounding_box()
+    blocker_box = drawing.get_annotation("blocker").bounding_box()
+    # X spans overlap, so the separating Y gap is the load-bearing external
+    # clearance (the old strict-overlap solve placed them exactly flush).
+    assert table_box.min.X < blocker_box.max.X and blocker_box.min.X < table_box.max.X
+    assert table_box.min.Y - blocker_box.max.Y >= drawing.draft.pad_around_text - 1e-6
+
+
+def test_table_still_avoids_anonymous_drawing_add_compatibility_object():
+    drawing = build_drawing(Box(40, 30, 10), page="A4", auto_dims=False, frame=True)
+    blocker = Rectangle(60, 40).locate(Location((46, 36, 0)))
+    with pytest.warns(DeprecationWarning, match="Drawing.add"):
+        drawing.add(blocker)
+
+    table = drawing.add_table([("H",), ("x",)], prefer="bl", name="compat_table")
+
+    assert table is not None
+    tb, bb = table.bounding_box(), blocker.bounding_box()
+    assert not (
+        tb.min.X < bb.max.X and bb.min.X < tb.max.X and tb.min.Y < bb.max.Y and bb.min.Y < tb.max.Y
+    )
+
+
 def test_failed_table_diagnostic_names_size_candidate_regions_and_blockers():
     # Free-form notes are the sanctioned user-positioned text surface.  These
     # intentionally fill the A4 usable region in horizontal bands so the real
     # generic table path has candidates, rejects them, and attributes the exact
     # blocking annotations in its public lint diagnostic.
-    from draftwright import build_drawing
-
     drawing = build_drawing(Box(40, 30, 10), page="A4", auto_dims=False, frame=True)
     for index, y in enumerate(range(20, 191, 8)):
         drawing.note("M" * 180, (148.5, y), name=f"block_{index}")
@@ -76,7 +126,7 @@ def test_failed_table_diagnostic_names_size_candidate_regions_and_blockers():
     )
     assert "measured page-space footprint width=7.5 mm, height=14.0 mm" in issue.message
     assert "attempted " in issue.message and "candidate regions; rejected:" in issue.message
-    assert "blocked by annotation:block_" in issue.message
+    assert "blocked within 2.0 mm clearance by annotation:block_" in issue.message
 
 
 def test_oversized_table_diagnostic_reports_both_measured_dimensions_and_violation():

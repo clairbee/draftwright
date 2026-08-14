@@ -2525,11 +2525,12 @@ class Drawing:
 
         *rows* is a list of equal-length string tuples (``rows[0]`` is the
         header). The measured page-space footprint is positioned by :func:`fit_box`
-        clear of the views, title block, and existing annotations; *prefer* ranks
-        candidates by their distance from that page corner but does not restrict
-        placement to the corner. Returns the table annotation, or ``None`` if it
-        has no rows or will not fit. A failed solve records ``table_dropped`` with
-        the footprint, attempted candidate regions, and their named blockers.
+        clear of the views, title block, and existing annotations by the drafting
+        preset's external text clearance; *prefer* ranks candidates by their
+        distance from that page corner but does not restrict placement to the
+        corner. Returns the table annotation, or ``None`` if it has no rows or
+        will not fit. A failed solve records ``table_dropped`` with the footprint,
+        attempted candidate regions, and their named blockers/clearance bands.
         Gear-data, BOM, and revision tables all go through here;
         :meth:`add_hole_table` is the hole-specific convenience built on it.
         """
@@ -2559,6 +2560,23 @@ class Drawing:
                 continue
             obstacles.append((f"annotation:{annotation_name}", box))
 
+        # ``Drawing.add(obj, name=None)`` remains a supported compatibility
+        # surface until 0.5.0. Anonymous objects have no registry identity, so
+        # the named occupancy walk above cannot see them; retain the old full-bbox
+        # fallback for ONLY those objects (#1145 review), without reintroducing a
+        # coarse duplicate hull for every registered leader/dimension.
+        registered_ids = {id(annotation) for _name, annotation in self.iter_annotations()}
+        for index, annotation in enumerate(self.items):
+            if id(annotation) in registered_ids:
+                continue
+            try:
+                bb = annotation.bounding_box()
+            except Exception:  # noqa: BLE001 — not every compatibility object bbox-es cleanly
+                continue
+            obstacles.append(
+                (f"anonymous-annotation[{index}]", (bb.min.X, bb.min.Y, bb.max.X, bb.max.Y))
+            )
+
         # A title block's decomposed grid lines bound text-filled cells; the whole
         # block is furniture, not a collection of free pockets.  Keep its rendered
         # hull as one named obstacle while other leaders/dimensions retain the more
@@ -2575,7 +2593,14 @@ class Drawing:
                 )
 
         trace = FitBoxTrace()
-        pos = fit_box((w, h), region, obstacles, prefer, trace=trace)
+        pos = fit_box(
+            (w, h),
+            region,
+            obstacles,
+            prefer,
+            clearance=self.draft.pad_around_text,
+            trace=trace,
+        )
         if pos is None:
             measured = f"width={w:.1f} mm, height={h:.1f} mm"
             detail = trace.violation
@@ -2585,8 +2610,8 @@ class Drawing:
                 for attempt in shown:
                     x0, y0, x1, y1 = attempt.region
                     rejected.append(
-                        f"[{x0:.1f},{y0:.1f}–{x1:.1f},{y1:.1f}] blocked by "
-                        f"{', '.join(attempt.blockers)}"
+                        f"[{x0:.1f},{y0:.1f}–{x1:.1f},{y1:.1f}] blocked within "
+                        f"{trace.clearance:.1f} mm clearance by {', '.join(attempt.blockers)}"
                     )
                 remaining = trace.rejected_candidates - len(shown)
                 suffix = f"; +{remaining} more" if remaining else ""

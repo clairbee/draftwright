@@ -4,6 +4,8 @@ These exercise the placement primitives in isolation, with no drawing build,
 which is the point of putting them in their own module.
 """
 
+import tracemalloc
+
 import pytest
 
 import draftwright.layout as L
@@ -393,6 +395,18 @@ class TestFitBox:
         # separately reconstructed explanation of the failure.
         assert trace.rejected[0].region == (40, 0, 100, 60)
 
+    def test_trace_attributes_the_nearest_candidate_to_its_distinct_blocker(self):
+        trace = FitBoxTrace()
+        quadrants = [
+            ("bottom-left", (0, 0, 50, 50)),
+            ("bottom-right", (50, 0, 100, 50)),
+            ("top-left", (0, 50, 50, 100)),
+            ("top-right", (50, 50, 100, 100)),
+        ]
+        assert fit_box((20, 20), (0, 0, 100, 100), quadrants, "tr", trace=trace) is None
+        assert trace.rejected[0].region == (80, 80, 100, 100)
+        assert trace.rejected[0].blockers == ("top-right",)
+
     def test_rejection_trace_samples_are_bounded_while_total_remains_exact(self):
         trace = FitBoxTrace(max_rejections=2)
         assert (
@@ -414,6 +428,13 @@ class TestFitBox:
         assert trace.violation == (
             "width exceeds usable region by 10.0 mm; height exceeds usable region by 20.0 mm"
         )
+
+    def test_clearance_inflates_obstacles_and_rejects_negative_values(self):
+        obstacle = [("wall", (20, 0, 40, 100))]
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacle, "bl") == (0, 0)
+        assert fit_box((20, 20), (0, 0, 100, 100), obstacle, "bl", clearance=2) == (42, 0)
+        with pytest.raises(ValueError, match="non-negative"):
+            fit_box((20, 20), (0, 0, 100, 100), obstacle, clearance=-0.1)
 
     def test_deterministic(self):
         args = ((20, 10), (0, 0, 100, 100), [(30, 30, 60, 60)], "br")
@@ -443,6 +464,23 @@ class TestFitBox:
         # not blow up like the old O(n^4) form. Just assert it returns.
         obstacles = [(i, i, i + 2, i + 2) for i in range(0, 200, 5)]
         assert fit_box((20, 20), (0, 0, 300, 300), obstacles, "tr") is not None
+
+    def test_candidate_cartesian_product_is_streamed_with_bounded_live_memory(self):
+        # 400 sparse boxes produce >640k distinct X×Y candidate pairs, but the
+        # preferred A4 corner is immediately free. Materialising those triples
+        # consumed hundreds of MiB; the separable-score heap needs O(n) state.
+        obstacles = [
+            (16 + i * 0.2, 16 + i * 0.1, 16.05 + i * 0.2, 16.05 + i * 0.1) for i in range(400)
+        ]
+        tracemalloc.start()
+        try:
+            assert fit_box((7.51, 14.03), (16, 16, 281, 194), obstacles, "tr") == pytest.approx(
+                (273.49, 179.97)
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 5_000_000
 
 
 def test_layout_engine_is_wired_into_the_drawing_path():
