@@ -19,9 +19,12 @@ while surviving that noise.
 
 Originally a throwaway gate for #638 + #639; retained as the deviation gate for the #602
 performance work — perf refactors (placement-footprint separation, caching) are exactly the
-behaviour-preserving class this corpus polices, so it stays until that epic concludes.
+behaviour-preserving class this corpus polices, so it stays until that epic concludes.  #740
+intentionally changed only the groove/pocket Leader bboxes to the shorter choices made by the
+within-pass maximum-cardinality/minimum-length assignment; those two explicit re-baselines
+retain the same annotations and build-issue sets.
 
-Re-bless intentionally (there should be NO intentional change during these refactors):
+Re-bless intentionally (there should be NO unaccounted change during these refactors):
     DRAFTWRIGHT_UPDATE_GOLDEN=1 uv run pytest tests/test_refactor_golden.py
 """
 

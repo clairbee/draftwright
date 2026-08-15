@@ -36,6 +36,11 @@ What actually lives here today:
 - :func:`fit_box` — the 2D free-rectangle placer for tables/GD&T frames/BOM
   blocks (#93), the one part of the original `LayoutSolver` surface that is
   genuinely shared.
+- :func:`_assign_leader_candidates` — the bounded within-pass assignment for
+  post-drain machined-feature leaders (#740).  The annotation layer lowers
+  measured alternatives to numeric costs and pairwise conflicts; this leaf
+  maximises placed jobs, then minimises total leader length, retaining the
+  legacy greedy incumbent if its deterministic search budget is exhausted.
 
 Global 2D non-overlap (the disjunctive constraint ADR 0003 notes is
 non-linear) stays deferred (#94) and may never be needed — see that ADR's
@@ -57,6 +62,8 @@ _FLOW_COST_SCALE = 1000
 # They are safety limits, not layout heuristics: hitting either returns infeasible.
 _GUARDED_STRIP_MAX_STATES = 500_000
 _GUARDED_STRIP_MAX_INTERVAL_PROBES = 2_000_000
+_LEADER_ASSIGN_MAX_STATES = 100_000
+_LEADER_ASSIGN_MAX_JOBS = 256
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +337,192 @@ def _solve_strip_1d_pava(naturals, gaps, lo, hi, weights=None):
 # ---------------------------------------------------------------------------
 # Collect-then-solve strip stage (ADR 0009)
 # ---------------------------------------------------------------------------
+
+
+# ── discrete annotation assignments -------------------------------------------------------
+@dataclass(frozen=True)
+class _LeaderAssignment:
+    """Result of :func:`_assign_leader_candidates`.
+
+    ``choices[job]`` is the selected candidate index or ``None``. ``optimal``
+    is false when a deterministic resource guard prevented or stopped the exact
+    search; the returned incumbent is still at least as good as the legacy
+    greedy pass. ``states`` is deterministic work-count evidence for traces and
+    tests (zero when the job-count guard prevents search from starting).
+    """
+
+    choices: tuple[int | None, ...]
+    optimal: bool
+    states: int
+
+
+def _assign_leader_candidates(
+    costs_by_job,
+    conflicts=(),
+    *,
+    max_states: int = _LEADER_ASSIGN_MAX_STATES,
+) -> _LeaderAssignment:
+    """Assign at most one candidate per leader job (#740).
+
+    The objectives are lexicographic: maximum placed jobs, then minimum total
+    leader length, then the stable input candidate order. ``conflicts`` contains
+    ``(job_a, candidate_a, job_b, candidate_b)`` pairs that may not coexist.
+    The caller derives those pairs from page geometry; this leaf knows only
+    indices and numeric costs.
+
+    General candidate-conflict assignment is combinatorial.  The search is
+    therefore explicitly bounded.  Before searching, the function constructs
+    the old first-clear greedy result as an incumbent.  If the budget is reached,
+    that incumbent (or a strictly better one found so far) is returned with
+    ``optimal=False``.  Resource pressure can never make the new pass place fewer
+    callouts than the pre-#740 algorithm.
+    """
+
+    if max_states <= 0:
+        raise ValueError("max_states must be positive")
+    raw_costs = tuple(tuple(float(cost) for cost in job) for job in costs_by_job)
+    if any(not math.isfinite(cost) or cost < 0 for job in raw_costs for cost in job):
+        raise ValueError("leader candidate costs must be finite and non-negative")
+    # The shared band-flow solver uses the same one-micron fixed-point scale.
+    # Besides making summed costs platform-stable, it lets geometrically
+    # symmetric alternatives reach the documented candidate-order tie-break
+    # instead of being reordered by a few floating-point ULPs.
+    costs = tuple(tuple(int(round(cost * _FLOW_COST_SCALE)) for cost in job) for job in raw_costs)
+
+    offsets = []
+    candidate_count = 0
+    for job in costs:
+        offsets.append(candidate_count)
+        candidate_count += len(job)
+    # Sparse sets keep memory proportional to actual conflicts. A global bitset
+    # per candidate would become quadratic merely because candidate ids are far
+    # apart, even when the caller's pair-probe budget found only a few edges.
+    adjacency: list[set[int]] = [set() for _ in range(candidate_count)]
+    for conflict in conflicts:
+        if len(conflict) != 4:
+            raise ValueError("leader conflict must contain four indices")
+        job_a, candidate_a, job_b, candidate_b = conflict
+        if not (0 <= job_a < len(costs) and 0 <= job_b < len(costs)):
+            raise ValueError("leader conflict job index is out of range")
+        if not (0 <= candidate_a < len(costs[job_a]) and 0 <= candidate_b < len(costs[job_b])):
+            raise ValueError("leader conflict candidate index is out of range")
+        if job_a == job_b:
+            continue  # one-candidate-per-job already makes this pair impossible
+        left = offsets[job_a] + candidate_a
+        right = offsets[job_b] + candidate_b
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+
+    # With no cross-job conflicts, each job is independent and the exact answer
+    # is simply its cheapest stable candidate. This is the common sparse-drawing
+    # path and avoids entering the combinatorial search at all.
+    if not any(adjacency):
+        independent = tuple(
+            min(range(len(job)), key=lambda index: (job[index], index)) if job else None
+            for job in costs
+        )
+        return _LeaderAssignment(independent, True, 1)
+
+    # The exact pre-#740 policy: visit jobs and candidates in input order, and
+    # keep the first candidate compatible with every earlier selection.
+    greedy = []
+    greedy_selected: set[int] = set()
+    greedy_cost = 0
+    for job_index, job in enumerate(costs):
+        selected = None
+        for candidate_index, cost in enumerate(job):
+            candidate = offsets[job_index] + candidate_index
+            if adjacency[candidate].isdisjoint(greedy_selected):
+                selected = candidate_index
+                greedy_selected.add(candidate)
+                greedy_cost += cost
+                break
+        greedy.append(selected)
+
+    def score(choices, count, cost):
+        # ``None`` sorts after every real candidate, preserving the established
+        # input-order tie convention once cardinality and length are equal.
+        tie = tuple(
+            len(costs[index]) if choice is None else choice for index, choice in enumerate(choices)
+        )
+        return (-count, cost, tie)
+
+    best_choices = tuple(greedy)
+    best_count = sum(choice is not None for choice in greedy)
+    best_cost = greedy_cost
+    best_score = score(best_choices, best_count, best_cost)
+    # The exact search is recursive by job. Keep a hard bound comfortably below
+    # Python's recursion limit, including the all-blocked case whose pair count is
+    # zero and therefore cannot trip the annotation-side pair budget.
+    if len(costs) > _LEADER_ASSIGN_MAX_JOBS:
+        return _LeaderAssignment(best_choices, False, 0)
+
+    # Optimistic cardinality and cost bounds ignore conflicts; that makes them
+    # cheap and safe. The cost bound is needed only when reaching the incumbent
+    # cardinality requires selecting every remaining non-empty job, so one
+    # suffix sum is sufficient (linear storage, not a quadratic suffix table).
+    suffix_nonempty = [0] * (len(costs) + 1)
+    suffix_min_cost = [0] * (len(costs) + 1)
+    for index in range(len(costs) - 1, -1, -1):
+        suffix_nonempty[index] = suffix_nonempty[index + 1] + bool(costs[index])
+        suffix_min_cost[index] = suffix_min_cost[index + 1] + (
+            min(costs[index]) if costs[index] else 0
+        )
+
+    states = 0
+    exhausted = False
+    choices: list[int | None] = []
+
+    selected_candidates: set[int] = set()
+
+    def search(job_index: int, placed: int, total_cost: int) -> None:
+        nonlocal states, exhausted, best_choices, best_count, best_cost, best_score
+        if states >= max_states:
+            exhausted = True
+            return
+        states += 1
+
+        if placed + suffix_nonempty[job_index] < best_count:
+            return
+        if placed + suffix_nonempty[job_index] == best_count:
+            optimistic_cost = total_cost + suffix_min_cost[job_index]
+            # Keep pruning identical to the exact fixed-point tuple ordering
+            # used by ``score`` below.
+            if optimistic_cost > best_cost:
+                return
+        if job_index == len(costs):
+            candidate_choices = tuple(choices)
+            candidate_score = score(candidate_choices, placed, total_cost)
+            if candidate_score < best_score:
+                best_choices = candidate_choices
+                best_count = placed
+                best_cost = total_cost
+                best_score = candidate_score
+            return
+
+        # Lower-cost alternatives first find a strong incumbent quickly; the
+        # candidate index is the deterministic tie-break. Dropping is last because
+        # cardinality is the primary objective.
+        for candidate_index in sorted(
+            range(len(costs[job_index])),
+            key=lambda index: (costs[job_index][index], index),
+        ):
+            candidate = offsets[job_index] + candidate_index
+            if not adjacency[candidate].isdisjoint(selected_candidates):
+                continue
+            choices.append(candidate_index)
+            selected_candidates.add(candidate)
+            search(job_index + 1, placed + 1, total_cost + costs[job_index][candidate_index])
+            selected_candidates.remove(candidate)
+            choices.pop()
+            if exhausted:
+                return
+        choices.append(None)
+        search(job_index + 1, placed, total_cost)
+        choices.pop()
+
+    search(0, 0, 0)
+    return _LeaderAssignment(best_choices, not exhausted, states)
 
 
 # ── balloon band assignment (#516; moved from drawing.py, #699) ─────────────────────────

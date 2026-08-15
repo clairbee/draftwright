@@ -133,6 +133,9 @@ class TestPassEvents:
         data = _load(tmp_path / "c.trace.json")
         ev = next(e for e in data["pass_events"] if e["label"] == "chamfer_callouts")
         item = next(i for i in ev["items"] if i["name"].startswith("m_chamfer"))
+        assert ev["assignment"] == "joint"
+        assert ev["optimal"] is True and ev["states"] >= 1
+        assert ev["pair_probes"] >= 0
         # The callout's own story: where it leads from/to, what it dodged, how hard it tried.
         assert item["outcome"] == "placed"
         assert item["view"] == "plan" and item["label"] == "C12"

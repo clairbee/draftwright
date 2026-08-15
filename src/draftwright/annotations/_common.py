@@ -970,6 +970,19 @@ def occupancy_boxes(o, stroke_pad=None):
 _STROKE_PAD = 1.2
 
 
+def annotation_obstacle_boxes(dwg, annotation):
+    """One annotation's obstacle boxes under the shared strip-occupancy policy.
+
+    Candidate-based placers use this before an annotation is registered; factoring
+    the preset-aware stroke pad here keeps those candidate conflicts identical to
+    the boxes :func:`strip_obstacles` will expose after placement (#740).
+    """
+
+    arrow_length = getattr(getattr(dwg, "draft", None), "arrow_length", None)
+    pad = max(_STROKE_PAD, arrow_length / 2) if arrow_length else _STROKE_PAD
+    return occupancy_boxes(annotation, stroke_pad=pad)
+
+
 def strip_obstacles(dwg, view=None, *, crossable=(), named=False):
     """The COMPLETE occupancy for strip placement (ADR 0009): every placed
     annotation's full rendered footprint, optionally restricted to *view*, minus
@@ -1005,9 +1018,6 @@ def strip_obstacles(dwg, view=None, *, crossable=(), named=False):
 
     The occupancy source for the collect-then-solve carve — every migrated renderer's
     ``place_strip_candidates`` call wires this in (#321/#150/P3)."""
-    # Preset-aware stroke pad (#688 review): arrowheads scale with font_size.
-    al = getattr(getattr(dwg, "draft", None), "arrow_length", None)
-    pad = max(_STROKE_PAD, al / 2) if al else _STROKE_PAD
     boxes: list = []
     for name, o in dwg.iter_annotations():
         if view is not None:
@@ -1016,7 +1026,7 @@ def strip_obstacles(dwg, view=None, *, crossable=(), named=False):
                 continue  # owned by a different ortho view → its own (disjoint) block
         if type(o).__name__ in crossable:
             continue  # this consumer may cross it (centre lines/marks for a dim)
-        occ = occupancy_boxes(o, stroke_pad=pad)  # decomposed, not one hull (#685)
+        occ = annotation_obstacle_boxes(dwg, o)  # decomposed, not one hull (#685/#740)
         boxes.extend(((name, b) for b in occ) if named else occ)
     return boxes
 
