@@ -105,6 +105,33 @@ def test_zero_length_leader_uses_its_local_ink_extent():
     )
 
 
+def test_arrow_and_shaft_components_can_be_disabled_independently():
+    # Keep the two footprint branches independently load-bearing.  A zero style value is
+    # a supported boundary for the pure geometry helper even though ordinary Draft values
+    # render both components.
+    assert _leader_ink_crosses_box(
+        (0.0, 0.0),
+        (20.0, 0.0),
+        (2.4, 0.6, 2.6, 0.8),
+        arrow_length=3.0,
+        line_width=0.0,
+    )
+    assert _leader_ink_crosses_box(
+        (0.0, 0.0),
+        (20.0, 0.0),
+        (9.9, 0.4, 10.1, 0.6),
+        arrow_length=0.0,
+        line_width=2.0,
+    )
+    assert not _leader_ink_crosses_box(
+        (0.0, 0.0),
+        (20.0, 0.0),
+        (9.9, -0.1, 10.1, 0.1),
+        arrow_length=0.0,
+        line_width=0.0,
+    )
+
+
 def test_convex_overlap_ignores_a_repeated_polygon_vertex():
     polygon = ((0.0, 0.0), (2.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0))
     assert _convex_polygon_overlaps_box(polygon, (1.0, 1.0, 3.0, 3.0))
