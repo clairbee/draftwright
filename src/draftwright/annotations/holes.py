@@ -33,7 +33,7 @@ from draftwright._core import (
     _iso_bbox,
     _log,
 )
-from draftwright._geometry import plane_axes
+from draftwright._geometry import _leader_ink_crosses_box, plane_axes
 from draftwright.annotations._common import (
     CROSSABLE_TYPES,
     CorridorCandidate,
@@ -42,7 +42,6 @@ from draftwright.annotations._common import (
     _geom_box,
     _hole_location_coverage_fact,
     _same_location_ordinate,
-    _segment_crosses_box,
     _with_hole_center_coverage,
     _with_hole_location_coverage,
     box_within_page_and_clear,
@@ -1885,15 +1884,25 @@ def _needs_section(feat: HoleFeature | PatternFeature):
     return bore.cbore is not None or bore.spotface is not None or not bore.through
 
 
-def _leader_hits(leader, tip, elbow, side, obstacles):
+def _leader_hits(leader, tip, elbow, side, obstacles, draft):
     """True when *leader*'s rendered footprint truly overlaps any *obstacles* box — split into
-    the diagonal tip→elbow SHAFT (checked precisely via `_segment_crosses_box`, since its AABB
-    over-claims the empty triangle it doesn't occupy — #305) and the elbow→label shelf+text
-    (axis-aligned, so the coarse AABB check there is already exact). Promoted (#638; pure)."""
+    the diagonal tip→elbow SHAFT + ARROWHEAD (checked against their analytical rendered ink,
+    since the composite AABB over-claims the empty triangle it doesn't occupy — #305/#367) and
+    the elbow→label shelf+text (axis-aligned, so the coarse AABB check there is already exact).
+    Promoted (#638; pure)."""
     full_box = _geom_box(leader)
     if full_box is None or not _box_hits(full_box, obstacles):
         return False  # fast reject: nowhere near any obstacle
-    if any(_segment_crosses_box(tip, elbow, o) for o in obstacles):
+    if any(
+        _leader_ink_crosses_box(
+            tip,
+            elbow,
+            obstacle,
+            arrow_length=draft.arrow_length,
+            line_width=draft.line_width,
+        )
+        for obstacle in obstacles
+    ):
         return True
     label_box = (
         (elbow[0], full_box[1], full_box[2], full_box[3])
@@ -2433,7 +2442,7 @@ def _place_queue(
             continue
         y = final_y[tid]
         leader, tip, elbow = _build_leader_at(s, edge, side, y, to_page, elbow_dx, draft, a.SCALE)
-        if _leader_hits(leader, tip, elbow, side, occupied):
+        if _leader_hits(leader, tip, elbow, side, occupied, draft):
             crossing.append((s, y, leader))
         else:
             placed.append((s, y, leader))

@@ -327,6 +327,94 @@ def _segment_clips_box(p, q, box, pad=0.0) -> bool:
     return _segment_clip_extent(p, q, box, pad=pad) is not None
 
 
+def _convex_polygon_overlaps_box(points, box) -> bool:
+    """Whether a convex page-plane polygon has positive-area overlap with an AABB.
+
+    This is the small separating-axis primitive used by
+    :func:`_leader_ink_crosses_box`.  Keeping it here makes the rendered-ink model pure
+    rectangle/vector maths: placement does not build temporary OCC geometry merely to ask
+    whether a candidate is clear (ADRs 0004/0014).
+    """
+    corners = (
+        (box[0], box[1]),
+        (box[2], box[1]),
+        (box[2], box[3]),
+        (box[0], box[3]),
+    )
+    axes = [(1.0, 0.0), (0.0, 1.0)]
+    axes.extend(
+        (-(second[1] - first[1]), second[0] - first[0])
+        for first, second in zip(points, (*points[1:], points[0]), strict=True)
+    )
+    for ax, ay in axes:
+        if abs(ax) + abs(ay) <= 1e-12:
+            continue
+        polygon_projection = [x * ax + y * ay for x, y in points]
+        box_projection = [x * ax + y * ay for x, y in corners]
+        if max(polygon_projection) <= min(box_projection) or max(box_projection) <= min(
+            polygon_projection
+        ):
+            return False
+    return True
+
+
+def _leader_ink_crosses_box(
+    tip,
+    elbow,
+    box,
+    *,
+    arrow_length: float,
+    line_width: float,
+) -> bool:
+    """Whether a rendered leader's tip-to-elbow ink overlaps *box*.
+
+    A leader is not a zero-width segment.  Its shaft is a swept rectangle of
+    ``line_width`` and its curved arrowhead is contained by the triangle from the tip to
+    a base ``arrow_length`` along the shaft, with the helper's ``arrow_length / 3``
+    lateral flare.  Testing those two local convex footprints keeps the arrow clearance
+    near the tip; inflating the entire shaft by the arrow size would reject genuinely
+    clear obstacles near the elbow (#367).
+
+    Touching boundaries are clear, matching :func:`_boxes_overlap` and the placement-side
+    semantics of :func:`_segment_crosses_box`.
+    """
+    dx, dy = float(elbow[0]) - float(tip[0]), float(elbow[1]) - float(tip[1])
+    length = math.hypot(dx, dy)
+    half_line = max(0.0, float(line_width)) / 2.0
+    head_length = max(0.0, float(arrow_length))
+
+    if length <= 1e-12:
+        half = max(half_line, head_length / 3.0)
+        point_box = (tip[0] - half, tip[1] - half, tip[0] + half, tip[1] + half)
+        return _boxes_overlap(point_box, box)
+
+    ux, uy = dx / length, dy / length
+    vx, vy = -uy, ux
+
+    if half_line > 0.0:
+        shaft = (
+            (tip[0] + vx * half_line, tip[1] + vy * half_line),
+            (elbow[0] + vx * half_line, elbow[1] + vy * half_line),
+            (elbow[0] - vx * half_line, elbow[1] - vy * half_line),
+            (tip[0] - vx * half_line, tip[1] - vy * half_line),
+        )
+        if _convex_polygon_overlaps_box(shaft, box):
+            return True
+
+    if head_length > 0.0:
+        half_head = head_length / 3.0
+        base_x, base_y = tip[0] + ux * head_length, tip[1] + uy * head_length
+        arrow = (
+            (tip[0], tip[1]),
+            (base_x + vx * half_head, base_y + vy * half_head),
+            (base_x - vx * half_head, base_y - vy * half_head),
+        )
+        if _convex_polygon_overlaps_box(arrow, box):
+            return True
+
+    return False
+
+
 def _segments_cross_or_overlap(a1, a2, b1, b2) -> bool:
     """Whether two page-plane segments cross or overlap beyond a shared endpoint.
 

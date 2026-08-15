@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- Hole-callout obstacle checks now account for the rendered leader shaft width and
+  tip-local arrowhead flare instead of treating the leader as a zero-width centreline
+  (#367). The analytical check remains geometry-only and does not over-reserve the
+  arrowhead's clearance along the whole shaft.
+
 ## v0.4.5 — 2026-08-15
 
 **A focused technical-drawing correctness patch.** Cross-drilled hole locations now remain
