@@ -4,7 +4,7 @@ import math
 
 import pytest
 from build123d import HeadType, Vector
-from build123d_drafting.helpers import Draft, Leader
+from build123d_drafting.helpers import ArrowHead, Draft, Leader
 
 from draftwright._geometry import (
     _convex_polygon_overlaps_box,
@@ -29,7 +29,7 @@ def test_arrowhead_flare_is_collision_evidence_beyond_the_idealised_segment(angl
     unit = (math.cos(radians), math.sin(radians))
     normal = (-unit[1], unit[0])
     elbow = (20.0 * unit[0], 20.0 * unit[1])
-    leader, tip, elbow, side = _leader(draft, elbow)
+    tip = (0.0, 0.0)
     sample = (
         unit[0] * draft.arrow_length * 0.83 + normal[0] * draft.arrow_length * 0.23,
         unit[1] * draft.arrow_length * 0.83 + normal[1] * draft.arrow_length * 0.23,
@@ -39,9 +39,29 @@ def test_arrowhead_flare_is_collision_evidence_beyond_the_idealised_segment(angl
     assert not _segment_crosses_box(tip, elbow, obstacle), (
         "fixture must miss the old zero-width centreline test"
     )
-    assert any(face.is_inside(Vector(sample[0], sample[1], 0.0)) for face in leader.faces()), (
-        "fixture must intersect the real rendered arrowhead"
+    arrow = ArrowHead(
+        size=draft.arrow_length,
+        head_type=head_type,
+        rotation=angle + 180.0,
     )
+    assert any(face.is_inside(Vector(sample[0], sample[1], 0.0)) for face in arrow.faces()), (
+        f"fixture must intersect the real rendered {head_type.name.lower()} arrowhead"
+    )
+    assert _leader_ink_crosses_box(
+        tip,
+        elbow,
+        obstacle,
+        arrow_length=draft.arrow_length,
+        line_width=draft.line_width,
+    )
+
+
+def test_annotation_side_leader_check_uses_the_rendered_arrow_ink():
+    draft = Draft()
+    leader, tip, elbow, side = _leader(draft)
+    obstacle = (2.44, 0.64, 2.54, 0.74)
+
+    assert not _segment_crosses_box(tip, elbow, obstacle)
     assert _leader_hits(leader, tip, elbow, side, (obstacle,), draft)
 
 

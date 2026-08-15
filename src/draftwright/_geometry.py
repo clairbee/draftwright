@@ -369,11 +369,11 @@ def _leader_ink_crosses_box(
     """Whether a rendered leader's tip-to-elbow ink overlaps *box*.
 
     A leader is not a zero-width segment.  Its shaft is a swept rectangle of
-    ``line_width`` and its curved arrowhead is contained by the triangle from the tip to
-    a base ``arrow_length`` along the shaft, with the helper's ``arrow_length / 3``
-    lateral flare.  Testing those two local convex footprints keeps the arrow clearance
-    near the tip; inflating the entire shaft by the arrow size would reject genuinely
-    clear obstacles near the elbow (#367).
+    ``line_width`` and each supported arrowhead style is contained by the triangle from
+    the tip to a base ``arrow_length`` along the shaft, with the helper's
+    ``arrow_length / 3`` lateral flare.  Testing those two local convex footprints keeps
+    the arrow clearance near the tip; inflating the entire shaft by the arrow size would
+    reject genuinely clear obstacles near the elbow (#367).
 
     Touching boundaries are clear, matching :func:`_boxes_overlap` and the placement-side
     semantics of :func:`_segment_crosses_box`.
