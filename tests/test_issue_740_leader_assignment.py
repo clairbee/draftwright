@@ -13,7 +13,7 @@ from build123d_drafting.helpers import Draft, Leader
 from draftwright import ScaleCompletenessWarning, build_drawing
 from draftwright.annotations._common import _box_hits, annotation_obstacle_boxes
 from draftwright.layout import _assign_leader_candidates
-from draftwright.model import Frame, GrooveFeature, PartModel
+from draftwright.model import FilletFeature, Frame, GrooveFeature, PartModel
 
 
 def test_pure_assignment_maximises_cardinality_before_leader_length():
@@ -264,6 +264,65 @@ def test_public_render_uses_joint_minimum_length_and_pair_budget_is_legacy_floor
     assert job_event["optimal"] is False
 
 
+def test_grouped_job_candidate_budget_precedes_occ_construction(monkeypatch, tmp_path):
+    shaft = Cylinder(10, 20)
+    fillets = [FilletFeature(Frame((10.0, 0.0, 10.0), "z"), "z", 1.0) for _index in range(257)]
+    created = 0
+
+    def counted_leader(*args, **kwargs):
+        nonlocal created
+        created += 1
+        return Leader(*args, **kwargs)
+
+    monkeypatch.setattr("draftwright.annotations.from_model.Leader", counted_leader)
+    trace_path = tmp_path / "candidate-budget.json"
+    drawing = build_drawing(
+        shaft,
+        model=PartModel(shaft.bounding_box(), "z", fillets),
+        page="A4",
+        trace=trace_path,
+    )
+
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    event = next(item for item in trace["pass_events"] if item["label"] == "fillet_callouts")
+    annotation = drawing.get_annotation("m_fillet_z0")
+
+    assert created == 1  # the legacy first-clear floor, not all 257 OCC alternatives
+    assert annotation.label == "257× R1"
+    assert len(drawing.measurement_keys("m_fillet_z0")) == 257
+    assert event["assignment"] == "greedy_candidate_budget"
+    assert event["optimal"] is False
+
+
+def test_grouped_job_at_candidate_budget_still_uses_joint_assignment(monkeypatch, tmp_path):
+    shaft = Cylinder(10, 20)
+    fillets = [FilletFeature(Frame((10.0, 0.0, 10.0), "z"), "z", 1.0) for _index in range(2)]
+    created = 0
+
+    def counted_leader(*args, **kwargs):
+        nonlocal created
+        created += 1
+        return Leader(*args, **kwargs)
+
+    monkeypatch.setattr("draftwright.annotations.from_model._LEADER_ASSIGN_MAX_CANDIDATES", 2)
+    monkeypatch.setattr("draftwright.annotations.from_model.Leader", counted_leader)
+    trace_path = tmp_path / "candidate-budget-boundary.json"
+    drawing = build_drawing(
+        shaft,
+        model=PartModel(shaft.bounding_box(), "z", fillets),
+        page="A4",
+        trace=trace_path,
+    )
+
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    event = next(item for item in trace["pass_events"] if item["label"] == "fillet_callouts")
+
+    assert created == 2
+    assert drawing.get_annotation("m_fillet_z0").label == "2× R1"
+    assert event["assignment"] == "joint"
+    assert event["optimal"] is True
+
+
 def test_trace_identifies_a_joint_conflict_between_fixed_clear_candidates(tmp_path):
     shaft = Cylinder(10, 60)
     grooves = [
@@ -288,3 +347,42 @@ def test_trace_identifies_a_joint_conflict_between_fixed_clear_candidates(tmp_pa
     assert len(dropped) == 1
     assert dropped[0]["viable_candidates"] == 5
     assert dropped[0]["reason"] == "assignment_conflict"
+
+
+def test_bounded_legacy_fallback_preserves_drop_diagnostic(monkeypatch, tmp_path):
+    shaft = Cylinder(10, 60)
+    grooves = [
+        GrooveFeature(Frame((0.0, 0.0, 0.0), "z"), "z", 2.0, 14.0 + index * 0.1)
+        for index in range(6)
+    ]
+    monkeypatch.setattr(
+        "draftwright.annotations.from_model._LEADER_ASSIGN_MAX_PAIR_PROBES",
+        0,
+    )
+    trace_path = tmp_path / "greedy-drop.json"
+
+    with pytest.warns(ScaleCompletenessWarning, match="groove_dropped"):
+        drawing = build_drawing(
+            shaft,
+            model=PartModel(shaft.bounding_box(), "z", grooves),
+            page="A4",
+            scale=1,
+            scale_policy="permissive",
+            trace=trace_path,
+        )
+
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    event = next(item for item in trace["pass_events"] if item["label"] == "groove_callouts")
+    dropped = [item for item in event["items"] if item["outcome"] == "dropped"]
+    issues = [issue for issue in drawing.registry.issues if issue.code == "groove_dropped"]
+
+    assert len([name for name in drawing.annotations() if name.startswith("m_groove")]) == 5
+    assert event["assignment"] == "greedy_pair_budget"
+    assert event["optimal"] is False
+    assert len(dropped) == 1
+    assert dropped[0]["name"] == "m_groove_z5"
+    assert dropped[0]["label"] == "2 WIDE × ø14.5"
+    assert dropped[0]["candidates_tried"] == 8
+    assert dropped[0]["reason"] == "no_clear_room"
+    assert len(issues) == 1
+    assert len(issues[0].measurement_ids) == 2

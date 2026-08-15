@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from itertools import chain, islice
 from typing import Any
 
 from build123d_drafting import DatumFeature, FeatureControlFrame, SurfaceFinish, TextBlock
@@ -1643,6 +1644,7 @@ def _flat_candidates(dwg, view, vb, members, reach, *, provenances):
         )
 
 
+_LEADER_ASSIGN_MAX_CANDIDATES = 256
 _LEADER_ASSIGN_MAX_PAIR_PROBES = 100_000
 
 
@@ -1682,10 +1684,10 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     Candidate geometry is collected before anything is emitted. Fixed-obstacle eligibility
     and pairwise conflicts use the same rendered occupancy as the old first-clear loop; the
     geometry-only layout solver then maximises placed jobs, minimises total leader length,
-    and uses candidate order as the deterministic final tie-break. Pass size, pair
-    construction, and the exact search are bounded. If any budget is reached, the legacy
-    greedy result is retained, so resource pressure can never place fewer callouts than
-    before #740.
+    and uses candidate order as the deterministic final tie-break. Alternative construction,
+    pass size, pair construction, and the exact search are bounded. If any budget is reached,
+    the legacy greedy result is retained, so resource pressure can never place fewer callouts
+    than before #740.
 
     A selected Leader is attributed to that candidate's feature; every unselected job records
     ``<noun> callout … not placed`` as ``<drop_code>`` lint (never a silent drop). Returns the
@@ -1696,7 +1698,10 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     tried, obstacle count, placed tip/elbow or the drop reason. Post-#734 these
     callouts place after the drain, so without this the #733 story ("why did this
     pocket callout land here / drop") would be invisible to the trace."""
-    jobs = [(*job[:4], list(job[4]), job[5]) for job in jobs]
+    # Keep alternatives lazy until the bounded joint tier is known to be usable.
+    # This matters for one grouped job with many members: counting jobs or
+    # cross-job pairs alone cannot protect its collect-all OCC construction.
+    jobs = [(*job[:4], iter(job[4]), job[5]) for job in jobs]
     if not jobs:
         return 0
     trace = getattr(ctx, "trace", None)
@@ -1760,7 +1765,9 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
         for job in jobs:
             name, view, vb, label, raw_candidates, measurement = job
             obstacles = strip_obstacles(dwg, view=view, crossable=CROSSABLE_TYPES)
+            tried = 0
             for raw_index, (tip, elbow, feature) in enumerate(raw_candidates):
+                tried = raw_index + 1
                 leader = Leader(tip=(tip[0], tip[1], 0), elbow=elbow, label=label, draft=dwg.draft)
                 if not _label_lands_clear(leader, obstacles, vb, page, geom_clear=geom_clear):
                     continue
@@ -1779,7 +1786,7 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
                     name,
                     view,
                     label,
-                    raw_index + 1,
+                    tried,
                     len(obstacles),
                     candidate,
                 )
@@ -1792,7 +1799,7 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
                     f"{noun} callout {label} not placed (no clear room)",
                     measurement=measurement,
                 )
-                trace_item(name, view, label, len(raw_candidates), len(obstacles))
+                trace_item(name, view, label, tried, len(obstacles))
         return placed_count
 
     # Apply the pure solver's recursion bound before constructing any OCC
@@ -1801,6 +1808,21 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
     # collect-all cost merely to discover that it is outside the exact tier.
     if len(jobs) > _LEADER_ASSIGN_MAX_JOBS:
         return greedy("greedy_job_budget")
+
+    # Materialise at most the cheap tuple alternatives allowed into the joint
+    # tier. On the first excess item, restore the consumed prefix in front of the
+    # still-lazy tail and run the old loop. The fallback therefore constructs at
+    # most as many OCC Leaders as pre-#740 did, even for one enormous grouped job.
+    candidate_count = 0
+    for job_index, job in enumerate(jobs):
+        remaining = _LEADER_ASSIGN_MAX_CANDIDATES - candidate_count
+        raw_candidates = job[4]
+        prefix = list(islice(raw_candidates, remaining + 1))
+        if len(prefix) > remaining:
+            jobs[job_index] = (*job[:4], chain(prefix, raw_candidates), job[5])
+            return greedy("greedy_candidate_budget")
+        jobs[job_index] = (*job[:4], prefix, job[5])
+        candidate_count += len(prefix)
 
     fixed_obstacles = {
         view: strip_obstacles(dwg, view=view, crossable=CROSSABLE_TYPES)

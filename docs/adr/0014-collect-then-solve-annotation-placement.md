@@ -17,11 +17,12 @@ Each pass measures all fixed-obstacle-clear candidates, lowers only numeric lead
 costs and pairwise conflicts into `layout.py`, and solves for maximum placed jobs,
 then minimum total leader length. Feature-specific physical rules remain hard
 eligibility at the annotation boundary (for example, a Y-diameter ray through a
-projected bolt hole is excluded whenever a clear ray exists). Candidate-pair
-construction and the exact search have deterministic work budgets; a pass-size,
-candidate-pair, or search-state limit retains the former greedy result, so the
-amendment cannot place fewer callouts under resource pressure. Cross-pass leader
-unification remains separate work (#1166).
+projected bolt hole is excluded whenever a clear ray exists). Alternative
+collection, candidate-pair construction, and the exact search have deterministic
+work budgets; an alternative-count, pass-size, candidate-pair, or search-state
+limit retains the former greedy result, so the amendment cannot place fewer
+callouts under resource pressure. Cross-pass leader unification remains separate
+work (#1166).
 
 ## Context (short — the full story is 0009's)
 
@@ -133,11 +134,11 @@ real `Leader` alternatives against the already-complete fixed inventory, derives
 candidate conflicts from the same preset-aware stroke/label occupancy exposed by
 `strip_obstacles`, and calls the geometry-only `_assign_leader_candidates` in
 `layout.py`. The bounded solve maximises placed jobs before minimising leader
-length; stable candidate order is the final tie-break. A deterministic pass-size,
-pair-probe, or search-state cap falls back to (or retains a result no worse than)
-the old first-clear greedy incumbent. This is deliberately *within one pass*: the
-passes still run in canonical post-drain stage order until #1166 supplies the
-cross-pass population.
+length; stable candidate order is the final tie-break. A deterministic
+alternative-count, pass-size, pair-probe, or search-state cap falls back to (or
+retains a result no worse than) the old first-clear greedy incumbent. This is
+deliberately *within one pass*: the passes still run in canonical post-drain stage
+order until #1166 supplies the cross-pass population.
 
 **Policy B** (two-precedent pattern, ratified 2026-07-02 — 0009 Amendment 2):
 when avoiding an occupant would cost more than a bounded relocation, keep the

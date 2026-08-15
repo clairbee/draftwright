@@ -7,8 +7,9 @@
 - Machined-feature leader callouts now collect all clear alternatives within each
   post-drain pass and use a bounded maximum-cardinality, minimum-leader-length
   assignment instead of taking corners greedily in feature order (#740). If a
-  deterministic pass-size, candidate-pair, or search budget is reached, placement
-  retains the legacy greedy result rather than losing additional callouts;
+  deterministic alternative-count, pass-size, candidate-pair, or search budget is
+  reached, placement retains the legacy greedy result rather than losing
+  additional callouts;
   pre-existing physical constraints such as bolt-hole-clear diameter rays remain
   hard eligibility.
 
