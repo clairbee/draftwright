@@ -1368,25 +1368,15 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
                         rim=dia / 2 * a.SCALE,
                     )
                 ]
-                ranked_candidates = sorted(
-                    (
-                        (_leader_hole_clearance(candidate, hole_circles), candidate)
-                        for candidate in candidates
-                    ),
-                    key=lambda item: item[0],
+                # This pre-drain consumer deliberately retains the exact #890
+                # greedy semantics: try hole-clear rays first, but preserve the
+                # obstructed Policy-B tail in case every clear ray is blocked by
+                # fixed annotation/page occupancy. Joint filtering here would
+                # change the diameter coverage seen by later semantic passes.
+                candidates.sort(
+                    key=lambda candidate: _leader_hole_clearance(candidate, hole_circles),
                     reverse=True,
                 )
-                # #740 minimises length across the alternatives it receives. The
-                # pre-existing #890 order encoded a harder physical rule: when a
-                # ray clear of every projected hole exists, a shorter ray through
-                # a hole is not an eligible alternative. Keep the old best-effort
-                # ranking only when every ray is obstructed (Policy B).
-                clear_candidates = [
-                    candidate for clearance, candidate in ranked_candidates if clearance > 0
-                ]
-                candidates = clear_candidates or [
-                    candidate for _clearance, candidate in ranked_candidates
-                ]
                 label = f"ø{_fmt(dia)}{_tol_suffix(dtol, dwg.draft)}"
                 if thr:
                     label += f" {thr}"

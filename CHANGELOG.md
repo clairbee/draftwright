@@ -8,10 +8,9 @@
   post-drain pass and use a bounded maximum-cardinality, minimum-leader-length
   assignment instead of taking corners greedily in feature order (#740). If a
   deterministic alternative-count, pass-size, candidate-pair, or search budget is
-  reached, placement retains the legacy greedy result rather than losing
-  additional callouts;
-  pre-existing physical constraints such as bolt-hole-clear diameter rays remain
-  hard eligibility.
+  reached, placement retains the legacy greedy result or a result no worse than it
+  rather than losing additional callouts. Pre-drain diameter clearance ranking and
+  its Policy-B fallback remain unchanged.
 
 ## v0.4.6 — 2026-08-15
 

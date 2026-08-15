@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from build123d import Box, Cylinder
+from build123d import Align, Axis, Box, Cylinder, Pos
 from build123d_drafting.helpers import Draft, Leader
 
 from draftwright import ScaleCompletenessWarning, Sheet, build_drawing
@@ -79,6 +79,68 @@ def test_pre_drain_pattern_keeps_legacy_greedy_semantics(monkeypatch):
 
     assert [name for name in drawing.annotations() if name.startswith("m_pocketpat")]
     assert [name for name in drawing.annotations() if name.startswith("dim_pocketpat_pitch")]
+
+
+def test_pre_drain_y_diameter_keeps_the_policy_b_fallback_tail(monkeypatch):
+    """A clear ray blocked by fixed ink must not erase later obstructed fallbacks.
+
+    #890 ranks projected-hole-clear rays first, but its pre-drain greedy pass keeps the
+    obstructed Policy-B tail. Filtering that tail for #740's joint tier made this real
+    diameter disappear before it could populate structured/downstream coverage.
+    """
+    locations = ((18, 0), (-18, 0), (0, 18), (0, -18))
+    part = Cylinder(21, 4)
+    for x, y in locations:
+        part += Pos(x, y, 2) * Box(
+            10,
+            10,
+            4,
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+    part += Pos(0, 0, 2) * Cylinder(15.5, 12)
+    part += Pos(0, 0, 10) * Cylinder(12.5, 12)
+    part -= Cylinder(8, 30)
+    for x, y in locations:
+        part -= Pos(x, y, 0) * Cylinder(2, 10)
+    part = part.rotate(Axis.X, 90)
+
+    def is_diagonal(tip, elbow):
+        return (
+            abs(float(elbow[0]) - float(tip[0])) > 1e-6
+            and abs(float(elbow[1]) - float(tip[1])) > 1e-6
+        )
+
+    def controlled_clearance(candidate, _circles):
+        return 1.0 if is_diagonal(candidate[0], candidate[1]) else -1.0
+
+    def clear_ray_is_occupied(leader, obstacles, silhouette, page, *, geom_clear=False):
+        if str(leader.label) == "ø25":
+            # Model fixed inventory that blocks every preferred clear ray while one
+            # hole-obstructed Policy-B ray remains usable.
+            return not is_diagonal(leader.tip, leader.elbow)
+        return True
+
+    monkeypatch.setattr(
+        "draftwright.annotations.from_model._leader_hole_clearance",
+        controlled_clearance,
+    )
+    monkeypatch.setattr(
+        "draftwright.annotations.from_model._label_lands_clear",
+        clear_ray_is_occupied,
+    )
+
+    drawing = build_drawing(part, page="A4", scale=1.0, scale_policy="permissive")
+
+    diameter = drawing.get_annotation("m_dia_y0")
+    assert diameter.label == "ø25"
+    assert not is_diagonal(diameter.tip, diameter.elbow)
+    assert diameter.covers_diameters == (25.0,)
+    assert drawing.measurement_keys("m_dia_y0")
+    assert not [
+        issue
+        for issue in drawing.lint()
+        if issue.code == "diameter_dropped" and "ø25" in issue.message
+    ]
 
 
 def test_pure_assignment_maximises_cardinality_before_leader_length():

@@ -19,8 +19,9 @@ solves for maximum placed jobs, then minimum total leader length. Feature-specif
 physical rules remain hard eligibility at the annotation boundary. Alternative
 collection, candidate-pair construction, and the exact search have deterministic
 work budgets; an alternative-count, pass-size, candidate-pair, or search-state
-limit retains the former greedy result, so the amendment cannot place fewer
-callouts under resource pressure. Pre-drain diameter and grouped pocket/slot
+limit falls back to, or retains a result no worse than, the former greedy result,
+so the amendment cannot place fewer callouts under resource pressure. Pre-drain
+diameter and grouped pocket/slot
 pattern consumers of the shared placement helper retain their legacy greedy
 selection because their winners affect later semantic passes. Cross-pass leader
 unification remains separate work (#1166).
