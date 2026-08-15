@@ -264,7 +264,8 @@ down it knows only numbers.
   rest), not a custom-script rebuild.
 - Honest edges that remain: placement is per-view (cross-view contention rests
   on ADR 0004); AABB occupancy is deliberately conservative for diagonal
-  leaders (the precise `_geometry._segment_crosses_box` test covers leader
-  shafts); and a perpendicular-axis conflict — a witness line crossing a
-  fixed-height label — is outside the 1-D tier solve's reach, handled by the
-  post-drain `reconcile_witness_labels` shift (#690).
+  leaders (the geometry-only `_geometry._leader_ink_crosses_box` test covers
+  the rendered shaft width and tip-local arrowhead flare without claiming the
+  diagonal AABB's empty triangle, #367); and a perpendicular-axis conflict — a
+  witness line crossing a fixed-height label — is outside the 1-D tier solve's
+  reach, handled by the post-drain `reconcile_witness_labels` shift (#690).

@@ -56,6 +56,11 @@ _ALLOW: frozenset[tuple[str, str]] = frozenset(
         ("from_model", "_diameter_step_anchor"),
         ("from_model", "_renderable_pmi_records"),
         ("holes", "_legible_locations"),
+        # _leader_hits (#367) composes the pure rendered-ink primitive with the real
+        # Leader label footprint. Its sub-millimetre arrow/shaft counterexamples cannot
+        # be prescribed independently through the public strip solve, so direct coverage
+        # is warranted here and mutation-proves the annotation-side integration.
+        ("holes", "_leader_hits"),
         # Pass-level helpers exercised directly (candidates to retarget onto the ctx seam later).
         ("from_model", "_draw_step_chain"),
         # _reroute_crossing_diameters (#798): its pin-skip and restore-on-failure guards
