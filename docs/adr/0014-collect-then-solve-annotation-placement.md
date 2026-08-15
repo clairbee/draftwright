@@ -11,18 +11,19 @@
 - **Deciders:** Paul Fremantle (pzfreo)
 
 **Amendment 1 (2026-08-15, #740) — post-drain leader callouts assign jointly
-within each pass.** The best-effort machined-feature passes keep their post-drain
-stage boundary, but no longer commit the first clear alternative in job order.
-Each pass measures all fixed-obstacle-clear candidates, lowers only numeric leader
-costs and pairwise conflicts into `layout.py`, and solves for maximum placed jobs,
-then minimum total leader length. Feature-specific physical rules remain hard
-eligibility at the annotation boundary (for example, a Y-diameter ray through a
-projected bolt hole is excluded whenever a clear ray exists). Alternative
+within each pass.** The best-effort chamfer, fillet, flat, pocket, and groove
+passes keep their post-drain stage boundary, but no longer commit the first clear
+alternative in job order. Each pass measures all fixed-obstacle-clear candidates,
+lowers only numeric leader costs and pairwise conflicts into `layout.py`, and
+solves for maximum placed jobs, then minimum total leader length. Feature-specific
+physical rules remain hard eligibility at the annotation boundary. Alternative
 collection, candidate-pair construction, and the exact search have deterministic
 work budgets; an alternative-count, pass-size, candidate-pair, or search-state
 limit retains the former greedy result, so the amendment cannot place fewer
-callouts under resource pressure. Cross-pass leader unification remains separate
-work (#1166).
+callouts under resource pressure. Pre-drain diameter and grouped pocket/slot
+pattern consumers of the shared placement helper retain their legacy greedy
+selection because their winners affect later semantic passes. Cross-pass leader
+unification remains separate work (#1166).
 
 ## Context (short — the full story is 0009's)
 

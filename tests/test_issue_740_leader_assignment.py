@@ -1,19 +1,84 @@
 """#740 — bounded collect-then-assign for machined-feature leader callouts."""
 
+import ast
 import json
 import random
 from itertools import combinations, product
 from math import hypot
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from build123d import Cylinder
+from build123d import Box, Cylinder
 from build123d_drafting.helpers import Draft, Leader
 
-from draftwright import ScaleCompletenessWarning, build_drawing
+from draftwright import ScaleCompletenessWarning, Sheet, build_drawing
 from draftwright.annotations._common import _box_hits, annotation_obstacle_boxes
 from draftwright.layout import _assign_leader_candidates
-from draftwright.model import FilletFeature, Frame, GrooveFeature, PartModel
+from draftwright.model import FilletFeature, Frame, GrooveFeature, PartModel, pocket
+
+
+def test_joint_assignment_is_scoped_to_the_five_post_drain_adapters():
+    root = Path(__file__).parents[1] / "src" / "draftwright" / "annotations"
+
+    def call_sites(filename):
+        tree = ast.parse((root / filename).read_text(encoding="utf-8"), filename=filename)
+        sites = set()
+        for function in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+            for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+                if not isinstance(call.func, ast.Name) or call.func.id != "_leader_callout_pass":
+                    continue
+                keyword = next((kw.value for kw in call.keywords if kw.arg == "joint"), None)
+                sites.add(
+                    (
+                        filename,
+                        function.name,
+                        isinstance(keyword, ast.Constant) and keyword.value is True,
+                    )
+                )
+        return sites
+
+    assert call_sites("from_model.py") | call_sites("holes.py") == {
+        ("from_model.py", "render_diameters", False),
+        ("from_model.py", "render_chamfers", True),
+        ("from_model.py", "render_fillets", True),
+        ("from_model.py", "render_flats", True),
+        ("from_model.py", "render_pockets", True),
+        ("from_model.py", "render_grooves", True),
+        ("from_model.py", "render_boss_diameters", False),
+        ("from_model.py", "_render_polygonal_prisms", False),
+        ("holes.py", "render_pocket_patterns", False),
+        ("holes.py", "render_slot_patterns", False),
+    }
+
+
+def test_pre_drain_pattern_keeps_legacy_greedy_semantics(monkeypatch):
+    def forbidden_joint_solve(*_args, **_kwargs):
+        raise AssertionError("a pre-drain pattern must not enter #740's joint solver")
+
+    monkeypatch.setattr(
+        "draftwright.annotations.from_model._assign_leader_candidates",
+        forbidden_joint_solve,
+    )
+    member = pocket(
+        width=8.0,
+        length=12.0,
+        depth=4.0,
+        long_axis="x",
+        width_axis="y",
+        depth_axis="z",
+        lo=-6.0,
+        hi=6.0,
+        w_center=0.0,
+        at=(0.0, 0.0, 4.0),
+    )
+    sheet = Sheet(Box(80, 60, 12)).auto_dimensions()
+    sheet.pocket_pattern(member, kind="linear", count=3, pitch=20.0, direction=(1, 0, 0))
+
+    drawing = sheet.build()
+
+    assert [name for name in drawing.annotations() if name.startswith("m_pocketpat")]
+    assert [name for name in drawing.annotations() if name.startswith("dim_pocketpat_pitch")]
 
 
 def test_pure_assignment_maximises_cardinality_before_leader_length():

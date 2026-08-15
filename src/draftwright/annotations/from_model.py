@@ -1674,20 +1674,32 @@ def _leader_candidate_check_box(leader, *, geom_clear):
     return geom if geom_clear else label
 
 
-def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False) -> int:
-    """Jointly place one machined-feature leader callout per job (#637/#740). A *job* is
+def _leader_callout_pass(
+    dwg,
+    a,
+    jobs,
+    *,
+    noun,
+    drop_code,
+    ctx,
+    geom_clear=False,
+    joint=False,
+) -> int:
+    """Place one machined-feature leader callout per job (#637/#740). A *job* is
     ``(name, view, vb, label, candidates, measurement)`` where *candidates* yields ``(tip,
     elbow, feature)`` lead positions to try in order and *measurement* is the tuple of
     `DimensionId`s the callout's label draws — several, because these callouts are compound:
     a pocket prints width × length × depth, a groove width × ⌀ (#1002 r3, which found the
     whole machined-feature group recording nothing at all).
-    Candidate geometry is collected before anything is emitted. Fixed-obstacle eligibility
-    and pairwise conflicts use the same rendered occupancy as the old first-clear loop; the
-    geometry-only layout solver then maximises placed jobs, minimises total leader length,
-    and uses candidate order as the deterministic final tie-break. Alternative construction,
-    pass size, pair construction, and the exact search are bounded. If any budget is reached,
-    the legacy greedy result is retained, so resource pressure can never place fewer callouts
-    than before #740.
+    The five scoped post-drain adapters pass ``joint=True``. Their candidate geometry is
+    collected before anything is emitted. Fixed-obstacle eligibility and pairwise conflicts
+    use the same rendered occupancy as the old first-clear loop; the geometry-only layout
+    solver then maximises placed jobs, minimises total leader length, and uses candidate order
+    as the deterministic final tie-break. Alternative construction, pass size, pair
+    construction, and the exact search are bounded. If any budget is reached, the legacy
+    greedy result is retained, so resource pressure can never place fewer callouts than before
+    #740. Pre-drain diameter/pattern consumers leave ``joint=False`` because their winners
+    affect later semantic passes; #740 deliberately does not change that stage boundary.
 
     A selected Leader is attributed to that candidate's feature; every unselected job records
     ``<noun> callout … not placed`` as ``<drop_code>`` lint (never a silent drop). Returns the
@@ -1801,6 +1813,9 @@ def _leader_callout_pass(dwg, a, jobs, *, noun, drop_code, ctx, geom_clear=False
                 )
                 trace_item(name, view, label, tried, len(obstacles))
         return placed_count
+
+    if not joint:
+        return greedy("greedy_legacy_scope")
 
     # Apply the pure solver's recursion bound before constructing any OCC
     # candidate geometry. The fallback creates at most the alternatives the old
@@ -1979,7 +1994,15 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
                 (pd.id,),
             )
         )
-    return _leader_callout_pass(dwg, a, jobs, noun="chamfer", drop_code="chamfer_dropped", ctx=ctx)
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="chamfer",
+        drop_code="chamfer_dropped",
+        ctx=ctx,
+        joint=True,
+    )
 
 
 def _fillet_label(radius_text, count) -> str:
@@ -2063,7 +2086,15 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                 tuple(pd.id for _, pd in members),
             )
         )
-    return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="fillet",
+        drop_code="fillet_dropped",
+        ctx=ctx,
+        joint=True,
+    )
 
 
 def _flat_label(across_text, sfx="") -> str:
@@ -2161,7 +2192,15 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
                 tuple(pd.id for _, pd in ordered),  # the grouped callout draws every member
             )
         )
-    return _leader_callout_pass(dwg, a, jobs, noun="flat", drop_code="flat_dropped", ctx=ctx)
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="flat",
+        drop_code="flat_dropped",
+        ctx=ctx,
+        joint=True,
+    )
 
 
 def _groove_label(width_text, diameter_text, wsfx="", dsfx="") -> str:
@@ -2378,7 +2417,15 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
                 (wpd.id, lpd.id, dpd.id),  # width × length × depth, one callout (#1002)
             )
         )
-    return _leader_callout_pass(dwg, a, jobs, noun="pocket", drop_code="pocket_dropped", ctx=ctx)
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="pocket",
+        drop_code="pocket_dropped",
+        ctx=ctx,
+        joint=True,
+    )
 
 
 def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
@@ -2435,7 +2482,15 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
                 (wpd.id, dpd.id),  # one callout, two measurements (#1002)
             )
         )
-    return _leader_callout_pass(dwg, a, jobs, noun="groove", drop_code="groove_dropped", ctx=ctx)
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="groove",
+        drop_code="groove_dropped",
+        ctx=ctx,
+        joint=True,
+    )
 
 
 def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
