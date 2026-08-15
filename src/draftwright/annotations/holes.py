@@ -49,10 +49,12 @@ from draftwright.annotations._common import (
     carve_free_position,
     carve_free_segments,
     clear_label_of_centerlines,
+    corridor_blockers,
     dim_footprint,
     leader_footprint,
     place_strip_candidates,
     register_corridor,
+    strip_free_span,
     strip_obstacles,
 )
 from draftwright.annotations.from_model import (
@@ -967,6 +969,42 @@ def _locate_along_z(dwg, ctx, a: Analysis, off):
         strip, view, p_lo, p_hi, edge = primary
         primary_cand = _zc(view, p_lo, p_hi, edge)
 
+        # Choose the alternate BEFORE the shared corridor solve when the natural
+        # witness corridor is already known to cross a placed leader. A post-drain
+        # relocation cannot join the alternate view's existing ladder, so it used to
+        # land outside the overall height and cross its witness line. The inner-tier
+        # footprint is decisive: moving a right-side dimension farther out only grows
+        # the corridor back to the view and therefore cannot clear an existing blocker.
+        if strip is not None and alternates:
+            _lo, _hi, inner = strip_free_span(strip)
+            blocked = _box_hits(_geom_box(primary_cand[1](inner)), corridor_blockers(dwg, view))
+            if blocked:
+                alt_strip, alt_view, alt_p_lo, alt_p_hi, alt_edge = alternates[0]
+                alt_cand = _zc(alt_view, alt_p_lo, alt_p_hi, alt_edge)
+                alt_blocked = alt_strip is None
+                if alt_strip is not None:
+                    _alo, _ahi, alt_inner = strip_free_span(alt_strip)
+                    alt_blocked = _box_hits(
+                        _geom_box(alt_cand[1](alt_inner)),
+                        corridor_blockers(dwg, alt_view),
+                    )
+                    # Do not pre-route into a corridor that cannot hold its existing
+                    # shared ladder plus this candidate. In that case the historical
+                    # alternate/force path remains the honest policy-B fallback.
+                    existing = len(
+                        ctx.corridor_batch.get((alt_view, "right"), {}).get("cands", ())
+                    )
+                    pad = tier + alt_strip.spacing
+                    usable = max(0.0, _ahi - _alo - tier)
+                    capacity = int(usable / pad) + 1
+                    alt_blocked = alt_blocked or capacity < existing + 1
+                if not alt_blocked:
+                    original = primary
+                    primary = alternates[0]
+                    alternates = [original, *alternates[1:]]
+                    strip, view, p_lo, p_hi, edge = primary
+                    primary_cand = alt_cand
+
         def _fallback(
             _nm,
             _primary=primary,
@@ -974,10 +1012,14 @@ def _locate_along_z(dwg, ctx, a: Analysis, off):
             _cand=primary_cand,
             _feature_map=_zf,
             _measurement_map=_zm,
+            _candidate_factory=_zc,
             _zo=zo,
         ):
             for alt_strip, alt_view, alt_p_lo, alt_p_hi, alt_edge in _alts:
-                alt = _zc(alt_view, alt_p_lo, alt_p_hi, alt_edge)
+                # Capture this loop member's factory. Referring to `_zc` directly
+                # late-bound every callback to the final height, so two dropped hole
+                # heights retried the last one twice and silently lost the first.
+                alt = _candidate_factory(alt_view, alt_p_lo, alt_p_hi, alt_edge)
                 if not _off_axis_emit(
                     dwg,
                     tier,

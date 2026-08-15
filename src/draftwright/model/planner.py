@@ -552,13 +552,17 @@ def plan_locations(model: PartModel) -> list[PlannedDimension]:
                 # diagnostic to say why (Codex #996 r2).
                 dropped.append((f, role, "edge-anchored; the edge conveys the position"))
                 continue
-            # A recognised pocket frame may be anchored at an opening corner;
-            # location furniture defines the in-plane centre, which is expressed
-            # explicitly by lo/hi and w_center for every principal orientation.
-            centre = list(f.frame.origin)
-            centre["xyz".index(f.long_axis)] = (f.lo + f.hi) / 2
-            centre["xyz".index(f.width_axis)] = f.w_center
-            ref = (centre[0], centre[1], centre[2])
+            # An ordinary pocket keeps its established in-plane centre location. When
+            # its long end already starts on the lower datum, however, that edge plus
+            # the length callout fully defines the long position: printing half the
+            # length as a datum-to-centre offset is redundant and opaque (a datum-starting
+            # 62.1 mm pocket otherwise acquires a seemingly arbitrary 31.1 mm mark).
+            ref_point = list(f.frame.origin)
+            long_index = "xyz".index(f.long_axis)
+            datum_coord = (dx, dy, dz)[long_index]
+            ref_point[long_index] = f.lo if abs(f.lo - datum_coord) <= 1e-6 else (f.lo + f.hi) / 2
+            ref_point["xyz".index(f.width_axis)] = f.w_center
+            ref = (ref_point[0], ref_point[1], ref_point[2])
             refs.append((ref, role, f))
         else:
             refs.append((f.frame.origin, role, f))

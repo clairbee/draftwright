@@ -963,17 +963,40 @@ def lint_prismatic_coverage(
                 unlocated += 1
             continue
         ps = pairs(view)
+        # A datum-starting pocket needs no redundant long-axis centre dimension: the
+        # coincident edge plus the length callout defines it. Ordinary inset pockets
+        # retain their established centre-location scheme. Keep critique on the same
+        # conditional target as the compiler.
+        target_world = {"x": x, "y": y, "z": z}
+        long_datum = float(getattr(bb.min, pocket.long_axis.upper()))
+        if abs(pocket.lo - long_datum) <= tol:
+            target_world[pocket.long_axis] = pocket.lo
         # Projection axes by principal view: plan=(x,y), front=(x,z), side=(y,z).
         coordinates = {
-            "plan": ((x, centre.X, bb.min.X), (y, centre.Y, bb.min.Y)),
-            "front": ((x, centre.X, bb.min.X), (z, centre.Z, bb.min.Z)),
-            "side": ((y, centre.Y, bb.min.Y), (z, centre.Z, bb.min.Z)),
+            "plan": (
+                (target_world["x"], centre.X, bb.min.X),
+                (target_world["y"], centre.Y, bb.min.Y),
+            ),
+            "front": (
+                (target_world["x"], centre.X, bb.min.X),
+                (target_world["z"], centre.Z, bb.min.Z),
+            ),
+            "side": (
+                (target_world["y"], centre.Y, bb.min.Y),
+                (target_world["z"], centre.Z, bb.min.Z),
+            ),
         }[view]
         datum_page = dwg.at(view, bb.min.X, bb.min.Y, bb.min.Z)
-        target_page = dwg.at(view, x, y, z)
+        target_page = dwg.at(
+            view,
+            target_world["x"],
+            target_world["y"],
+            target_world["z"],
+        )
         covered = []
-        for axis, (coord, mid, _datum) in enumerate(coordinates):
+        for axis, (coord, mid, datum) in enumerate(coordinates):
             symmetric = abs(coord - mid) <= 1.0
+            datum_coincident = abs(coord - datum) <= tol
             witnessed = _pair_covers(
                 ps,
                 axis,
@@ -981,7 +1004,7 @@ def lint_prismatic_coverage(
                 target_page[axis],
                 tol,
             )
-            covered.append(symmetric or witnessed)
+            covered.append(symmetric or datum_coincident or witnessed)
         if not all(covered):
             unlocated += 1
     if unlocated:

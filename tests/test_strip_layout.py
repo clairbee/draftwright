@@ -1002,6 +1002,58 @@ def test_side_hole_z_dim_is_kept_not_dropped_under_policy_b():
     assert any(n.startswith("dim_loc_") and "_z" in n for n in names), "Z location dim was dropped"
 
 
+def test_two_cross_hole_heights_join_overall_ladder_without_crossing():
+    """The GRM-01 class: two X bores plus a long side pocket and equal-R end rounds.
+
+    Side-view callout leaders block the natural height corridor. Both heights must route
+    into the front corridor before its one shared solve, otherwise the first height can
+    vanish and a late retry lands outside/crosses the 80 mm overall witness line.
+    """
+    from dataclasses import replace
+
+    from build123d import Align, Rot
+
+    from draftwright.model import fillet
+
+    part = Box(13.55, 11, 80, align=(Align.MIN, Align.CENTER, Align.MIN))
+    part -= Pos(12.61, -1, 0) * Box(
+        0.94,
+        2,
+        62.13,
+        align=(Align.MIN, Align.MIN, Align.MIN),
+    )
+    for z, radius in ((66, 4), (75.5, 1.25)):
+        part -= (
+            Pos(0, 0, z)
+            * Rot(0, 90, 0)
+            * Cylinder(
+                radius,
+                13.55,
+                align=(Align.CENTER, Align.CENTER, Align.MIN),
+            )
+        )
+    detected = build_drawing(part, auto_dims=False).model()
+    rounded = [
+        fillet(axis="x", radius=1, at=(0, -5.5, 0)),
+        fillet(axis="x", radius=1, at=(13.55, -5.5, 0)),
+        fillet(axis="y", radius=1, at=(0, -5.5, 0)),
+        fillet(axis="z", radius=1, at=(0, -5.5, 0)),
+        fillet(axis="z", radius=1, at=(13.55, 5.5, 0)),
+    ]
+    drawing = build_drawing(
+        part,
+        model=replace(detected, features=[*detected.features, *rounded]),
+        page="A4",
+    )
+
+    names = ("dim_loc_front_z6600", "dim_loc_front_z7550", "dim_height")
+    assert [drawing.get_annotation(name).label for name in names] == ["66", "75.5", "80"]
+    # Inner-to-outer line order: both feature locations inside the overall dimension.
+    xmax = [drawing.get_annotation(name).bounding_box().max.X for name in names]
+    assert xmax[0] < xmax[1] < xmax[2]
+    assert drawing.lint() == []
+
+
 # --- unified above-corridor solve (ADR 0009 end state, #345/#346) -----------
 
 
