@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.5 — 2026-08-15
+
+**A focused technical-drawing correctness patch.** Cross-drilled hole locations now remain
+complete and ordered, datum-starting pocket annotations avoid redundant dimensions, and repeated
+equal-radius fillets collapse into one manufacturing callout.
+
 ### Fixed
 
 - Side-drilled hole heights that relocate around callout leaders now join the alternate
