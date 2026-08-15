@@ -323,6 +323,58 @@ def test_grouped_job_at_candidate_budget_still_uses_joint_assignment(monkeypatch
     assert event["optimal"] is True
 
 
+def test_candidate_budget_is_global_across_jobs(monkeypatch, tmp_path):
+    part, model = _crowded_declared_grooves()
+    monkeypatch.setattr("draftwright.annotations.from_model._LEADER_ASSIGN_MAX_CANDIDATES", 16)
+    trace_path = tmp_path / "global-candidate-budget.json"
+
+    drawing = build_drawing(
+        part,
+        model=model,
+        page="A4",
+        scale=1,
+        scale_policy="permissive",
+        trace=trace_path,
+    )
+
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    event = next(item for item in trace["pass_events"] if item["label"] == "groove_callouts")
+
+    assert event["assignment"] == "greedy_candidate_budget"
+    assert event["optimal"] is False
+    assert [item["candidates_tried"] for item in event["items"]] == [1, 4, 1]
+    assert len([name for name in drawing.annotations() if name.startswith("m_groove")]) == 3
+
+
+def test_candidate_budget_fallback_restores_consumed_prefix_and_lazy_tail(monkeypatch, tmp_path):
+    shaft = Cylinder(10, 20)
+    fillets = [
+        FilletFeature(Frame(origin, "z"), "z", 1.0)
+        for origin in ((-1000.0, 0.0, 10.0), (-900.0, 0.0, 10.0), (10.0, 0.0, 10.0))
+    ]
+    monkeypatch.setattr("draftwright.annotations.from_model._LEADER_ASSIGN_MAX_CANDIDATES", 2)
+    trace_path = tmp_path / "candidate-budget-tail.json"
+
+    drawing = build_drawing(
+        shaft,
+        model=PartModel(shaft.bounding_box(), "z", fillets),
+        page="A4",
+        scale=1,
+        scale_policy="permissive",
+        trace=trace_path,
+    )
+
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    event = next(item for item in trace["pass_events"] if item["label"] == "fillet_callouts")
+    (item,) = event["items"]
+
+    assert event["assignment"] == "greedy_candidate_budget"
+    assert item["candidates_tried"] == 3
+    assert item["candidate"] == 2  # the untouched generator tail, after two invalid members
+    assert drawing.get_annotation("m_fillet_z0").label == "3× R1"
+    assert len(drawing.measurement_keys("m_fillet_z0")) == 3
+
+
 def test_trace_identifies_a_joint_conflict_between_fixed_clear_candidates(tmp_path):
     shaft = Cylinder(10, 60)
     grooves = [
