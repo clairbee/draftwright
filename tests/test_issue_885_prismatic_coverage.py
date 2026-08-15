@@ -110,6 +110,26 @@ def test_side_opening_pocket_gets_two_in_plane_location_dimensions():
     assert "pocket_not_located" not in drawing.lint_summary()["by_code"]
 
 
+def test_datum_starting_side_pocket_does_not_print_half_its_length_as_a_position():
+    minimum = (Align.MIN, Align.CENTER, Align.MIN)
+    part = Box(13.55, 11, 80, align=minimum)
+    part -= Pos(12.61, -1, 0) * Box(
+        0.94,
+        2,
+        62.13,
+        align=(Align.MIN, Align.MIN, Align.MIN),
+    )
+    drawing = build_drawing(part)
+    labels = {
+        drawing.get_annotation(name).label
+        for name in drawing.annotations()
+        if name.startswith("m_pocket")
+    }
+    assert "31.1" not in labels
+    assert "2 × 62.1 × 0.9 DEEP" in labels
+    assert "pocket_not_located" not in drawing.lint_summary()["by_code"]
+
+
 def test_unrelated_dimension_endpoint_does_not_locate_side_pocket():
     part = Box(60, 50, 40) - Pos(20, 8, 5) * Box(20, 16, 18)
     drawing = build_drawing(part)

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Side-drilled hole heights that relocate around callout leaders now join the alternate
+  view's shared dimension ladder before placement, preserving every height and keeping
+  feature locations inside the overall dimension. Datum-starting open pockets no longer
+  print a redundant half-length centre offset, and equal-radius fillets across different
+  edge axes collapse into one counted ``n× R`` callout.
+
 ## v0.4.4 — 2026-08-15
 
 **A semantic-completeness and fail-closed layout patch release.** Hole requirements and drawing

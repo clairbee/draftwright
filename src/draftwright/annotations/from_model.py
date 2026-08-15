@@ -1759,16 +1759,16 @@ def _fillet_label(radius_text, count) -> str:
 
 def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
     """Fillet radius callouts (#561): a leader from an external edge fillet to its
-    ``R{radius}`` label — the arc analog of :func:`render_chamfers`. Equal-radius fillets on
-    the same edge axis share ONE ``n× R`` callout (#561 acceptance), placed in the view
-    normal to the rounded edge, led diagonally out of the corner into clear margin, and
+    ``R{radius}`` label — the arc analog of :func:`render_chamfers`. Equal-radius fillets
+    share ONE ``n× R`` callout (#561 acceptance), placed in the view normal to a
+    representative rounded edge, led diagonally out of the corner into clear margin, and
     dropped (lint, not silently) if it would overprint placed geometry. Returns the count.
 
     Planner-fed (#725 / #698): the radius VALUE + its tolerance come from the planner's
     ``DimParameter`` (as in ``render_chamfers``), bound explicitly by ``(role, kind)``,
     never positionally — formatting ``fl.radius`` directly dropped an authored tolerance
     (the #629 class). The equal-radius ``n× R`` COLLAPSE stays render-side (grouping by
-    ``(axis, value)`` here, as before) — planner-side grouping is a structural change,
+    radius here) — planner-side grouping is a structural change,
     explicitly out of scope for this migration (#698). Where grouped members' authored
     tolerances differ, the first (member-order) authored one wins — the documented
     ``render_diameters`` shared-ø precedent. ``g.view`` is safe: a FilletFeature's frame
@@ -1785,9 +1785,9 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
         )
         if pd is None:
             continue
-        collapse.setdefault((g.facts.axis, round(pd.value, 3)), []).append((g, pd))
+        collapse.setdefault(round(pd.value, 3), []).append((g, pd))
     jobs = []
-    for gi, ((axis, _radius), members) in enumerate(sorted(collapse.items())):
+    for gi, (_radius, members) in enumerate(sorted(collapse.items())):
         if only is not None:
             # #426 Ph2b subset (finalize): filter members AFTER the collapse is enumerated so
             # gi stays the full-drawing group index — a survivor keeps its m_fillet name even
@@ -1795,10 +1795,15 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
             members = [gp for gp in members if gp[0].ref in only]
             if not members:
                 continue
-        # One grouped ``n× R`` callout, but its leader may anchor at ANY of the equal fillets
-        # — _corner_candidates tries each corner (nearest-clear first) so the group is not
-        # dropped just because its first corner leads into an occupied region.
-        ordered = sorted(members, key=lambda gp: gp[0].facts.frame.origin)
+        # Point the leader at one coherent visible set. Members on other edge axes still
+        # contribute to the printed count and semantic measurements, but mixing their 3-D
+        # origins into this view could point at unrelated projected corners. Prefer the
+        # axis with the most members; ties are deterministic.
+        by_axis: dict[str, list] = {}
+        for gp in members:
+            by_axis.setdefault(gp[0].facts.axis, []).append(gp)
+        axis, visible = min(by_axis.items(), key=lambda item: (-len(item[1]), item[0]))
+        ordered = sorted(visible, key=lambda gp: gp[0].facts.frame.origin)
         view = ordered[0][0].view
         vb = dwg.view_bounds(view)
         if vb is None:
@@ -1812,7 +1817,7 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                 f"m_fillet_{axis}{gi}",
                 view,
                 vb,
-                _fillet_label(members[0][1].value_text, len(ordered)) + _tol_suffix(tol, draft),
+                _fillet_label(members[0][1].value_text, len(members)) + _tol_suffix(tol, draft),
                 _corner_candidates(
                     dwg,
                     view,
@@ -1823,7 +1828,7 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
                 ),
                 # One `n× R` callout stands for EVERY collapsed member, so it draws all of
                 # their radii — the tuple storage exists for exactly this (#1002).
-                tuple(pd.id for _, pd in ordered),
+                tuple(pd.id for _, pd in members),
             )
         )
     return _leader_callout_pass(dwg, a, jobs, noun="fillet", drop_code="fillet_dropped", ctx=ctx)

@@ -518,6 +518,22 @@ class TestFillet:
         assert len(names) == 1  # ONE grouped callout, not four
         assert dwg.get_annotation(names[0]).label == "4× R3"
 
+    def test_equal_radii_across_edge_axes_share_one_callout(self):
+        # A rounded end can expose equal-R edges on X, Y and Z. Repeating the same R
+        # note once per projection over-specifies one manufacturing instruction.
+        features = [
+            fillet(axis="x", radius=1, at=(-20, -15, -10)),
+            fillet(axis="x", radius=1, at=(20, -15, -10)),
+            fillet(axis="y", radius=1, at=(-20, -15, -10)),
+            fillet(axis="z", radius=1, at=(-20, -15, -10)),
+            fillet(axis="z", radius=1, at=(20, 15, -10)),
+        ]
+        dwg = build_drawing(Box(40, 30, 20), model=features, number="X")
+        names = [name for name in dwg.annotations() if name.startswith("m_fillet")]
+        assert len(names) == 1
+        assert dwg.get_annotation(names[0]).label == "5× R1"
+        assert len(dwg.measurement_keys(names[0])) == 5
+
     def test_needs_axis_radius_at(self):
         with pytest.raises(ValueError):
             fillet(radius=3)  # no axis / at
