@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+## v0.4.4 — 2026-08-15
+
+**A semantic-completeness and fail-closed layout patch release.** Hole requirements and drawing
+quality are now machine-readable, hole-table replacement is transactional, explicit scales
+preserve required output, notes tables use all viable sheet space, and gear declarations,
+recognition evidence, and callout metadata improve diagnostic trust.
+
+### Added
+
+- **External spur gears can be declared through the `Sheet` façade** (#1086). The declaration
+  records the correlated ISO 1328-1 manufacturing requirements, renders a structured gear-data
+  table, and survives script emission, declaration, export, and lint without inferring gear data
+  that the caller did not supply.
+
+- **Recognition carries serialisable repeating radial-profile evidence** (#1087). Exact
+  rotational whole-wire proof can reconcile a declared gear with its physical profile while
+  preserving ambiguity across separate bodies and without inventing module, pressure angle, or
+  other manufacturing intent.
+
+- **Explicit drawing scales now protect required annotation completeness** (#1146).
+  `build_drawing(...)`, `make_drawing(...)`, `Sheet(...)`, and the CLI accept
+  `scale_policy="fallback"|"strict"|"permissive"`. The safe default retries preferred ISO
+  5455 reductions and returns the largest complete scale; strict mode raises with structured
+  requirement blockers, while permissive mode is an explicit warned opt-in to the historical
+  best-effort result. Every returned `Drawing.scale_decision` reports the requested and
+  effective scales, status, attempted scales, and any semantic placement blockers.
+
+- **Hole and hole-pattern requirements now participate in semantic completeness accounting**
+  (#1143). `lint_summary()["quality"]["completeness"]` reconciles recognition-owned bore,
+  depth/through, grouping, pattern, and location requirements to placed, suppressed, dropped,
+  missing, or explicitly unverifiable outcomes. Ambiguous declared/automatic correspondence
+  fails closed without shrinking the physical denominator. Z-normal hole locations retain ADR
+  0016's feature-level `location.location` addressability while structured physical evidence
+  distinguishes the independently required X and Y ordinates for critique.
+
+- **`lint_summary()` exposes drawing-quality evidence as separate completeness, restraint,
+  and legibility components** (#1127). The legacy `score` remains byte-compatible and is also
+  returned as the honestly named `diagnostic_score`; no composite quality verdict is invented.
+  Completeness scores recognition-owned requirements in the families with semantic outcome
+  ledgers and states that conditional scope explicitly; recognized families not yet scored are
+  listed separately. Its scalar is `audited_score`, not `score`, because a feature recognition
+  missed never became a requirement — so a part with a recogniser gap can reach 1.0, and the
+  qualifier belongs where it survives being quoted. The block also lists what its denominator
+  `excludes` and counts `unrecognised_geometry_reports` (a floor on that gap, not a measure).
+  It is not a completion gate. Legibility includes only layout and placement diagnostics, and
+  scores information-severity ones — "place what fits" drops, a leader crossing a silhouette —
+  against the warning floor, so it cannot read 1.0 while itemising output it calls unreadable.
+  A drop is identified by its `*_dropped` code suffix unless its producer records an explicit
+  `outcome_stage`, so a drop code added later counts without being registered anywhere.
+  Restraint fails closed as unavailable until measurement provenance can classify every
+  annotation.
+
 ### Fixed
 
 - **Generic notes/data tables use every viable free sheet region and explain failed placement**
@@ -33,6 +85,14 @@
   semantic markers, and automatic escalation fails closed rather than overwrite an existing
   annotation that owns a reserved table or balloon name.
 
+- **Generated hole-callout leaders expose their exact rendered semantic text through the public
+  `Leader.label` field** (#1142). Geometry and placement are unchanged, and structured coverage
+  remains authoritative instead of requiring downstream tools to parse display text.
+
+- **Leader placement probes use analytic footprint arithmetic instead of constructing temporary
+  OCCT geometry** (#1138). Representative probe-heavy layouts are substantially faster while
+  preserving custom-style containment and placement behavior.
+
 ### Changed
 
 - **Pairwise lint detail no longer multiplies the legibility score penalty** (#1147). Raw
@@ -42,40 +102,10 @@
   exposing how many raw pair findings were aggregated. The legacy top-level `score` and
   `diagnostic_score` remain unchanged.
 
-### Added
-
-- **Explicit drawing scales now protect required annotation completeness** (#1146).
-  `build_drawing(...)`, `make_drawing(...)`, `Sheet(...)`, and the CLI accept
-  `scale_policy="fallback"|"strict"|"permissive"`. The safe default retries preferred ISO
-  5455 reductions and returns the largest complete scale; strict mode raises with structured
-  requirement blockers, while permissive mode is an explicit warned opt-in to the historical
-  best-effort result. Every returned `Drawing.scale_decision` reports the requested and
-  effective scales, status, attempted scales, and any semantic placement blockers.
-
-- **Hole and hole-pattern requirements now participate in semantic completeness accounting**
-  (#1143). `lint_summary()["quality"]["completeness"]` reconciles recognition-owned bore,
-  depth/through, grouping, pattern, and location requirements to placed, suppressed, dropped,
-  missing, or explicitly unverifiable outcomes. Ambiguous declared/automatic correspondence
-  fails closed without shrinking the physical denominator. Z-normal hole locations retain ADR
-  0016's feature-level `location.location` addressability while structured physical evidence
-  distinguishes the independently required X and Y ordinates for critique.
-
-- **`lint_summary()` exposes drawing-quality evidence as separate completeness, restraint,
-  and legibility components** (#1127). The legacy `score` remains byte-compatible and is also
-  returned as the honestly named `diagnostic_score`; no composite quality verdict is invented.
-  Completeness scores recognition-owned requirements in the families with semantic outcome
-  ledgers and states that conditional scope explicitly; recognized families not yet scored are
-  listed separately. Its scalar is `audited_score`, not `score`, because a feature recognition
-  missed never became a requirement — so a part with a recogniser gap can reach 1.0, and the
-  qualifier belongs where it survives being quoted. The block also lists what its denominator
-  `excludes` and counts `unrecognised_geometry_reports` (a floor on that gap, not a measure).
-  It is not a completion gate. Legibility includes only layout and placement diagnostics, and scores
-  information-severity ones — "place what fits" drops, a leader crossing a silhouette — against
-  the warning floor, so it cannot read 1.0 while itemising output it calls unreadable. A drop is
-  identified by its `*_dropped` code suffix unless its producer records an explicit
-  `outcome_stage`, so a drop code added later counts without being registered anywhere.
-  Restraint fails closed as unavailable until measurement provenance can classify every
-  annotation.
+- **Pull-request validation now reports a stable aggregate `ci-ok` check and runs the supported
+  Python matrix on Linux** (#1134/#1136). Weekly, manual, and labelled workflows retain the
+  cross-platform escape hatch, reducing routine Actions cost without narrowing supported Python
+  coverage.
 
 ## v0.4.3 — 2026-08-09
 
