@@ -46,6 +46,46 @@
   reached, placement retains the legacy greedy result or a result no worse than it
   rather than losing additional callouts. Pre-drain diameter clearance ranking and
   its Policy-B fallback remain unchanged.
+- Compatible automatic/deferred sparse ordinary side/plan hole and post-drain
+  machined-feature callouts now share one bounded same-view leader inventory
+  (#1166). Pattern, profiled-bore, and dense table-eligible hole queues retain
+  their specialised established paths because their winners affect downstream
+  furniture/table semantics or await #798 silhouette-aware routing. The solve
+  preserves required/priority-ranked evidence, rejects new-leader crossings,
+  checks complete leader ink against actual-width fixed dimension/witness,
+  arrow, label, and centre-furniture components (including rendered arrows on
+  shifted dimensions and component-local dashed circular centre furniture);
+  fixed residual faces and the selected survivor both require each tessellation
+  triangle to fit one same analytical component rather than merely the union,
+  plus exact continuous OCC containment for curved faces; residual lowering
+  also retains filled datum/GD&T faces absent from segment metadata; if candidate
+  or selected-survivor construction raises, or a survivor fails validation, the
+  bad alternative fails closed and the canonical lazy producer tail is replayed
+  instead of falsely dropping an otherwise valid callout; an all-invalid tail is
+  reported as validation-stage geometry failure rather than no clear room (so
+  scale fallback does not retry a non-spatial helper defect), while compiler
+  invariant violations such as a missing semantic callout label remain loud;
+  only explicitly marked global turning axes permit an arrow-local leader-tip
+  attachment; near-collinear shaft travel and ownerless section/cutting lines
+  remain fixed ink. The solve prefers
+  clear routes over explicit Policy-B fallbacks, and then minimises real leader
+  length. Provisional sections cannot veto that primary result: one separately
+  bounded refinement may choose an equally complete leader inventory that clears
+  their exact components, after which the final section performs one bounded
+  end-symbol repair and yields if exact ink still conflicts. The selected OCC survivor is validated against the same analytical
+  ink contract. A retained fixed-ink crossing now emits the machine-readable
+  `feature_leader_crossing` info finding instead of appearing lint-clean. Candidate,
+  fixed-component lowering, fixed-obstacle-probe, pair, and exact-search work is
+  bounded; the fixed inventory is lowered once and reused with the producer's
+  legacy lazy result as the floor, including state-cap exhaustion; page,
+  own-silhouette, and title-reservation constraints remain hard in every fallback.
+  A replay that exhausts exact fixed-probe classification is retained visibly as
+  `feature_leader_fixed_ink_unverified` rather than rescanning past the cap, and
+  that uncertainty participates in the legibility quality inventory.
+  Trace output preserves an abandoned fully admitted inventory when state search
+  exhausts, records the producer-floor replay separately, and names exact committed/provisional components,
+  refinement status, and competing blockers; live
+  single-callout edits remain immediate.
 
 ## v0.4.6 — 2026-08-15
 

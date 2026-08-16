@@ -99,6 +99,31 @@ IR, generation, and drawing code must not depend on benchmark expectations or sc
     were deleted as each migrated here.
   - **`annotations/holes.py`** — hole/pattern callouts, balloons, location dims
     (incl. side-drilled #133), pitch/grid dims, slots (the largest *pass*).
+  - **`annotations/leaders.py`** — the one bounded late inventory for compatible
+  automatic/deferred same-view feature leaders (#1166): sparse ordinary
+  side/plan hole jobs and the five post-drain machined-feature families lower
+  exact committed component ink conflicts (including component-local curved
+  centre furniture and rendered shifted-dimension arrows), retaining any
+  rendered residual triangle not covered by one same known component and any
+  curved residual area between tessellation stations, including filled
+  datum/GD&T faces without segment metadata; candidate construction fails closed
+  per alternative, while a selected-survivor construction exception or mismatch
+  replays the canonical lazy producer tail rather than silently reducing
+  cardinality, with validation-stage diagnostics and without swallowing compiler
+  invariant errors; fixed components are lowered once under the same resource
+  discipline and reused; the complete title
+  band stays hard after rendering; only explicitly
+  marked global turning axes exempt only the arrow-local tip attachment (not
+  near-collinear shaft travel),
+  priorities, Policy-B penalties, and numeric costs into `layout.py`; optional
+  sections enter only a separately bounded no-worse refinement, then validate
+  their final ink against landed leaders, repair one end-symbol extent, and yield on conflict,
+  then validate the selected OCC ink and emit it with its original provenance;
+  any retained fixed-ink Policy-B crossing persists as
+  `feature_leader_crossing`, independently of opt-in tracing, while a producer
+  replay beyond the exact fixed-probe budget persists as
+  `feature_leader_fixed_ink_unverified` without exceeding that bound and cannot
+  report a perfect legibility quality score.
   - **`annotations/sections.py`** — section A–A + detail views (ISO 128-44 arrows,
     ISO 128-50 hatching).
   - **`annotations/balloons.py`** — the leadered hole-balloon pass (#111/#516;
@@ -353,10 +378,13 @@ Current ADRs:
   crossing-free) → space, the PAVA L1 solve); post-#636 the guarantee holds for
   every auto-pass occupant, with the `carve_free_position` exemptions pinned
   fail-closed. Includes the strip/zone/corridor glossary and the
-  StripCandidate↔CorridorCandidate layering. Amendment 1 (#740) gives each
-  post-drain machined-feature leader pass its own bounded joint candidate
-  assignment (maximum placed, then minimum leader length), retaining the old
-  greedy result as the resource-cap floor; cross-pass unification remains #1166.
+  StripCandidate↔CorridorCandidate layering. Amendment 1 (#740) introduced
+  bounded within-pass machined-leader assignment; Amendment 2 (#1166) collects
+  compatible sparse ordinary side/plan hole and post-drain machined leaders into
+  one canonical late stage (maximum placed, priority, clear-route penalty, then
+  leader length), retaining the old lazy greedy result as the resource-cap floor
+  without relaxing page/view/title hard constraints and preserving the abandoned
+  admitted inventory in state-cap traces.
 - **0015** — **Accepted** (supersedes 0008, #697): **the part-drawing compiler
   as built** — detectors + declared features → the one PartModel waist (two
   tiers, ADR 0013) → planner → render-intents → shared infra; with the

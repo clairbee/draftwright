@@ -26,6 +26,105 @@ pattern consumers of the shared placement helper retain their legacy greedy
 selection because their winners affect later semantic passes. Cross-pass leader
 unification remains separate work (#1166).
 
+**Amendment 2 (2026-08-15, #1166) — compatible same-view feature leaders
+share one late inventory.** Automatic and deferred sparse ordinary side/plan
+hole callouts and the five post-drain machined-feature leader families no longer
+commit in separate local passes. They collect semantic jobs into
+`PlacementContext.feature_leaders`; the one `"feature_leaders"` stage after the
+corridor drain and before section/detail composition lowers them through
+`annotations/leaders.py` into the geometry-only assignment in `layout.py`, then
+emits each selected annotation once with its original feature ownership and
+`DimensionId`s. The lexicographic objective is maximum placed jobs, maximum
+summed semantic priority, minimum fixed-obstacle Policy-B penalty, minimum real
+leader length, then stable candidate order. Candidate-to-candidate label/shaft
+conflicts are hard. Every shared candidate tests its exact label, shaft, shelf,
+and arrow ink against the completed fixed annotation inventory, including
+actual-width dimension/witness strokes, their local arrow ink, labels, centre
+furniture. Strip-carving AABB inflation is not collision truth. Fixed rejections
+name stable annotation components (`:segment:n`, `:arrow:n`, `:label`) in the
+bounded trace. A leader-tip attachment is exempt only on an explicitly marked
+global turning-axis centreline; an ownerless section/cutting line is ordinary
+fixed ink, not an implicit axis exemption. The exemption is limited to the
+arrow-sized local tip neighbourhood; near-collinear travel and any later
+shelf/label crossing that same axis remain conflicts. Fixed curved helper ink that has no
+linear-segment metadata is
+lowered once from its rendered planar faces into deterministic component-local
+containing polygons before the geometry-only assignment: dashed
+`CenterlineCircle` arcs remain separate rather than flooding the ring interior,
+and shifted `Dimension` labels retain every arrow that actually rendered instead
+of relying on a fixed segment count/order. A fixed rendered face is considered
+already represented only when each tessellation triangle fits within one same
+known component. The one rendered survivor uses the same rule, so neither side
+can bridge separate shaft/shelf/arrow/label regions. Curved faces additionally
+retain no exact OCC area outside the analytical union, closing the space between
+tessellation stations. Residual-face lowering applies to every rendered fixed
+annotation, including filled datum/GD&T glyphs that expose no corresponding
+segment metadata. Candidate and selected rendered-survivor construction are
+fail-closed per alternative. If selected construction raises or violates this
+contract, the joint result is abandoned and the canonical lazy producer floor
+validates its tail in order; one bad helper survivor therefore cannot turn a
+valid later alternative into a false drop, and an all-invalid tail is diagnosed
+as a validation-stage geometry failure rather than spatial exhaustion, so it is
+not treated as a scale-remediable placement drop. Compiler invariant
+violations (for example, rendered hole ink without its semantic label) remain
+loud rather than being reclassified as optional placement failure. The complete mandatory
+title band remains a hard reservation even after its strokes and glyphs render;
+blank title cells are not placement space. Established Policy B remains explicit for both
+ordinary-hole and machined-feature leaders: a candidate crossing late fixed
+furniture stays eligible with a penalty, while page, label-over-own-silhouette,
+and new-leader conflicts remain infeasible. If such a candidate wins because
+every clear relocation is worse, the drawing persists a
+`feature_leader_crossing` info finding with semantic measurement provenance; trace is
+additional explanation, not the only record. Shaft routing through a part
+silhouette remains #798. This preserves a required callout when every relocation
+is worse, without allowing a shorter crossing to beat a clear route or silently
+certifying the retained crossing as clean.
+
+Pattern queues and dense table-eligible loose-hole inventories retain their
+specialised immediate whole-queue placement because their winners control later
+pattern furniture and transactional table replacement. Profiled-bore queues
+also retain their established placement until #798 owns robust silhouette-aware
+routing. This compatibility boundary keeps Amendment 2 out of those downstream
+semantic decisions rather than predicting their future footprint. Ordinary-hole
+alternatives lower label/shaft geometry analytically and materialise only the
+selected OCC `Leader`; the rendered survivor is checked against that geometry
+before it is committed.
+
+The inventory is bounded before candidate OCC construction by job and
+expanded-candidate caps. Fixed rendered ink is itself component-bounded while
+it is lowered, cached once across joint/fallback use, and then guarded by the
+candidate×fixed-obstacle probe cap. Quadratic candidate geometry has a separate
+pair cap, and the exact solve retains its existing state cap. A cap
+replays the original lazy candidate stream in
+canonical pass order, retaining each producer's former greedy/queue floor and
+recording any Policy-B blockers while exact classification remains within the
+same fixed-probe budget. If that budget is exhausted, the replay performs no
+unbounded fixed-component scan and persists a
+`feature_leader_fixed_ink_unverified` info finding instead. That uncertainty is
+part of the legibility quality inventory, so an unverified replay cannot certify
+a perfect legibility score. Page bounds,
+label-over-own-silhouette, and the
+mandatory title reservation remain hard under every resource fallback. A
+state-cap incumbent is not emitted directly because its new exact-ink seed is
+not necessarily that producer floor; the trace nevertheless retains every fully
+admitted joint candidate as abandoned, plus the separately replayed producer
+selection, so exhaustion remains explainable. Early
+section rows are marked provisional and excluded from the primary assignment:
+an optional not-yet-committed section cannot veto a required leader. After an
+optimal primary result exists, one separately probe/state-bounded refinement may
+prefer an equally complete, equally important result with no worse committed-ink
+penalty that also clears the provisional exact components. Resource exhaustion
+retains the primary result. The section pass then checks its exact final
+cutting-plane ink against landed leaders, performs at most one bounded outward
+end-symbol repair, and yields if a conflict remains.
+The mandatory not-yet-rendered
+title-block band remains a hard fixed obstacle. The solve trace records the one
+shared inventory, every bounded candidate and its outcome, named committed and
+provisional blockers, refinement status, objective tuple, selected alternatives, and bounded
+fallback. A single live post-build
+`Drawing.callout()` remains the documented finished-sheet exemption; a deferred
+batch enters the shared stage.
+
 ## Context (short — the full story is 0009's)
 
 A recurring defect class (#133/#225/#305: the "invisible occupant" — one strip,
@@ -130,17 +229,20 @@ overall-height dim (CTC-04). Ordering, not reservation: a predicted-footprint
 reserve was tried and rejected — phantom reservations displaced callouts into
 exactly the space other principals needed.
 
-Within each such machined-feature pass, placement is itself
-**collect → assign → emit** (#740). `_leader_callout_pass` measures each job's
-real `Leader` alternatives against the already-complete fixed inventory, derives
-candidate conflicts from the same preset-aware stroke/label occupancy exposed by
-`strip_obstacles`, and calls the geometry-only `_assign_leader_candidates` in
-`layout.py`. The bounded solve maximises placed jobs before minimising leader
-length; stable candidate order is the final tie-break. A deterministic
-alternative-count, pass-size, pair-probe, or search-state cap falls back to (or
-retains a result no worse than) the old first-clear greedy incumbent. This is
-deliberately *within one pass*: the passes still run in canonical post-drain stage
-order until #1166 supplies the cross-pass population.
+Compatible automatic/deferred feature leaders are likewise
+**collect → assign → emit** (#740/#1166). The side/plan hole renderer and the
+five `_leader_callout_pass` adapters register rich `FeatureLeaderJob`s in
+`annotations/leaders.py`; the canonical late stage lowers analytical ordinary-
+hole alternatives and bounded rendered machined-feature alternatives against
+the completed fixed inventory, derives conflicts from exact leader ink plus
+preset-aware stroke/label occupancy, and calls the geometry-only
+`_assign_leader_candidates` in `layout.py`. The bounded solve uses the
+Amendment-2 objective above. Deterministic candidate-count, pass-size,
+pair-probe, and search-state caps retain the old lazy first-clear floor (or a
+strictly better incumbent). Front, pattern, profiled, and dense table-eligible
+hole callouts, pre-drain diameter/pattern consumers, and the finished-sheet live
+verb retain their specialised immediate paths because they do not belong to
+this compatible late population.
 
 **Policy B** (two-precedent pattern, ratified 2026-07-02 — 0009 Amendment 2):
 when avoiding an occupant would cost more than a bounded relocation, keep the
@@ -274,10 +376,11 @@ down it knows only numbers.
 - Deterministic, explainable, dependency-free placement; over-capacity is a
   priority-ranked selection with first-class escalation, not an arrival-order
   drop.
-- Post-drain machined-feature leaders are likewise no longer arrival-order
-  dependent within a pass: bounded assignment maximises surviving callouts and
-  minimises leader length, with the legacy greedy result as its resource-cap
-  floor (#740).
+- Compatible sparse ordinary side/plan hole and post-drain machined-feature
+  leaders are no longer arrival-order dependent across passes: one bounded late
+  assignment maximises semantic survival, prefers clear/priority-ranked routes,
+  and then minimises leader length, with the legacy greedy result as its
+  resource-cap floor (#740/#1166).
 - The explanation is **recordable** (#736, from the #733 post-mortem): the
   opt-in solve trace — `build_drawing(trace=…)` or `DRAFTWRIGHT_TRACE=<path>` —
   dumps one JSON file per build with two distinct record types: `solves` (each
