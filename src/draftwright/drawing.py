@@ -98,7 +98,9 @@ from draftwright.linting import (
 from draftwright.linting.issues import _collect_issue_aggregation, _current_issue_aggregation
 from draftwright.linting.quality import quality_components
 from draftwright.projection import (
+    part_material_mesh,
     project_view_geometry,
+    view_material_field,
 )
 from draftwright.recognition_cache import RecognitionCache
 from draftwright.registry import AnnotationRegistry
@@ -292,6 +294,11 @@ def feature_key(f) -> str | None:
     return f"{kind}@({x:.3f},{y:.3f},{z:.3f})/{axis}{tail}"
 
 
+#: Distinguishes "the mesh has not been attempted" from "it was attempted and failed".
+#: ``None`` is a real, cacheable outcome here, so it cannot double as the unset marker.
+_MATERIAL_MESH_UNSET = object()
+
+
 @dataclass
 class BuildState:
     """The build context a finished :class:`Drawing` carries (ADR 0005 §2 / #639).
@@ -326,6 +333,15 @@ class BuildState:
     part_model: object | None = None
     view_edge_cache: dict = dataclasses_field(default_factory=dict)
     ann_box_cache: dict = dataclasses_field(default_factory=dict)
+    #: Per-view filled projected material (#798) as ``{id(view_shape): (shape, field)}``.
+    #: Keyed by shape identity because the projected shapes carry no view label — lint
+    #: names them ``view@<id>`` — and holding the shape lets a reused ``id`` be detected,
+    #: the same guard ``_view_edge_entries`` carries (#143).
+    material_fields: dict = dataclasses_field(default_factory=dict)
+    #: The one tessellation behind those fields, or ``None`` once it has been attempted
+    #: and failed. Memoised separately so an unmeshable part is not re-meshed on every
+    #: lint, and so views added by later stages can be lowered without redoing it.
+    material_mesh: Any = _MATERIAL_MESH_UNSET
     principal_profile_cache: tuple[object, bool, tuple[LintIssue, ...]] | None = None
     trace: Any = None
     detail_view: bool = False
@@ -352,6 +368,8 @@ class BuildState:
         boxes together — a rolled-back drawing must re-measure everything."""
         self.view_edge_cache.clear()
         self.ann_box_cache.clear()
+        self.material_fields.clear()
+        self.material_mesh = _MATERIAL_MESH_UNSET
 
     def ensure_recognition(self, part) -> RecognitionResult:
         """The run's recognition aggregate, recognising *part* once if nothing has yet.
@@ -691,6 +709,61 @@ class Drawing:
     @property
     def _ann_box_cache(self) -> dict:
         return self._build.ann_box_cache
+
+    def material_fields(self) -> dict:
+        """The per-view filled projected material of this drawing, keyed by ``id(shape)``.
+
+        The ADR 0014 leader routing and the ``leader_crosses_silhouette`` critique must
+        agree on what counts as travelling through the part, so both read this ONE
+        lowering rather than each deriving the answer from the projected outline. An empty
+        dict means the part could not be meshed, which callers must read as "no material
+        known" rather than "clear" — inventing clearance from a failed lowering is how a
+        silent geometry failure becomes a confident wrong answer.
+
+        The tessellation behind it is memoised (including its failure, so an unmeshable
+        part is not retried on every lint), but the per-view fields are reconciled against
+        the CURRENT views on each call, for two reasons:
+
+        * This is first called mid-build, by the feature-leader stage — which runs before
+          the section and detail stages. Fields built once would permanently omit every
+          view added afterwards, and leaders in a detail view would silently never be
+          checked for cutting.
+        * Entries are identity-checked, like ``_view_edge_entries``' (#143), because a
+          replaced view shape can be collected and its ``id`` reused — which would hand
+          back another view's material.
+        """
+        cache = self._build.material_fields
+        analysis = self._build.analysis
+        part = getattr(analysis, "part", None) if analysis is not None else None
+        if part is None:
+            return {}
+        mesh = self._build.material_mesh
+        if mesh is _MATERIAL_MESH_UNSET:
+            mesh = part_material_mesh(part, self.scale)
+            self._build.material_mesh = mesh
+        if mesh is None:
+            return {}
+        fields = {}
+        for name, placed in self.views.items():
+            if not placed or placed[0] is None:
+                continue
+            shape = placed[0]
+            key = id(shape)
+            hit = cache.get(key)
+            if hit is None or hit[0] is not shape:
+                hit = (
+                    shape,
+                    view_material_field(mesh, lambda point, view=name: self.at(view, *point)[:2]),
+                )
+                cache[key] = hit
+            fields[key] = hit[1]
+        # Evict entries for shapes no longer on the sheet. Each holds a strong reference
+        # to its view shape, and `_fit_iso_view` re-projects (once per build, again on
+        # finalize), so without this every superseded iso Compound is pinned for the
+        # drawing's lifetime — the same reason `_lint` prunes `_ann_box_cache`.
+        for stale in [key for key in cache if key not in fields]:
+            del cache[stale]
+        return fields
 
     @property
     def box_cache(self) -> dict:
@@ -2912,6 +2985,7 @@ class Drawing:
                 view_shapes=view_shapes,
                 view_edge_cache=self._view_edge_cache,
                 ann_box_cache=self._ann_box_cache,
+                view_material_fields=self.material_fields(),
                 _aggregation=aggregation,
             )
         else:
@@ -2924,6 +2998,7 @@ class Drawing:
                     view_shapes=view_shapes,
                     view_edge_cache=self._view_edge_cache,
                     ann_box_cache=self._ann_box_cache,
+                    view_material_fields=self.material_fields(),
                     _aggregation=aggregation,
                 )
         if self.part is not None and physical:
