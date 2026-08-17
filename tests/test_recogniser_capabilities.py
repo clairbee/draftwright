@@ -25,6 +25,7 @@ from draftwright.model.detect import (
 from draftwright.recogniser_contract import (
     RecogniserCapabilityError,
     consumer_capability_declaration,
+    pending_family_declarations,
     validate_recogniser_capabilities,
 )
 from draftwright.sheet import Sheet
@@ -121,7 +122,13 @@ def test_installed_released_package_contract_validates_without_a_sibling_checkou
 def test_runtime_adapter_inventory_is_derived_independently_and_exhaustive() -> None:
     runtime = _runtime_emitted_records()
     tiers = [set(_CONVERTERS), set(_DERIVED_CONVERTERS), set(_ORCHESTRATED_RECORDS)]
-    assert runtime == set.union(*tiers)
+    # Subset again, and the third place the same coupling was written. A converter for a
+    # record the installed package no longer emits is dead code pointing at a type that is
+    # gone, so that direction still fails. A record with no converter yet is the additive
+    # direction: the family carrying it is reported by `pending_family_declarations`, and
+    # declaring it `supported` forces an `ir_adapter` that `_resolve_implementation` must
+    # import -- so converter coverage is still compelled, at the point the decision is made.
+    assert set.union(*tiers) <= runtime
     assert all(
         not left & right for index, left in enumerate(tiers) for right in tiers[index + 1 :]
     )
@@ -136,7 +143,23 @@ def test_runtime_adapter_inventory_is_derived_independently_and_exhaustive() -> 
         for family in recognition.capability_manifest()["families"]
         for record in family["records"]
     }
-    assert declared_records == package_records
+    # Subset, not equality, and for the same reason the family inventory is: a record we
+    # declare that the package does not ship is a break, while one it ships and we have not
+    # declared yet is a Draftwright to-do. `tests/test_recogniser_adoption.py` owns the
+    # second direction; asserting equality here would put the coupling straight back.
+    assert declared_records <= package_records
+
+    # Restores the half the subset above gave up. `runtime == union(tiers)` used to assert two
+    # things at once: no converter for a record that does not exist, and no record without a
+    # converter. Relaxing it to a subset kept the first and dropped the second, which would let
+    # a family be declared `supported` while nothing converts what it emits.
+    #
+    # Scoped to records this repository has actually declared, so it cannot recouple: a record
+    # the package emits and we have not adopted is exactly the case that must stay free, and
+    # `tests/test_recogniser_adoption.py` owns it.
+    converted = {record.__name__ for record in set.union(*tiers)}
+    emitted = {record.__name__ for record in runtime}
+    assert emitted & declared_records <= converted
 
 
 def test_dsl_and_generated_code_inventories_are_derived_from_live_code() -> None:
@@ -239,7 +262,15 @@ def test_repeating_profile_is_explicit_geometry_only_critique_evidence() -> None
             lambda value: value["package_compatibility"].update({"version": "==0.1.0"}),
             "must pin",
         ),
-        (lambda value: value["families"].pop(), "inventory mismatch"),
+        (
+            # The stale direction, and the one that really breaks: an id the package does not
+            # ship would have a declared adapter calling a recogniser that is gone. The
+            # opposite -- not declaring a family it *does* ship -- is deliberately no longer a
+            # failure here; see tests/test_recogniser_adoption.py. Renaming the *last* family
+            # so the change cannot disturb sorted-id ordering and trip that check first.
+            lambda value: value["families"][-1].update({"id": "zz-retired-family"}),
+            "stale=",
+        ),
         (
             lambda value: value["families"][0]["record_schemas"].update({"BossRecord": 99}),
             "record schema mismatch",
@@ -262,7 +293,7 @@ def test_repeating_profile_is_explicit_geometry_only_critique_evidence() -> None
         ),
     ],
 )
-def test_consumer_declaration_fails_closed_on_stale_or_unknown_claims(
+def test_consumer_declaration_fails_closed_on_stale_or_malformed_claims(
     mutate, message: str
 ) -> None:
     declaration = consumer_capability_declaration()
@@ -271,13 +302,68 @@ def test_consumer_declaration_fails_closed_on_stale_or_unknown_claims(
         validate_recogniser_capabilities(declaration)
 
 
-def test_unknown_package_family_and_schema_format_fail_closed() -> None:
+def test_a_package_family_we_have_not_declared_yet_does_not_fail_the_join() -> None:
+    """The additive direction is a Draftwright to-do, not a compatibility failure.
+
+    A family the package ships and this repository has not declared cannot reach any
+    Draftwright code path: nothing here constructs ``RecognitionResult`` or indexes the
+    feature census by key. Failing the join on it made every new recogniser a two-repo
+    lockstep release, with the provider blocked on its own consumer.
+
+    It is still tracked -- ``pending_family_declarations`` reports it and
+    ``tests/test_recogniser_adoption.py`` fails Draftwright's build until it is declared.
+    """
     package = recognition.capability_manifest()
     package["families"].append(copy.deepcopy(package["families"][0]))
     package["families"][-1]["id"] = "future-thread"
-    with pytest.raises(RecogniserCapabilityError, match="inventory mismatch"):
-        validate_recogniser_capabilities(package=package)
 
+    validate_recogniser_capabilities(package=package)
+
+    # `in`, not equality: any family the installed package has genuinely grown since the
+    # last declaration is legitimately pending too, and this test is not about those.
+    assert "future-thread" in pending_family_declarations(package=package)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda families: families.reverse(), id="unsorted"),
+        pytest.param(
+            lambda families: families[0].update({"id": families[-1]["id"]}), id="duplicated"
+        ),
+    ],
+)
+def test_family_declarations_must_be_unique_and_sorted(mutate) -> None:
+    """Both halves of that condition, because one expression checks two different mistakes.
+
+    Ordering is now checked separately from membership, so it cannot be masked by it: while
+    the inventory check was a single condition, unsorted ids and a stale family raised the
+    same error. Reversing the list gives ordering without duplication; copying one id over
+    another gives duplication without any id the package does not ship. An earlier version of
+    this test did only the second while claiming to do the first.
+    """
+    declaration = consumer_capability_declaration()
+    mutate(declaration["families"])
+
+    with pytest.raises(RecogniserCapabilityError, match="unique and sorted"):
+        validate_recogniser_capabilities(declaration)
+
+
+def test_pending_declarations_reject_a_malformed_manifest() -> None:
+    """The pending query fails closed too, rather than reporting an empty to-do list.
+
+    It is the control that replaced a hard failure, so a malformed manifest must not make it
+    quietly answer "nothing pending" -- that would read as adoption being complete.
+
+    ``None`` is deliberately absent from these: it is the "use the installed manifest"
+    sentinel, not a malformed value.
+    """
+    for broken in ("not-a-dict", {}, {"families": "not-an-array"}):
+        with pytest.raises(RecogniserCapabilityError, match="manifest format is unsupported"):
+            pending_family_declarations(package=broken)
+
+
+def test_schema_format_fails_closed() -> None:
     package = recognition.capability_manifest()
     package["format_version"] = 2
     with pytest.raises(RecogniserCapabilityError, match="manifest format"):
