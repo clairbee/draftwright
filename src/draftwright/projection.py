@@ -16,7 +16,7 @@ import math
 
 import numpy as np
 from build123d import Compound, Edge, GeomType, Location, Plane, ThreePointArc, Vector
-from build123d_drafting.helpers import Note, ViewCoordinates, view_axes
+from build123d_drafting.helpers import ViewCoordinates, view_axes
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepTools import BRepTools
@@ -28,8 +28,14 @@ from OCP.GeomAbs import (
     GeomAbs_Torus,
 )
 
-from draftwright._core import Analysis, _iso_bbox, place_annotation
-from draftwright._geometry import MaterialField, material_field
+from draftwright._core import (
+    Analysis,
+    _iso_bbox,
+)
+from draftwright._geometry import (
+    MaterialField,
+    material_field,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -352,12 +358,16 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     )
 
 
-def _fit_iso_view(dwg, a: Analysis, annotate: bool = True):
-    """Scale the iso view to fill its page zone, captioning it NTS when the
-    scale differs from sheet scale.  Pass ``annotate=False`` to suppress the
-    NTS note — used on the finalize detail-refit, which re-fits an iso whose
-    note the build already placed (both the auto and ``auto_dims=False`` build
-    paths label it, so a second add would be redundant).
+def _fit_iso_view(dwg, a: Analysis):
+    """Scale the iso view to fill its page zone; return its bbox when the result is
+    NOT to sheet scale and therefore needs an NTS caption, else ``None``.
+
+    It does not place that caption. The caption is late furniture — it must clear the
+    whole settled sheet — and this module sits below the occupancy model that knows
+    what "clear" means, so placing it here left it with a hand-rolled obstacle set that
+    was wrong twice (#1197). The caller owns the decision: `builder` places it at the
+    common post-fit point beside the tables, and the finalize detail-refit simply
+    ignores the return, as it must — that iso's caption was placed by the build.
 
     The iso is always centred at (ISO_X, ISO_Y) which sits at the centre of
     the available zone.  The projection is linear, so the factor needed to
@@ -420,16 +430,8 @@ def _fit_iso_view(dwg, a: Analysis, annotate: bool = True):
     bb = _iso_bbox(dwg)
     if factor < 1.0 and not _bbox_within(bb, region):
         _log.warning("Iso view still overflows its page region at %g× sheet scale", factor)
-    if annotate:
-        font = dwg.draft.font_size
-        place_annotation(
-            dwg.registry,
-            dwg.items,
-            Note(
-                "ISO VIEW (NTS)",
-                (a.ISO_X, max(bb[1] - 2 * font, a.margin + font)),
-                dwg.draft,
-            ),
-            "note_iso_nts",
-        )
-    _log.info("Iso view scaled to %g× sheet scale%s", factor, " (NTS)" if annotate else "")
+    # No "(NTS)" here: this function no longer places the caption, and the finalize
+    # detail-refit calls it without placing one. Claiming the label would misreport that
+    # path, which is what the removed `annotate` flag used to keep straight.
+    _log.info("Iso view scaled to %g× sheet scale", factor)
+    return bb
