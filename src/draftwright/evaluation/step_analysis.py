@@ -3,11 +3,29 @@
 This module scores recogniser observations against an independently authored oracle.  It does
 not inspect ``RecognitionResult`` or the feature census: adapters supply observations, while the
 benchmark case supplies the denominator and tolerances.
+
+The ``drawing_consumer`` boundary is OBSERVED from a real build (#1202) rather than read from
+a capability declaration. Known limit of that approach: it reads the ADR 0010 provenance seam,
+which ``Drawing.annotations_of`` documents as growing "as passes are migrated". An un-tagged
+render pass therefore reads as a genuine omission, and this is a CLASS of limitation rather
+than a single case. Two instances are known:
+
+* the hole-table escalation, which withdraws the individual callouts and records the
+  substitution on the table — admitted here via that ledger;
+* a **turned** part, where the bore's diameter reaches the sheet as a ``Leader`` (``ldr_z0``)
+  whose ``registry.feature_of`` is ``None``, so it is neither a callout nor a table row. That
+  is inherited ADR 0015 / #754 debt (rotational OD/bore groups are not planner-routed) and
+  the engine's own ledger reports it as missing too, but this benchmark will report a loss
+  for a hole whose size is visibly printed. No corpus fixture is turned today; adding one
+  without addressing #754 would make the number wrong.
+
+A new representation route must be admitted here or it registers as a false loss.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,6 +38,8 @@ Scalar: TypeAlias = int | float | str | bool
 Value: TypeAlias = Scalar | tuple[float, ...]
 Outcome: TypeAlias = Literal["supported", "unknown", "unsupported"]
 Observer: TypeAlias = Callable[[object], Sequence["ObservedFact"]]
+
+_log = logging.getLogger(__name__)
 
 _CORPUS_FORMAT = "draftwright-step-analysis-corpus"
 _CORPUS_FORMAT_VERSION = 1
@@ -615,9 +635,169 @@ def load_corpus(path: str | Path) -> BenchmarkCorpus:
     return BenchmarkCorpus(corpus_version, _METRIC_VERSION, scope, tuple(cases))
 
 
-def _default_observers() -> Mapping[str, Observer]:
-    from b123d_recognisers import build_recognition_result
+#: Position agreement required to call a recognised hole and an IR feature the same hole.
+#: Tiny on purpose: the IR carries the recogniser's own ``hole.location`` verbatim
+#: (``model/detect.py`` builds ``Frame(origin=_xyz(rep.location))``), so agreement is
+#: EXACT on every corpus fixture — worst residual measured at 0.0, including the
+#: side-drilled case whose z is 6.66e-15. An earlier version compared only the in-plane
+#: coordinates, on a guess that the compiler might mint the origin at the far end of the
+#: bore. It does not, and dropping the axis component made two opposed coaxial holes of
+#: equal diameter alias onto one feature, hiding a dropped callout on the second.
+_CORRESPONDENCE_TOLERANCE = 1e-6
 
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One IR feature and the hole positions it can account for."""
+
+    feature: object
+    axis: str
+    diameter: float
+    positions: tuple[tuple[float, ...], ...]
+
+
+def _hole_candidates(drawing) -> list[_Candidate]:
+    """Every IR feature that can account for a recognised hole.
+
+    Patterned holes lower to a ``PatternFeature`` carrying a representative
+    ``HoleFeature`` and the member centres — they are NOT ``HoleFeature`` instances, so
+    matching on that type alone made recognising a pattern (a capability) *lower* the
+    score: four identical holes scored ``unknown`` where the same four at the same
+    positions with distinct diameters scored ``supported``, both fully drawn.
+
+    Dispatch is on the IR's own ``kind`` discriminator, which the engine itself uses,
+    rather than on ``type(f).__name__``.
+    """
+    candidates: list[_Candidate] = []
+    for feature in drawing.model().features:
+        kind = getattr(feature, "kind", None)
+        if kind == "hole":
+            # A grouped ``count×`` callout covers several holes through one feature.
+            positions = feature.members or (feature.frame.origin,)
+            candidates.append(
+                _Candidate(feature, feature.frame.axis, feature.diameter, tuple(positions))
+            )
+        elif kind == "pattern" and getattr(feature.member, "kind", None) == "hole":
+            candidates.append(
+                _Candidate(
+                    feature, feature.frame.axis, feature.member.diameter, tuple(feature.members)
+                )
+            )
+    return candidates
+
+
+#: The compiled requirement that carries a hole's SIZE. A table row documents several
+#: requirements per hole (location, through-ness, …); only this one is the fact
+#: ``drawing_consumer`` asks about.
+_SIZE_REQUIREMENT = "bore.diameter"
+
+
+def _table_represented(drawing) -> list:
+    """Features the engine recorded as carried by a hole TABLE rather than a callout.
+
+    Above ~16 scattered holes the engine withdraws the individual ``hc_*`` callouts and
+    places one table plus balloons, recording the substitution on the table object. Reading
+    only ``hc_`` scored every hole on such a sheet as lost — measured 16 of 16 on a dense
+    plate with no lint issues at all — which inverted the metric: a correct sheet scored
+    worse than the same part with the table forced to fail.
+
+    Read ``covers_hole_representations_by_requirement`` and not the ``…_by_feature``
+    sibling. The sibling exists, and an earlier cut of this function read it, but **no
+    caller populates it**: `representation_features=` appears in the whole tree only at its
+    own definition and its own use in ``annotations/_common.py``. Both real callers pass
+    ``representation_requirements=`` instead. So that read returned nothing on every real
+    drawing while a hand-built stub in the tests made it look correct.
+
+    Filtered to the SIZE requirement: a table row also documents location and through-ness,
+    and crediting those would mean a hole with a located row but no diameter counted as
+    consumed.
+
+    Safe against a dropped table: the ledger is written only after the table is placed and
+    the balloon-completeness gate passes, and the annotation transaction rolls the table
+    back before that point, so a `table_dropped` sheet carries no entries (verified).
+    """
+    covered = []
+    for _name, annotation in drawing.iter_annotations():
+        for entry in getattr(annotation, "covers_hole_representations_by_requirement", ()):
+            feature, parameter = entry[0], entry[1]
+            if parameter == _SIZE_REQUIREMENT:
+                covered.append(feature)
+    return covered
+
+
+def _consumed(feature, drawing, represented) -> bool:
+    """Did this feature's SIZE reach the sheet, by either sanctioned route?
+
+    Only the callout or the table counts. A hole whose callout was dropped still keeps its
+    centre mark and location dims (measured: ``m_cm0``, ``m_locx0``), so counting any
+    annotation would score a dropped callout as consumed.
+    """
+    if any(name.startswith("hc_") for name in drawing.annotations_of(feature)):
+        return True
+    return any(represented_feature == feature for represented_feature in represented)
+
+
+def _drawing_consumer_outcomes(holes, drawing) -> list[Outcome]:
+    """Per recognised hole: did the DRAWING carry it? — observed, not declared.
+
+    ``supported`` its size reached the sheet; ``unsupported`` a feature accounts for the
+    hole and carries neither callout nor table row; ``unknown`` no feature accounts for
+    it, which is a gap in the recognition-record-to-IR correspondence ADR 0017 explicitly
+    does not yet provide.
+
+    Be precise about ``unknown``: :func:`evaluate_case` credits a unit only when the state
+    is ``supported``, so downstream an ``unknown`` scores as a MISS, distinguishable from
+    a dropped callout only in the diagnostic text. It is an honest label, not an exemption
+    — an earlier version of this docstring claimed it was "never scored as either success
+    or failure", which was wrong about the pipeline it feeds.
+
+    Matching is injective per POSITION: a matched position is consumed, so two opposed
+    coaxial holes of equal diameter cannot both resolve to the first candidate. Grouped
+    features legitimately account for several holes, which is why the position is consumed
+    and not the whole candidate.
+    """
+    # Imported here, not at module level: `_geometry` imports build123d, so a top-level
+    # import would pull the CAD kernel into every consumer of this module — measured, it
+    # took import cost from 0.01 s to 1.27 s and made the lazy `builder` import below buy
+    # nothing at all. An earlier comment claimed that laziness saved the kernel import
+    # while this line was already paying it.
+    from draftwright._geometry import _axis_letter_of
+
+    remaining = [(candidate, list(candidate.positions)) for candidate in _hole_candidates(drawing)]
+    represented = _table_represented(drawing)
+    outcomes: list[Outcome] = []
+    for hole in holes:
+        axis = _axis_letter_of(hole.axis)
+        target = tuple(float(value) for value in hole.location)
+        for candidate, positions in remaining:
+            if candidate.axis != axis or abs(candidate.diameter - hole.diameter) > 1e-9:
+                continue
+            hit = next(
+                (
+                    position
+                    for position in positions
+                    if all(
+                        abs(a - b) <= _CORRESPONDENCE_TOLERANCE
+                        for a, b in zip(tuple(float(v) for v in position), target, strict=True)
+                    )
+                ),
+                None,
+            )
+            if hit is None:
+                continue
+            positions.remove(hit)
+            outcomes.append(
+                "supported"
+                if _consumed(candidate.feature, drawing, represented)
+                else "unsupported"
+            )
+            break
+        else:
+            outcomes.append("unknown")
+    return outcomes
+
+
+def _default_observers() -> Mapping[str, Observer]:
     from draftwright.recogniser_contract import (
         consumer_capability_declaration,
         validate_recogniser_capabilities,
@@ -626,10 +806,58 @@ def _default_observers() -> Mapping[str, Observer]:
     consumer = consumer_capability_declaration()
     validate_recogniser_capabilities(consumer)
     declaration = next(family for family in consumer["families"] if family["id"] == "holes")
-    downstream = {boundary: declaration[boundary]["state"] for boundary in _DOWNSTREAM_BOUNDARIES}
+    # The other three boundaries remain DECLARED states — "this code path exists" — which
+    # is the same self-validating shape, one layer along, and is tracked separately. Only
+    # `drawing_consumer` is observed here, because that is the boundary #1176 is about:
+    # a drawing scoring 1.0 while omitting the geometry it owes.
+    declared = {
+        boundary: declaration[boundary]["state"]
+        for boundary in _DOWNSTREAM_BOUNDARIES
+        if boundary != "drawing_consumer"
+    }
 
     def observe_holes(part: object) -> Sequence[ObservedFact]:
-        recognition = build_recognition_result(part)  # type: ignore[arg-type]
+        # Lazy for COST, not for layering: `evaluation` is rank 7 and `builder` rank 6, so
+        # a module-level import here is a legal downward edge and passes the DAG guard —
+        # an earlier comment claimed otherwise. What it buys is not paying build123d's
+        # ~6 s import to load this module. Import the concrete module rather than the
+        # package root: `from draftwright import ...` pulls `__init__`, which the guard
+        # treats as the TOP module and would make this a genuine upward edge.
+        from draftwright.builder import build_drawing
+
+        # ONE drawing per fixture, and ONE recognition: the records scored here come from
+        # the build's own aggregate (ADR 0017's single owner per run), not a second
+        # `build_recognition_result` call, so the facts being scored and the features they
+        # are matched against cannot come from different recognition runs.
+        try:
+            drawing = build_drawing(part)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001 — a non-answer, not an aborted corpus run
+            # The SCORE is the same `unknown` a correspondence gap produces — the oracle has
+            # three outcomes and no fourth — but the two must not be indistinguishable to a
+            # reader. A benchmark whose whole point is that a self-reported number cannot
+            # validate itself should not quietly equate "the compiler has no correspondence"
+            # with "the engine crashed", so the crash is announced.
+            _log.warning("evaluation: drawing build failed (%s); scoring holes as unknown", exc)
+            drawing = None
+        if drawing is None:
+            # The recognition read is guarded too: a fixture that neither builds NOR
+            # recognises must still yield a scored non-answer rather than a traceback out
+            # of the middle of a corpus run.
+            try:
+                from b123d_recognisers import build_recognition_result
+
+                holes = tuple(build_recognition_result(part).holes)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 — an unanalysable fixture observes nothing
+                return ()
+            outcomes: list[Outcome] = ["unknown"] * len(holes)
+        else:
+            recognition = drawing.recognition()
+            if recognition is None:  # pragma: no cover — the detected path always fills it
+                from b123d_recognisers import build_recognition_result
+
+                recognition = build_recognition_result(part)  # type: ignore[arg-type]
+            holes = tuple(recognition.holes)
+            outcomes = _drawing_consumer_outcomes(holes, drawing)
         return tuple(
             ObservedFact(
                 family="holes",
@@ -639,9 +867,9 @@ def _default_observers() -> Mapping[str, Observer]:
                     "depth": hole.depth,
                     "diameter": hole.diameter,
                 },
-                downstream=downstream,
+                downstream={**declared, "drawing_consumer": outcome},
             )
-            for hole in recognition.holes
+            for hole, outcome in zip(holes, outcomes, strict=True)
         )
 
     return {"holes": observe_holes}
