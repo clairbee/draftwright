@@ -4531,12 +4531,19 @@ def _record_pmi_unrenderable(dwg, label, rec, *, ctx):
     ``pmi_dropped`` (a *placement* failure): this is a *validation* failure, so a caller
     sees a specific reason instead of a misleading "no room" — an authored dim is only
     ``pmi_dropped`` after a real candidate reaches the corridor solver and cannot fit (#562)."""
+    source_id = getattr(rec, "source_id", "")
+    # `error` for a source-bearing record, for the same reason as
+    # `_record_unsupported_dimension_kind`: this SUPPRESSES the sibling `pmi_not_rendered`
+    # error, so leaving it a warning turned a lost AP242 requirement into `passed: True`.
+    # Adding the suppression without raising the severity was the very downgrade #1177's
+    # own commit message argued must not happen — committed one file away from where it
+    # said so.
     ctx.record_issue(
-        "warning",
+        "error" if source_id else "warning",
         "authored_dim_degenerate",
         f"authored dimension {label!r} has degenerate reference geometry (needs two "
         "distinct reference points spanning a legible distance)",
-        source=getattr(rec, "source_id", ""),
+        source=source_id,
     )
 
 
@@ -4551,14 +4558,28 @@ def _record_pmi_no_candidate(ctx, label, rec):
     )
 
 
-def _bore_half_span(pmi_kind: str, value: float) -> float:
-    """Half the perpendicular span of a bore-size dim from the bore centroid — the
-    distance to each witness base point. A ``"diameter"`` record stores the full
-    diameter (so half = radius = value/2); a ``"radius"`` record already stores the
-    radius (half = value). Keyed on the drafting dimension category, NOT ``.kind`` (the
-    IR feature kind) — the #360 bug used the latter, so the diameter branch was dead and
-    every diameter dim spanned ±diameter (2× wide)."""
-    return value / 2 if pmi_kind == "diameter" else value
+def _bore_span_offsets(pmi_kind: str, value: float) -> tuple[float, float]:
+    """Signed offsets from the bore centroid to each witness base point.
+
+    The invariant is that the DRAWN LENGTH equals the LABELLED VALUE, for both kinds:
+
+    * a ``"diameter"`` record stores the full diameter and its dimension spans the bore,
+      ``(-value/2, +value/2)`` — length ``value``;
+    * a ``"radius"`` record stores the radius and its dimension runs from the centre to
+      the surface, ``(0, +value)`` — length ``value``.
+
+    The predecessor returned a single half-span that the caller applied symmetrically, so
+    a radius record drew ``centre ± value``: an R6 record produced a **12 mm** line
+    labelled R6 (#1208). The diameter branch was correct, and the radius branch beside it
+    had the same shape of error #360 fixed one line along — that fix keyed on the drafting
+    category rather than the IR ``.kind``, and never questioned what radius should span.
+
+    Keyed on the drafting dimension category, NOT ``.kind``: the #360 bug used the latter,
+    so the diameter branch was dead and every diameter dim spanned ±diameter (2× wide).
+    """
+    if pmi_kind == "diameter":
+        return (-value / 2, value / 2)
+    return (0.0, value)
 
 
 # PMI is pre-authored manufacturing intent from the STEP file. When a strip is over
@@ -4569,20 +4590,117 @@ _PMI_CORRIDOR_PRIORITY = PRIORITY.AUTHORED
 _PMI_SLOT = 10.0  # mm — slot size for PMI dim lines in the strip
 
 
+#: Dimension categories the IR admits but this renderer cannot draw TRUTHFULLY. `Dimension`
+#: measures a straight projected path, so a record whose value is measured on some other
+#: basis renders as an annotation whose geometry contradicts its own label — a drawing that
+#: asserts something false (#1177). Measured on a 1:1 sheet, value against drawn length:
+#:
+#:   angular       60      ->  16.0   label states degrees, geometry states millimetres
+#:   curve_length  25.133  ->  16.0   arc length against its chord (57% out)
+#:   curved_dist   25.133  ->  16.0   same
+#:   oriented      20.0    ->  16.0   along a stated direction, not the projected axis (25% out)
+#:
+#: The criterion is whether the value is measured on a basis THIS RENDERER RECEIVES. It
+#: draws the projected span between reference points along the dominant axis, so:
+#: `linear`, `thickness` and `diameter` are that span by definition and stay. An arc length
+#: is not (`curve_length`, `curved_dist`), nor is an angle (`angular`). `oriented` is a
+#: straight span, but along a direction the record states and the renderer is never given —
+#: refused for a different reason from its neighbours, which an earlier version of this
+#: comment lumped together as "needs an arc".
+#:
+#: `radius` is a THIRD defect and is NOT refused: its value is a straight span, so it is
+#: fixable rather than unsupported. `_bore_half_span` returns the value where `diameter`
+#: halves it, so an R6 record renders a 12 mm line labelled R. Tracked as #1208, because
+#: refusing it would file a rendering bug under "unsupported category" and misdescribe it.
+#:
+#: NOT because the rendering library lacks the primitives. An earlier version of this
+#: comment claimed build123d has no angular dimension; it does — `DimensionLine` and
+#: `ExtensionLine` both take `label_angle`, and render "60.00°" from an arc. The missing
+#: work is on THIS side: deriving the arc and vertex from the record's reference points and
+#: routing the result through the corridor solve. Saying otherwise sends the follow-on to
+#: the wrong repository.
+#:
+#: Refused at the RENDERER rather than at `Sheet.measured_dimension`, because these kinds
+#: reach the IR from two sources — the authored façade and detected AP242 PMI
+#: (`model/detect.py`) — and refusing at the façade would leave the imported path drawing
+#: the false dimension while making a legitimate AP242 file unreadable. NIST CTC-01 carries
+#: an angular record; CTC-04 carries one drawn 88% wrong.
+_UNRENDERABLE_DIMENSION_KINDS = frozenset({"angular", "curve_length", "curved_dist", "oriented"})
+
+#: What each refused category actually measures, for the diagnostic. Keyed by kind so the
+#: message stays true as the set grows: an earlier version hard-coded "the label states an
+#: angle", which would have been wrong the moment `curve_length` was added.
+_MEASUREMENT_BASIS = {
+    "angular": "an angle in degrees",
+    "curve_length": "a length along a curve",
+    "curved_dist": "a distance along a curve",
+    "oriented": "a distance along a stated direction",
+}
+
+
+def _authored_with_usable_references(record) -> bool:
+    """Whether *record* is an authored dimension with enough geometry to draw at all.
+
+    Shared by the renderable and refused filters so they cannot drift: a predicate added to
+    one only would make a record silently NEITHER drawn nor reported.
+    """
+    return record.kind == "authored_dimension" and record.value > 0 and len(record.ref_pts) >= 2
+
+
+def _record_unsupported_dimension_kind(ctx, rec):
+    """Record an authored dimension whose CATEGORY this renderer cannot draw truthfully.
+
+    A validation outcome, not a placement one — the same distinction
+    :func:`_record_pmi_unrenderable` draws, and for the same reason as #1190: an optional or
+    unsupported outcome marked as a placement drop makes every scale infeasible, so an
+    explicit ``scale=`` request burns the whole ladder and raises where it used to return a
+    drawing.
+    """
+    basis = _MEASUREMENT_BASIS[rec.pmi_kind]
+    source_id = getattr(rec, "source_id", "")
+    # `error` for a source-bearing record, matching `_record_pmi_no_candidate` and the
+    # three `lint_pmi_*` checks: in annotate mode a requirement that came from the AP242
+    # file and is absent from the drawing is an error, and suppressing the sibling
+    # `pmi_not_rendered` must not quietly downgrade it. An authored declaration with no
+    # source is the author's own, and a warning.
+    ctx.record_issue(
+        "error" if source_id else "warning",
+        "dimension_kind_unsupported",
+        f"authored {rec.pmi_kind} dimension {getattr(rec, 'label', '')!r} is not drawn: it "
+        f"states {basis}, and this renderer measures only a straight projected path",
+        source=source_id,
+        outcome_stage="validation",
+    )
+
+
 def _renderable_pmi_records(records):
     """PMI records the dimension renderer may place.
 
     Raw ``PmiFeature`` fallbacks can preserve unsupported AP242 records. Do not render those
     just because they happen to carry a numeric value and references; only drafting dimension
-    categories belong in this placement path.
+    categories belong in this placement path — and only those this renderer can actually
+    draw (see :data:`_UNRENDERABLE_DIMENSION_KINDS`).
     """
     return [
         r
         for r in records
-        if r.kind == "authored_dimension"
+        if _authored_with_usable_references(r)
         and r.pmi_kind in AUTHORED_DIMENSION_KINDS
-        and r.value > 0
-        and len(r.ref_pts) >= 2
+        and r.pmi_kind not in _UNRENDERABLE_DIMENSION_KINDS
+    ]
+
+
+def _unsupported_kind_records(records):
+    """Authored records refused purely because of their category, so the omission can be
+    reported. Deliberately not folded into :func:`_renderable_pmi_records`: a record with a
+    zero value or one reference point is refused for a different reason and already has its
+    own diagnostic."""
+    return [
+        r
+        for r in records
+        if _authored_with_usable_references(r)
+        and r.pmi_kind in AUTHORED_DIMENSION_KINDS
+        and r.pmi_kind in _UNRENDERABLE_DIMENSION_KINDS
     ]
 
 
@@ -4857,7 +4975,10 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
         # Resolved axis (handles _bore_info's '?' degenerate-bbox fallback); the diameter
         # view table (Z→plan, X→side, Y→front) differs from the linear-dim one (#351 PR-4a).
         ax = bore_axis
-        half = _bore_half_span(rec.pmi_kind, rec.value)
+        lo, hi = _bore_span_offsets(rec.pmi_kind, rec.value)
+        # Half the DRAWN span, which is what the legibility gate is about: a radius dim is
+        # `value` long, not `2 * value`, so the two kinds no longer share a half-width.
+        half = (hi - lo) / 2
         # Narrow bores (page span < text width) lead out to a shelf; bracket dims only
         # when the span fits the label. An unresolved axis matches no cfg → bottom drop.
         half_pg = half * a.SCALE  # bore radius on page (mm)
@@ -4865,7 +4986,7 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
         if cfg is not None:
             u, v = cfg["centre"](cx_f, cy_f, cz_f)
             if half_pg >= _MIN_INPLACE_BORE_HALF_MM:
-                p1, p2 = cfg["span"](cx_f, cy_f, cz_f, half)
+                p1, p2 = cfg["span"](cx_f, cy_f, cz_f, lo, hi)
                 placed = _pmi_queue_options(
                     dwg,
                     ctx,
@@ -5006,6 +5127,8 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
     draft = dwg.draft
     pmi = [f for f in model.features if f.kind in ("authored_dimension", "pmi")]
     usable = _renderable_pmi_records(pmi)
+    for refused in _unsupported_kind_records(pmi):
+        _record_unsupported_dimension_kind(ctx, refused)
     n_gtol = sum(1 for r in pmi if r.pmi_kind not in AUTHORED_DIMENSION_KINDS and r.value > 0)
     if n_gtol:
         _log.debug("PMI annotate: %d gtol/datum record(s) not yet annotatable (Phase 4)", n_gtol)
@@ -5032,7 +5155,10 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
             "order": ("above", "below"),
             "leader_order": ("above", "below"),
             "centre": lambda cx, cy, cz: (PX(cx), PY(cy)),
-            "span": lambda cx, cy, cz, h: ((PX(cx - h), PY(cy), 0), (PX(cx + h), PY(cy), 0)),
+            "span": lambda cx, cy, cz, lo, hi: (
+                (PX(cx + lo), PY(cy), 0),
+                (PX(cx + hi), PY(cy), 0),
+            ),
         },
         "X": {
             "view": "side",
@@ -5040,7 +5166,10 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
             "order": ("above", "below"),
             "leader_order": ("above", "below"),
             "centre": lambda cx, cy, cz: (SX(cy), SZ(cz)),
-            "span": lambda cx, cy, cz, h: ((SX(cy - h), SZ(cz), 0), (SX(cy + h), SZ(cz), 0)),
+            "span": lambda cx, cy, cz, lo, hi: (
+                (SX(cy + lo), SZ(cz), 0),
+                (SX(cy + hi), SZ(cz), 0),
+            ),
         },
         "Y": {
             "view": "front",
@@ -5048,7 +5177,10 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
             "order": ("above", "below"),
             "leader_order": ("below", "above"),
             "centre": lambda cx, cy, cz: (FX(cx), FZ(cz)),
-            "span": lambda cx, cy, cz, h: ((FX(cx - h), FZ(cz), 0), (FX(cx + h), FZ(cz), 0)),
+            "span": lambda cx, cy, cz, lo, hi: (
+                (FX(cx + lo), FZ(cz), 0),
+                (FX(cx + hi), FZ(cz), 0),
+            ),
         },
     }
 
