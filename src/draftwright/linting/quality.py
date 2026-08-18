@@ -5,6 +5,9 @@ quality verdict.  This module exposes the independently observable terms without
 them into another blessed scalar:
 
 - completeness follows recognition-owned physical requirements to compiler outcomes;
+- fidelity asks whether the content the drawing DOES carry is contradicted by the geometry
+  it is drawn from — a drawing can be complete, restrained and legible and still assert a
+  measurement, a callout or a data-table value the part does not have (#1176);
 - legibility contains only placement/layout diagnostics. Its compatibility counts remain raw
   lint findings, while its score and ``primary_*`` counts collapse only producer-identified
   pair observations from one annotation and failure mechanism;
@@ -63,9 +66,12 @@ _LEGIBILITY_CODES = frozenset(
 # recognised by their ``*_dropped`` suffix rather than by a listed vocabulary. A list has to
 # be remembered; the suffix cannot be forgotten, so a drop code introduced tomorrow counts
 # against legibility on the day it is introduced instead of scoring as perfectly legible
-# until somebody notices (#1127 review). The two codes that cannot be read off their suffix
-# (``gdt_dropped``/``pmi_dropped``, which cover validation failures too) carry an explicit
-# ``outcome_stage`` from their producers instead; see ``is_placement_drop``.
+# until somebody notices (#1127 review). Codes that cannot be read off their suffix carry an
+# explicit ``outcome_stage`` from their producers instead (see ``is_placement_drop``); there
+# were two when this was written and there are fourteen now, enumerated in
+# :data:`_STAGE_ROUTED_CODES` and :data:`_UNSCORED_CODES` — and the suffix shortcut turned
+# out to be exactly as forgettable as the list it replaced, because nothing checked that the
+# suffix still meant what it says.
 
 # Recognition inventories that represent potentially dimension-bearing physical families.
 _RECOGNISED_REQUIREMENT_FAMILIES = {
@@ -123,8 +129,229 @@ _EXCLUDES = (
 # was noticed, not that nothing was missed.
 _UNRECOGNISED_GEOMETRY_CODE = "unrecognised_defining_geometry"
 
+#: Codes meaning the drawing ASSERTS SOMETHING FALSE — not that it is incomplete, hard to
+#: read, or over-dimensioned, but that a reader following it would be misled.
+#:
+#: This is a fourth axis, and its absence was a hole the other three could not cover. A
+#: drawing labelled 99 over a 16 mm path — a 518% contradiction — reported
+#: ``legibility: 1.0``, because legibility scores LAYOUT and a false dimension is perfectly
+#: legible. With completeness and restraint unavailable on that drawing, every component a
+#: caller could read said perfect (#1176).
+#:
+#: The first cut of this set held ``label_vs_measured`` alone and claimed it was "currently
+#: the only such code". That was false, and the two reproductions are worse than the case
+#: it was built for:
+#:
+#: * ``declared_feature_absent`` — a ``⌀6 THRU`` leader and a centre mark drawn pointing at
+#:   SOLID MATERIAL, because the declared hole is not in the part. The sheet tells a
+#:   machinist to drill something the model does not have.
+#: * ``gear_repeat_count_mismatch`` — a normative ISO data table stating 12 teeth on a part
+#:   the linter independently proves has 13. The wrong number is printed on the sheet.
+#:
+#: ``gear_axis_mismatch`` and ``gear_requirement_mismatch`` (a table preserving stale
+#: authored values) join them, and the membership rule has to be stated carefully because
+#: three of the five are *declaration*-vs-geometry checks that never inspect what was
+#: placed. What makes them belong is that the drawing does place something FOR the
+#: declaration: an absent hole gets a centre mark, and on the automatic path a ``⌀6 THRU``
+#: leader as well (the authored path draws the mark alone — the check is
+#: declaration-vs-geometry and never inspects what landed, so it fires either way); and a
+#: gear feature gets a data table bound to it by provenance (``registry.names_for_feature``
+#: — the reconciliation fails as ``gear_requirement_missing`` when there is not exactly
+#: one). A table whose
+#: declared axis the geometry contradicts is describing a feature the part does not have
+#: there, exactly as the leader is. That the axis has no printed row does not make the table
+#: silent about it, any more than the leader prints the hole's coordinates.
+#:
+#: Hence the basis is "contradicted by its SOURCE", not "by the geometry": the source is the
+#: part for four of the five, and the authored requirement for ``gear_requirement_mismatch``,
+#: where the sheet's table has drifted from the values it claims to carry.
+#:
+#: What stays OUT is content that was not drawn — ``dimension_kind_unsupported``, the
+#: ``*_dropped`` family, the ``*_missing`` family. An omission is a gap, not a lie. Note
+#: this is a statement about what fidelity means, not about where those codes go instead:
+#: most of them score on NO component at all (see :func:`quality_components`).
+#:
+#: Hand-maintained, and that is a known weakness — nine lines below,
+#: :data:`_LEGIBILITY_CODES` argues for a suffix rule precisely because "a list has to be
+#: remembered". There is no suffix that means "false", so this list must be. What keeps it
+#: from rotting silently is :data:`_UNSCORED_CODES`: every code the engine emits is in
+#: exactly one of the three, and a new one fails the audit until somebody classifies it.
+_FIDELITY_CODES = frozenset(
+    {
+        "label_vs_measured",
+        "declared_feature_absent",
+        "gear_repeat_count_mismatch",
+        "gear_axis_mismatch",
+        "gear_requirement_mismatch",
+    }
+)
+
+
+#: Every lint code that scores on NO quality component, named so that a new one cannot
+#: arrive unclassified (#1176 review r3).
+#:
+#: Nothing here is a bug by itself. Most are omissions — completeness's territory, and it
+#: builds its ledger from requirement outcomes rather than from lint codes, so it never
+#: reads this. What the register buys is the property the three sets could not have
+#: separately: every code the engine emits is in fidelity, legibility, this, or
+#: :data:`_STAGE_ROUTED_CODES`, or carries a ``*_dropped`` suffix that no producer overrides
+#: with a validation stage — audited over the source by
+#: ``tests/test_issue_1176_quality_fidelity.py``. A new truth-class code would otherwise
+#: score as perfectly truthful and nothing would say so — the failure mode the
+#: ``_FIDELITY_CODES`` note above admits to and, before this, only admitted to.
+#:
+#: Stated that carefully because the first version of this sentence claimed the union was
+#: "exactly the set of codes the engine emits", which was 41 against 55 (#1176 review r5).
+#:
+#: Membership is not an endorsement: several of these arguably SHOULD score somewhere, and
+#: this register is what makes that visible instead of implicit.
+_UNSCORED_CODES = frozenset(
+    {
+        "authored_dim_degenerate",
+        "authored_omission",
+        "axial_length_missing",
+        "boss_height_missing",
+        "dimension_kind_unsupported",
+        "feature_count_mismatch",
+        "feature_no_centermark",
+        "feature_not_dimensioned",
+        "feature_not_located",
+        "gdt_side_relaxed",
+        "gear_correspondence_unverifiable",
+        "gear_semantics_missing",
+        "missing_principal_dimension",
+        "pad_footprint_not_defined",
+        "pmi_not_extracted",
+        "pmi_not_lowered",
+        "pmi_not_rendered",
+        "pmi_present_but_ignored",
+        "pocket_not_located",
+        # A `_dropped` code that scores NOWHERE, which is why the suffix cannot be trusted
+        # on its own. `is_placement_drop` consults `outcome_stage` FIRST and only falls back
+        # to the suffix, and every `_skip_section` emission is `outcome_stage="validation"`
+        # — a deliberate choice, because a placement stage would make an optional section's
+        # absence a scale blocker. So the section-A–A loss reaches no component (#1176
+        # review r4). `sections.py` said the opposite four lines above the call that makes
+        # it false; that comment is corrected.
+        "section_dropped",
+        "profiled_bore_not_dimensioned",
+        "unrecognised_defining_geometry",
+    }
+)
+
+#: `_dropped` codes whose component depends on the ISSUE, not the code — emitted with
+#: ``outcome_stage="placement"`` at one site and ``"validation"`` at another, so the same code
+#: scores on legibility for one instance and on nothing for the next.
+#:
+#: Registered because the audit's "a `_dropped` suffix means legibility" shortcut is only
+#: true where no site sets a validation stage, and that is an assumption about code the audit
+#: can check rather than assume. It found `section_dropped` scoring nowhere while a comment
+#: beside its emission asserted the opposite.
+#:
+#: Eleven of these — every entry except `gdt_dropped` and `pmi_dropped` — are codes handed
+#: to a leader job as ``drop_code`` data: `leaders.py`'s one drop recorder stages them
+#: ``"validation"`` on a rendered-geometry failure and ``"placement"`` otherwise, so all
+#: eleven have the `section_dropped` shape. TEN of them were invisible to the first audit,
+#: which read only codes written as literals AT a producer call, and were new to these
+#: registers; `callout_dropped` is the eleventh and was neither — it is also written as a
+#: literal at three producer calls, so the audit always saw it (#1176 review r5, corrected
+#: twice: the first note said "the eleven below `pmi_dropped`", which is ten, and the second
+#: still said all eleven had been invisible).
+_STAGE_ROUTED_CODES = frozenset(
+    {
+        "callout_dropped",
+        "gdt_dropped",
+        "pmi_dropped",
+        "boss_dia_dropped",
+        "chamfer_dropped",
+        "diameter_dropped",
+        "fillet_dropped",
+        "flat_dropped",
+        "groove_dropped",
+        "pocket_dropped",
+        "polygonal_boss_dropped",
+        "polygonal_stock_dropped",
+        "slot_dropped",
+    }
+)
+
+#: Code FAMILIES built by interpolating a requirement state (``hole_requirement_missing``,
+#: ``…_suppressed``, ``…_unverifiable``). Registered by prefix because the state comes from a
+#: `Literal` alias rather than a literal at the call site.
+#:
+#: Coarser than the sets above, deliberately: ``gear_requirement_`` appears here AND
+#: ``gear_requirement_mismatch`` is a fidelity code. The audit classifies every literal code
+#: individually, so the prefix register governs only the interpolating sites — it can never
+#: reclassify a code somebody spelled out.
+_UNSCORED_CODE_PREFIXES = (
+    "channel_requirement_",
+    "flat_requirement_",
+    "gear_requirement_",
+    "hole_requirement_",
+    "polygonal_stock_requirement_",
+    "slot_requirement_",
+)
+
+
+def _is_fidelity_issue(issue) -> bool:
+    return issue.code in _FIDELITY_CODES
+
+
+def _is_unscored_issue(issue) -> bool:
+    return not _is_legibility_issue(issue) and not _is_fidelity_issue(issue)
+
+
+def _unscored_component(issues) -> dict:
+    """The findings NO quality component scored, as data (#1176 review r4).
+
+    Reported for the same reason completeness reports ``excludes``: a caller reading four
+    components all saying "fine" would otherwise have no way to see that a third of this
+    drawing's findings reached none of them. Twenty-two of the engine's codes score nowhere
+    unconditionally, and another thirteen do whenever their producer stages them, and
+    before this the only record of that was a comment.
+
+    ``unclassified`` is the fail-open signal made visible. A code here that is not in
+    :data:`_UNSCORED_CODES` reached no component AND nobody decided it should — which is
+    precisely how a new truth-class code would be silently reported as perfectly truthful.
+    The audit in ``tests/test_issue_1176_quality_fidelity.py`` catches that statically over
+    every code the engine can emit; this catches it at runtime, over the ones it just did.
+    """
+    unscored = [issue for issue in issues if _is_unscored_issue(issue)]
+    by_code = Counter(issue.code for issue in unscored)
+    return {
+        # `available`/`score` so a caller can walk `quality.values()` uniformly. This is an
+        # inventory, not a fifth axis: it is always computable, and it is deliberately not a
+        # number — pricing "how much went unscored" would be a fifth score nobody asked for
+        # (#1176 review r5, which found `for c in quality.values(): c["available"]` raising).
+        "available": True,
+        "score": None,
+        "issues": len(unscored),
+        "by_code": dict(sorted(by_code.items())),
+        "unclassified": sorted(
+            code
+            for code in by_code
+            if code not in _UNSCORED_CODES
+            and not code.startswith(_UNSCORED_CODE_PREFIXES)
+            and code not in _STAGE_ROUTED_CODES
+        ),
+        "reason": "reported by lint and deliberately scored on no quality component",
+    }
+
 
 def _is_legibility_issue(issue) -> bool:
+    """Whether *issue* is a layout defect this component should price.
+
+    Fidelity codes are excluded OUTRIGHT rather than merely being absent from
+    :data:`_LEGIBILITY_CODES`. `is_placement_drop` accepts any issue carrying
+    ``outcome_stage="placement"`` whatever its code, so a truth defect that also reported a
+    placement outcome would be penalised on both axes and make two independent observations
+    look correlated. Comparing the two SETS cannot prevent that, and the guard that claimed
+    to was inert because its probe left `outcome_stage` at its `None` default (#1176 review
+    r4). The precedence is stated here instead, where it is a fact about the code rather
+    than about the registers.
+    """
+    if _is_fidelity_issue(issue):
+        return False
     return issue.code in _LEGIBILITY_CODES or is_placement_drop(issue)
 
 
@@ -150,10 +377,33 @@ def _primary_issues(issues, aggregation=None) -> list[LintIssue]:
 
 
 def _issue_component(
-    issues, *, error_penalty: float, warning_penalty: float, aggregation=None
+    issues,
+    *,
+    error_penalty: float,
+    warning_penalty: float,
+    aggregation=None,
+    basis: str = "layout_issue_severity_with_info_floor",
+    available: bool = True,
+    unavailable_reason: str | None = None,
 ) -> dict:
     # Compatibility fields remain raw lint-finding counts. Only the scalar penalty uses the
     # explicitly grouped primary inventory; both inventories are exposed and documented.
+    #
+    # An issue OUTRANKS the availability argument. Unavailability means "no evidence either
+    # way", so a component that HAS a finding is by definition available — and the caller's
+    # predicate is an approximation of the checks' domains, while the finding is the check
+    # having fired. The first cut let the argument win, and a `declared_feature_absent` on a
+    # 20 mm box was reported as `{available: False, score: None}`: the gate fell closed over
+    # a detected falsehood (#1176 review r3).
+    #
+    # A FAIL-SAFE, not a live branch: once the predicate covers the checks' domains, an issue
+    # cannot arise while it is False, so no drawing reaches this line with work to do. Kept
+    # because the predicate has drifted from those domains three times in this issue's
+    # review history, and this is the difference between a drift that misreports and a drift
+    # that loses a finding. Guarded by a direct test of this function rather than through
+    # `lint_summary()` for exactly that reason — a consumer-level test of it would have to
+    # reproduce the drift it exists to survive (#1176 review r5).
+    available = available or bool(issues)
     errors = sum(issue.severity == "error" for issue in issues)
     warnings = sum(issue.severity == "warning" for issue in issues)
     infos = sum(issue.severity == "info" for issue in issues)
@@ -164,12 +414,14 @@ def _issue_component(
     primary_warnings = sum(issue.severity == "warning" for issue in primary)
     primary_infos = sum(issue.severity == "info" for issue in primary)
     primary_by_code = Counter(issue.code for issue in primary)
-    return {
+    component = {
         "available": True,
-        # Every issue reaching here is a legibility defect by construction, so info severity
-        # takes the warning floor too. Lint uses it for "place what fits" drops and for
-        # readability faults like a leader crossing a silhouette; either way the component
-        # cannot report 1.0 while itemising output it has just called unreadable (#1127).
+        # Info severity takes the WARNING floor: an issue reaching here is a defect in the
+        # axis being scored, and the component cannot report 1.0 while itemising a finding it
+        # has just made. Lint uses `info` for "place what fits" drops and readability faults
+        # like a leader crossing a silhouette (#1127), and — since #1176 — for every gear
+        # reconciliation in an ASSEMBLY context (`gear_coverage.py`), where a data table
+        # contradicting the geometry is no less false for the part having siblings.
         "score": max(
             0.0,
             1.0
@@ -198,9 +450,23 @@ def _issue_component(
         ),
         # Keep the established basis value: severity and the info floor did not change.
         # This additive field names the inventory to which that basis is now applied.
-        "basis": "layout_issue_severity_with_info_floor",
+        "basis": basis,
         "score_inventory": "primary_issues",
     }
+    if available:
+        return component
+    # Same contract as an unavailable completeness or restraint component: no evidence is
+    # DATA, not a perfect score. Fidelity affirming "nothing false was said" over a drawing
+    # that says nothing is the fail-open this module's own docstring argues against — and
+    # unlike legibility, where an empty sheet genuinely is legible, the truthfulness of an
+    # empty utterance is not the same kind of 1.0.
+    #
+    # The SHAPE is kept whole, unlike completeness's `_empty_completeness`, because this one
+    # is the second dict under a key whose first (`legibility`) is always available: a caller
+    # that reads `quality["fidelity"]["by_code"]` the way README reads legibility's must get
+    # an empty mapping, not a `KeyError`. Every count is genuinely zero here — an issue would
+    # have made the component available two lines above.
+    return {**component, "available": False, "score": None, "reason": unavailable_reason}
 
 
 def _empty_completeness(reason: str, unrecognised: int) -> dict:
@@ -299,6 +565,7 @@ def quality_components(
     issues,
     error_penalty: float,
     warning_penalty: float,
+    has_asserted_content: bool,
     _aggregation=None,
 ) -> dict:
     """Return independently usable drawing-quality observations.
@@ -310,6 +577,13 @@ def quality_components(
     denominator ``excludes`` — a feature recognition never identified is absent from the
     ledger entirely, so a perfect audited score is not a complete drawing.
 
+    The four axes answer different questions and none substitutes for another:
+    completeness asks whether required content landed, restraint whether there is too much
+    of it, legibility whether a reader can make it out, and **fidelity whether what it says
+    is true**. A drawing can be complete, restrained and legible while asserting a
+    measurement the part does not have, and before fidelity existed that combination scored
+    perfect on the only component available (#1176).
+
     Legibility's ``errors``/``warnings``/``infos``/``by_code`` fields retain their original
     raw-finding semantics. ``primary_*`` fields describe the inventory used by ``score``;
     ``affected_pairs`` is the number of raw pair findings that opted into that aggregation.
@@ -317,6 +591,7 @@ def quality_components(
     """
 
     legibility_issues = [issue for issue in issues if _is_legibility_issue(issue)]
+    fidelity_issues = [issue for issue in issues if _is_fidelity_issue(issue)]
     return {
         "completeness": _completeness_component(
             recognition, features, registry, omissions, issues
@@ -334,6 +609,19 @@ def quality_components(
             warning_penalty=warning_penalty,
             aggregation=_aggregation,
         ),
+        "fidelity": _issue_component(
+            fidelity_issues,
+            error_penalty=error_penalty,
+            warning_penalty=warning_penalty,
+            aggregation=_aggregation,
+            basis="drawn_assertion_contradicted_by_its_source",
+            available=has_asserted_content,
+            unavailable_reason=(
+                "the drawing states nothing this axis can check: no measured quantity is "
+                "drawn and no feature is declared"
+            ),
+        ),
+        "unscored": _unscored_component(issues),
     }
 
 

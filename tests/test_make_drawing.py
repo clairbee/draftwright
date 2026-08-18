@@ -5265,7 +5265,21 @@ class TestLintSummaryAndDrops:
         assert s["passed"] is (s["errors"] == 0)
         assert 0.0 <= s["score"] <= 1.0
         assert s["diagnostic_score"] == s["score"]
-        assert set(s["quality"]) == {"completeness", "restraint", "legibility"}
+        # `fidelity` joined in #1176: completeness asks whether required content landed,
+        # restraint whether there is too much of it, legibility whether a reader can make
+        # it out, and fidelity whether what it says is TRUE. A drawing can pass the first
+        # three and still assert a measurement the part does not have.
+        # `unscored` is not a fifth axis — it is the inventory of findings that reached
+        # NONE of the four, reported for the same reason completeness reports `excludes`
+        # (#1176 review r4): four components all saying "fine" would otherwise conceal that
+        # some of this drawing's findings were scored by nothing at all.
+        assert set(s["quality"]) == {
+            "completeness",
+            "restraint",
+            "legibility",
+            "fidelity",
+            "unscored",
+        }
         completeness = s["quality"]["completeness"]
         assert completeness["available"] is True
         assert completeness["audited_score"] == 1.0

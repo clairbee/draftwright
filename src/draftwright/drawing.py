@@ -71,9 +71,11 @@ from draftwright.export import (
 from draftwright.intents import Intent
 from draftwright.layout import FitBoxTrace, fit_box
 from draftwright.linting import (
+    EXAMINABLE_DECLARED_KINDS,
     CoverageState,
     LintIssue,
     _suggest_fix,
+    is_dimension_like,
     lint_axial_coverage,
     lint_boss_height_coverage,
     lint_channel_coverage,
@@ -3252,7 +3254,7 @@ class Drawing:
         - ``passed`` — no error-severity issues;
         - ``score`` — legacy coarse 0–1 diagnostic heuristic (see ``_SCORE_*``);
         - ``diagnostic_score`` — the same value under its honest name;
-        - ``quality`` — separable completeness, restraint, and legibility components. No
+        - ``quality`` — separable completeness, restraint, legibility and fidelity components. No
           composite drawing-quality score is manufactured (#1127). Legibility's existing
           severity/code counts are raw findings; its ``primary_*`` counts and scalar group
           producer-identified pair findings by annotation and failure mechanism (#1147);
@@ -3295,6 +3297,32 @@ class Drawing:
             registry=self._registry,
             omissions=self._build.omissions,
             issues=issues,
+            # Fidelity asks whether what the drawing SAYS is true, so a drawing that says
+            # nothing measurable has no answer rather than a perfect one.
+            #
+            # The two terms are the domains of the five truth-class checks: a drawn measured
+            # quantity for `label_vs_measured`, and a declared feature of a kind some check
+            # actually EXAMINES for the other four — `EXAMINABLE_DECLARED_KINDS`, owned by
+            # `linting/coverage.py` beside the check that uses it.
+            #
+            # Three earlier cuts got this wrong in three different ways. The first asked
+            # whether any item had a `label_bbox` — true of a title block — so it meant
+            # "this sheet has text on it", and it discarded a real `declared_feature_absent`
+            # (#1176 review r3). The second narrowed to drawn measurements alone and then
+            # reported "asserts no measurable content" over a ⌀6 THRU callout whose
+            # declaration had just been checked and passed (r4). The third accepted ANY
+            # declared feature, so a declared slot — which no truth check looks at — was
+            # certified "nothing false said" by a drawing that said nothing (r5).
+            has_asserted_content=(
+                any(is_dimension_like(item) for item in self.items)
+                or (
+                    self._model_declared
+                    and any(
+                        getattr(f, "kind", None) in EXAMINABLE_DECLARED_KINDS
+                        for f in getattr(self._part_model, "features", ())
+                    )
+                )
+            ),
             error_penalty=_SCORE_ERROR_PENALTY,
             warning_penalty=_SCORE_WARNING_PENALTY,
             _aggregation=aggregation,
