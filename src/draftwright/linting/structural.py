@@ -154,6 +154,35 @@ def _label_bbox(item, warned=None):
         return None
 
 
+def _label_reading(item, label: str) -> float | None:
+    """The value *item*'s label asserts about the path it is drawn on, or ``None``.
+
+    A bare ``N× v`` is ambiguous, because this codebase draws that label under two
+    conventions and the string cannot tell them apart:
+
+    * ``dim_step_typ`` "8× 15" is ONE representative step drawn at **15**;
+    * a hole pitch "3× 20" (``annotations/holes.py``, and three sites in
+      ``annotations/from_model.py``) spans the whole run at **60**.
+
+    So the producer says which. The one per-unit renderer sets ``_dw_label_value`` to the
+    number the ``N×`` multiplies — carried from ``ApprovedDimension.value``, so lint reads
+    the compiler's own number rather than re-deriving a convention from the rendered string
+    (ADR 0016 Amendment 1). Everything else means what its label says.
+
+    An earlier cut returned BOTH readings for every untagged ``N× v`` and let a dimension
+    pass if it matched either. That silently disabled the check on the four
+    product-convention producers: the per-unit value is precisely the length you get from
+    spanning one member instead of the run — the most likely wrong endpoint for a pitch dim,
+    and exactly the defect #1153 and #1209 report. A real engine-produced "3× 30" drawn
+    across one pitch went from a 200% warning to no finding at all.
+
+    If another per-unit producer appears untagged it will report a large false discrepancy —
+    loudly, as an error — which is the right failure mode for a missing tag.
+    """
+    declared = getattr(item, "_dw_label_value", None)
+    return float(declared) if declared is not None else _label_value(label)
+
+
 def _label_value(label: str) -> float | None:
     """The dimensional value a dimension/callout label asserts, or ``None``.
 
@@ -842,11 +871,49 @@ def _is_angular_label(label: str) -> bool:
     return any(mark in lowered for mark in _DEGREE_MARKS)
 
 
+#: At or above this relative discrepancy a dimension does not merely round differently from
+#: its geometry — it states something false, and the drawing asserts a measurement the part does
+#: not have. That is a different KIND of defect from everything else lint reports: an
+#: overflowing view or a missing callout leaves the drawing INCOMPLETE, while this leaves it
+#: actively MISLEADING, and a reader has no way to tell which of the two numbers to believe.
+#:
+#: So it is an ERROR, and a drawing carrying one cannot report ``passed: True``. Measured
+#: before that change on A2: an authored dimension labelled 99 over a 16 mm path — a 518%
+#: contradiction — reported ``passed: True``, ``errors: 0``, legacy ``score`` 0.95, with
+#: that contradiction as the ONLY finding. The severities were inverted against
+#: manufacturing risk: a view running off the page was an error while a false measurement
+#: was a warning (#1153). (An earlier version of this comment blamed an "unrelated
+#: `view_out_of_bounds`" — that belongs to the A3 variant, where ``passed`` was already
+#: ``False``; on A2 nothing else was wrong at all, and a finding that "fails the drawing"
+#: cannot coexist with ``passed: True``.)
+#:
+#: The threshold exists because the 0.5% REPORTING floor below is close enough to display
+#: rounding and projected foreshortening to be a judgement call; a discrepancy of several
+#: percent cannot be either.
+#:
+#: It is a POLICY NUMBER, chosen, with no observed sub-threshold case to calibrate against.
+#: Measured on the DEFAULT page — which is what `build_drawing(step)` does — the corpus
+#: produces nine discrepancies, all on `pmi="annotate"`: 15.7, 90.4, 92.3, 96.1 x3, 97.6 x2
+#: and 99.1 per cent, across CTC-03/04/05. The smallest is 15.7%, three times the threshold.
+#:
+#: Three earlier versions of this comment were wrong about that corpus, which is why the
+#: qualification matters. The first said "every real case observed sits far above it" and
+#: listed numbers including one not reproducible anywhere. The second cited a CTC-01 record
+#: at 3.9% that does not exist — that record is ANGULAR, and #1207 refuses it before
+#: anything can measure it. The third said "the only discrepancy of any size is 99.1%",
+#: true only with `page="A3"` forced, which is not the default path. Measure on the default
+#: page, and say which page, before adding a number here.
+#:
+#: What can be stated exactly: a foreshortened dimension gives `sec θ - 1`, so 0.05
+#: tolerates obliquity up to 17.75 degrees. If a more oblique dimension turns up, widen the
+#: threshold on that evidence rather than assuming noise.
+_MATERIAL_LABEL_DISCREPANCY = 0.05
+
+
 def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=None) -> None:
     label = _item_label(item)
     measured = getattr(item, "measured_length", None)
 
-    label_val = _label_value(label)
     # An ANGULAR label is denominated in degrees; `measured_length` is a projected path in
     # millimetres. Comparing them is a category error, not a discrepancy — it reported a
     # 60 deg dovetail flank as "differs from measured path length 16.000 by 275.0%",
@@ -861,6 +928,10 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
     # the whole protection. An earlier version of this comment claimed the marker "survives
     # every path into lint", which is false. Tagging the annotation with its kind would fix
     # that properly; it is not done here because nothing angular now reaches the renderer.
+    #
+    # Both guards apply: an angular label is skipped outright (its units differ), and a
+    # repeat label is read as its producer declared it (#1153).
+    label_val = _label_reading(item, label)
     if label_val is not None and measured is not None and not _is_angular_label(label):
         # When drawing_scale != 1.0 the geometry was scaled up before projecting
         # (e.g. part.scale(5) for a 7.5 mm feature drawn at 5:1). The measured
@@ -874,7 +945,7 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
             if ratio > 0.005:
                 issues.append(
                     LintIssue(
-                        severity="warning",
+                        severity="error" if ratio >= _MATERIAL_LABEL_DISCREPANCY else "warning",
                         message=(
                             f"Dim '{label}': label value {label_val:.3f} differs from "
                             f"measured path length {measured:.3f}"
