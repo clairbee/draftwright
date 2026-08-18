@@ -38,6 +38,11 @@
 
 ### Changed
 
+- `Drawing.suppressions()` rows gain a `conveyed_by` key: the dimension that states a
+  withheld measurement instead, or `None` when nothing takes the fact over (#1154). It is not
+  a synonym for the existing `authored` flag — that says whose decision it was, this says
+  where the measurement went.
+
 - Updated the exact `b123d-recognisers` production lock from 0.2.2 to 0.2.4.
   The immutable PyPI wheel/sdist hashes and capability-manifest digest `d0023d30e583c03abc55f09dfeaaa56fddf56334afa0417818480b2fa2ce3f0f` are
   recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
@@ -53,6 +58,19 @@
   normal consumer gates run on the generated PR.
 
 ### Fixed
+
+- A part whose feature-local extent runs between the same two faces as an overall extent
+  is no longer dimensioned twice (#1154). GRM-04's drive plate printed `4.5` twice — once
+  as the hub's height and once as the overall thickness — because two detected records
+  claim one physical fact. The overall extent keeps it; the feature-local one is withheld
+  and records which dimension the reader finds it on. Reconciliation is by exact
+  support-plane coincidence, never by value: a square part's two equal extents run between
+  different faces and remain two facts (#997). A measurement is handed over only when the
+  extent receiving it is actually drawn — by the planner's rules, by the compiler's
+  overall-height rules, and by an authored set — and never when the yielding dimension
+  carries a tolerance, since a toleranced dimension and an untoleranced one are not the same
+  requirement. (A tolerance on the *receiving* extent is the same requirement on the same two
+  faces, and does not prevent the consolidation.)
 
 - Stable release and TestPyPI snapshot builds now update package metadata and the independently
   validated Draftwright consumer-contract identity atomically. This prevents stripped `.dev0`

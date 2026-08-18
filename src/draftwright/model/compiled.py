@@ -61,7 +61,6 @@ from draftwright.model.ir import (
     PatternFeature,
     PocketFeature,
     Point,
-    PolygonalStockFeature,
     RotationalFeature,
     SlotFeature,
     SlotPatternFeature,
@@ -74,6 +73,8 @@ from draftwright.model.planner import (
     location_datum,
     plan_dimensions,
     plan_locations,
+    polygonal_stock_conveys_height,
+    rotational_od_conveys_height,
 )
 
 
@@ -421,6 +422,15 @@ class Omission:
     parameter_id: str
     value: float | None
     reason: str
+    #: The dimension that states this fact instead, when the omission was a
+    #: consolidation rather than a withholding (#1154). ``None`` wherever nothing takes the
+    #: fact over — but NOT a synonym for "the rule set did it": an authored omission carries
+    #: it too whenever the author's set keeps the owner, because the author chooses which
+    #: dimensions are drawn and not where the geometry states a fact. Read ``authored`` for
+    #: whose decision it was and this for where the measurement went.
+    #: Completeness lint requires this owner to have actually landed; a consolidation
+    #: onto a dimension the placer then drops is a missing measurement, not a covered one.
+    conveyed_by: DimensionId | None = None
 
     @property
     def authored(self) -> bool:
@@ -811,7 +821,10 @@ def _compile_overall_height(
     """The part's overall height — the envelope's ``height`` parameter, drawn in the
     front-view right strip rather than below a view, which is why it rides the ladder.
 
-    Every reason it might not be drawn is settled here, in one place. They used to be split:
+    Every reason it might not be drawn is settled here — as conditions named in `planner`
+    (`polygonal_stock_conveys_height`, `rotational_od_conveys_height`) and applied here, so
+    that #1154's consolidation can ask the same questions without re-deriving them. They used
+    to be split in the way that actually hurts:
     the planner suppressed it for a Z-turned part while the renderer independently suppressed
     it for that AND an X/Y rotational OD AND `include_overall`, and neither knew about the
     other. ``include_overall`` is drawing state (the finalize drain's explicit-envelope-height
@@ -824,7 +837,13 @@ def _compile_overall_height(
     # Whole polygonal stock already owns the same axial extent as `stock_length.length`.
     # Letting the bbox fallback add `dim_height` would state one physical requirement twice,
     # and would make authored suppression ineffective through an unrelated synthetic value.
-    if any(isinstance(feature, PolygonalStockFeature) for feature in model.features):
+    #
+    # Asked through the planner's predicates rather than re-tested here: its consolidation
+    # needs the same answers (#1154), and the paragraph above about two owners of this
+    # decision applies to a second owner in either direction. Each CONDITION is consulted
+    # where it belongs — collapsing both into one early return here deleted the rotational
+    # case's `Omission` for a part with no envelope feature (#1154 review r2).
+    if polygonal_stock_conveys_height(model):
         return None, None, []
     env = next((f for f in model.features if isinstance(f, EnvelopeFeature)), None)
     bb: Any = model.bbox  # build123d BoundBox
@@ -878,7 +897,9 @@ def _compile_overall_height(
             )
             return None, ApprovedContingency("step_length", ladder, inactive), [inactive]
         return ladder, None, []
-    if rot is not None and rot.frame.axis in ("x", "y"):
+    if rot is not None and rotational_od_conveys_height(model):
+        # `rot is not None` is implied by the predicate and stated anyway, so the message
+        # below can read the axis off it without a second narrowing.
         return (
             None,
             None,
@@ -1159,6 +1180,7 @@ def _compile_groups(planned) -> tuple[list[ApprovedGroup], list[Omission]]:
                 pd.param.parameter_id,
                 float(pd.param.value),
                 pd.reason or "suppressed",
+                conveyed_by=pd.conveyed_by,
             )
             for pd in g.dims
             if pd.suppressed
