@@ -220,6 +220,7 @@ def lint_drawing(
     ann_box_cache: dict | None = None,
     view_material_fields: dict | None = None,
     view_names: list | None = None,
+    check_view_placement: bool = True,
     _aggregation: _IssueAggregation | None = None,
 ) -> list[LintIssue]:
     """Structural checks on a composed annotation list, duck-typed.
@@ -300,6 +301,14 @@ def lint_drawing(
             that order would silently bind a cache dict here — degrading the name, then
             raising ``KeyError`` once the cache was warm and its ``id()`` keys were
             indexed as a name list.
+
+        check_view_placement: whether to run the checks that compare views to EACH OTHER
+            and to the page (``view_overlap``, ``view_out_of_bounds``). They depend on no
+            annotation, so a caller that lints the same drawing in several passes — as
+            :meth:`draftwright.Drawing.lint` does, one per annotation scale group — must
+            ask for them exactly once or their findings are counted once per pass (#1204).
+            The annotation-vs-view checks always run, because each pass carries different
+            annotations.
 
     Returns:
         list[LintIssue].
@@ -442,6 +451,7 @@ def lint_drawing(
             items,
             issues,
             view_names=view_names,
+            check_view_placement=check_view_placement,
             page_bbox=page_bbox,
             edge_cache=view_edge_cache,
             box_cache=box_cache,
@@ -557,6 +567,7 @@ def _lint_view_shapes(
     issues,
     *,
     view_names=None,
+    check_view_placement=True,
     page_bbox=None,
     edge_cache=None,
     box_cache=None,
@@ -705,6 +716,18 @@ def _lint_view_shapes(
                         code="leader_crosses_silhouette",
                     )
                 )
+
+    # The remaining checks compare views against EACH OTHER and against the page, so they
+    # say nothing about annotations and give the same answer however the annotations are
+    # grouped. `Drawing._lint` splits annotations by scale and calls this once per group,
+    # which emitted each of their findings once PER GROUP (#1204).
+    #
+    # The annotation-vs-view checks above must still run for every group, because each group
+    # holds DIFFERENT annotations. A first cut of #1204 nulled `view_shapes` for later
+    # groups instead and lost their `view_annotation_inside_extents` findings — trading a
+    # double-count for a missed defect.
+    if not check_view_placement:
+        return
 
     # #160 — view shape vs view shape bounding box overlaps
     for i, (aname, abb, _) in enumerate(named_views):
