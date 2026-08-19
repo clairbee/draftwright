@@ -9,6 +9,8 @@ import sys
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 
+import pytest
+
 
 @contextmanager
 def counting_calls(functions: Mapping[str, Callable[..., object]]):
@@ -82,3 +84,74 @@ def counting_calls(functions: Mapping[str, Callable[..., object]]):
         yield counts
     finally:
         sys.setprofile(previous)
+
+
+# ── The `unit` tier (#656): pure-logic tests, zero OCC geometry ──────────────────────
+#
+# `uv run pytest -m unit` is the inner loop: it must run in seconds and build nothing.
+# Membership is centralised here so the tier has one place to grow; honesty is enforced
+# by the runtest hooks below — constructing any build123d Shape while a unit-marked
+# test runs fails it, and the patch is installed in `pytest_runtest_setup`, BEFORE
+# fixture setup, so geometry built in a fixture of any scope on behalf of a unit test
+# is intercepted too (a function-scoped autouse fixture missed module-scoped fixtures;
+# caught by the #1226 review's probe). **Known gap** (documented, in the sibling
+# ratchets' style): geometry constructed at module IMPORT time runs during collection,
+# before any runtest hook — none of these modules does that, and an import-time OCC
+# build would also show up as collection slowness. A module moves to this list only if
+# every test in it passes under the enforcement.
+
+_UNIT_MODULES = frozenset(
+    {
+        "test_api_docs.py",
+        "test_architecture_docs.py",
+        "test_carve_free_position_callers.py",
+        "test_counting_calls.py",
+        "test_cross_repository_delivery_protocol.py",
+        "test_deprecation_dates.py",
+        "test_import_boundaries.py",
+        "test_label_provenance.py",
+        "test_layout.py",
+        "test_linting.py",
+        "test_pmi_part21.py",
+        "test_principal_profile_classifier.py",
+        "test_private_test_attr_reads.py",
+        "test_private_test_imports.py",
+        "test_quality_components.py",
+        "test_recogniser_adoption.py",
+        "test_registry.py",
+        "test_two_repository_workflow.py",
+        "test_workflows.py",
+    }
+)
+
+_SHAPE_INIT = pytest.StashKey()
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.path.name in _UNIT_MODULES:
+            item.add_marker(pytest.mark.unit)
+
+
+def _forbidden_shape_init(self, *args, **kwargs):
+    raise AssertionError(
+        "this test is in the `unit` tier (conftest._UNIT_MODULES) but constructs "
+        "build123d geometry — move the module out of the tier or make the test pure (#656)"
+    )
+
+
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("unit") is None:
+        return
+    from build123d.topology import shape_core
+
+    item.stash[_SHAPE_INIT] = shape_core.Shape.__init__
+    shape_core.Shape.__init__ = _forbidden_shape_init
+
+
+def pytest_runtest_teardown(item, nextitem):
+    original = item.stash.get(_SHAPE_INIT, None)
+    if original is not None:
+        from build123d.topology import shape_core
+
+        shape_core.Shape.__init__ = original

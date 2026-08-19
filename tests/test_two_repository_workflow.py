@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import pytest
 
@@ -42,6 +43,9 @@ def test_policy_defines_compatibility_landing_rollback_and_failure_ownership() -
 def test_one_command_candidate_entry_point_delegates_to_package_owned_harness() -> None:
     result = subprocess.run(
         [
+            # Through the interpreter, not the shebang: Windows cannot exec a
+            # `#!/usr/bin/env python3` script directly (WinError 193).
+            sys.executable,
             str(ROOT / "scripts" / "check-recogniser-candidate"),
             "--package",
             str(ROOT),
@@ -56,7 +60,8 @@ def test_one_command_candidate_entry_point_delegates_to_package_owned_harness() 
     assert plan["owner"] == "b123d-recognisers"
     assert plan["draftwright"] == str(ROOT.resolve())
     assert plan["command"][-3:] == ["--draftwright", str(ROOT.resolve()), "--plan"]
-    assert "tools/check_downstream.py" in plan["command"][2]
+    # PurePath, not a substring: the emitted path is native (backslashes on Windows).
+    assert PurePath(plan["command"][2]).parts[-2:] == ("tools", "check_downstream.py")
 
 
 def test_maintenance_dispatch_runs_one_coverage_suite_and_never_the_slow_tier() -> None:
@@ -139,7 +144,9 @@ def test_current_release_lock_has_machine_checked_registry_evidence() -> None:
     assert lock.count('name = "b123d-recognisers"') > 1, (
         "the checker must distinguish the package block from dependency-table references"
     )
-    subprocess.run([str(ROOT / "scripts" / "check-recogniser-release")], cwd=ROOT, check=True)
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check-recogniser-release")], cwd=ROOT, check=True
+    )
 
 
 @pytest.mark.parametrize("heading", ("## Unreleased", "## [Unreleased]"))

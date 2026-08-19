@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from build123d import Align, Cylinder, Pos, Rotation
 
 from draftwright import build_drawing
@@ -48,6 +49,16 @@ def _probe(dwg, *, offset):
     )
 
 
+@pytest.fixture(scope="module")
+def thin_neck_drawing():
+    """One thin-neck build shared by the read-only probe critiques below (#1226 review).
+
+    Every consumer synthesises its own probe and only READS the drawing (views,
+    material fields, lint); a test that mutates build state must build its own.
+    """
+    return build_drawing(_thin_neck(), number="X")
+
+
 def _silhouette_issues(dwg, items, *, with_field=True):
     return [
         issue
@@ -61,41 +72,41 @@ def _silhouette_issues(dwg, items, *, with_field=True):
 
 
 class TestTheCheckNeedsTheField:
-    def test_a_shaft_re_entering_the_body_is_reported(self):
-        dwg = build_drawing(_thin_neck(), number="X")
+    def test_a_shaft_re_entering_the_body_is_reported(self, thin_neck_drawing):
+        dwg = thin_neck_drawing
         assert _silhouette_issues(dwg, [*dwg.items, _probe(dwg, offset=4.0)])
 
-    def test_a_single_traversal_stays_clean(self):
+    def test_a_single_traversal_stays_clean(self, thin_neck_drawing):
         # Same part, same direction, straight through the neck: one traversal out, which
         # is what every correct callout does. Mutation — charging the first traversal —
         # flags this and condemns the whole sheet.
-        dwg = build_drawing(_thin_neck(), number="X")
+        dwg = thin_neck_drawing
         assert _silhouette_issues(dwg, [*dwg.items, _probe(dwg, offset=0.0)]) == []
 
-    def test_without_a_field_the_check_reports_nothing(self):
+    def test_without_a_field_the_check_reports_nothing(self, thin_neck_drawing):
         # Deliberate: no material knowledge means no claim. Mutation — restoring an
         # outline-crossing fallback — makes this non-empty, and reintroduces exactly
         # the second opinion the shared field exists to remove.
-        dwg = build_drawing(_thin_neck(), number="X")
+        dwg = thin_neck_drawing
         probe = _probe(dwg, offset=4.0)
         assert _silhouette_issues(dwg, [*dwg.items, probe], with_field=False) == []
 
-    def test_the_message_carries_the_measured_depth(self):
+    def test_the_message_carries_the_measured_depth(self, thin_neck_drawing):
         # The notice is a magnitude, not a flag, so a reader can rank two of them. The
         # probe crosses two 10 mm flanges, so the second traversal is the 10 mm one.
-        dwg = build_drawing(_thin_neck(), number="X")
+        dwg = thin_neck_drawing
         issues = _silhouette_issues(dwg, [*dwg.items, _probe(dwg, offset=4.0)])
         assert "10.0 mm back through view" in issues[0].message
 
 
 class TestExemptionsTheFilledFieldRemoves:
-    def test_covers_diameters_is_no_longer_a_blanket_escape(self):
+    def test_covers_diameters_is_no_longer_a_blanket_escape(self, thin_neck_drawing):
         # The outline form exempted bore callouts wholesale, because a shaft leaving a
         # bore crosses two circles and read as a cut. That exemption also hid genuine
         # re-entries — on the #881 flange it hid a callout spending 27.6 mm of its 49 mm
         # shaft inside the body. Under the filled field the exit costs nothing by itself,
         # so the flag can be set and a real cut still reports.
-        dwg = build_drawing(_thin_neck(), number="X")
+        dwg = thin_neck_drawing
         probe = _probe(dwg, offset=4.0)
         probe.covers_diameters = (30.0,)
         assert _silhouette_issues(dwg, [*dwg.items, probe])
@@ -231,24 +242,25 @@ class TestCardinalityIsNotTradedForCleanliness:
         ("nist_ctc_05_asme1_ap242", 16),
     )
 
-    def test_the_dense_fixtures_place_the_same_callouts_as_before(self, tmp_path):
+    # Parametrized per fixture (#656): each dense build is ~60 s, and one test running
+    # them serially set the wall-clock floor for the whole suite under --dist loadscope.
+    @pytest.mark.slow  # >=30 s inherent dense build; post-merge tier (#656)
+    @pytest.mark.parametrize(("stem", "expected"), CASES)
+    def test_the_dense_fixtures_place_the_same_callouts_as_before(
+        self, tmp_path, monkeypatch, stem, expected
+    ):
         import json
-        import os
         from pathlib import Path
 
-        for stem, expected in self.CASES:
-            trace = tmp_path / f"{stem}.json"
-            os.environ["DRAFTWRIGHT_TRACE"] = str(trace)
-            try:
-                build_drawing(step_file=str(Path("tests/fixtures") / f"{stem}.stp"))
-                events = json.loads(trace.read_text())["pass_events"]
-            finally:
-                os.environ.pop("DRAFTWRIGHT_TRACE", None)
-            event = next(e for e in events if e.get("label") == "feature_leader_inventory")
-            assert event["objective"]["placed"] == expected, (
-                f"{stem}: the leader floor placed {event['objective']['placed']} callouts, "
-                f"not {expected} — a route preference must never cost a dimension"
-            )
+        trace = tmp_path / f"{stem}.json"
+        monkeypatch.setenv("DRAFTWRIGHT_TRACE", str(trace))
+        build_drawing(step_file=str(Path("tests/fixtures") / f"{stem}.stp"))
+        events = json.loads(trace.read_text())["pass_events"]
+        event = next(e for e in events if e.get("label") == "feature_leader_inventory")
+        assert event["objective"]["placed"] == expected, (
+            f"{stem}: the leader floor placed {event['objective']['placed']} callouts, "
+            f"not {expected} — a route preference must never cost a dimension"
+        )
 
     def test_material_is_never_an_acceptance_test(self):
         # The direct guarantee, read off the code rather than a fixture: the floor's
