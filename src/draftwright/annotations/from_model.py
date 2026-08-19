@@ -535,7 +535,21 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
             ):
                 count += 1
             else:
-                _record_slot_drop(ctx, dwg, "position", i, name, s)
+                # `pos.id`, like the width and length drops above. `render_slots` has TWO drop
+                # paths, and for a POSITION drop only the corridor one (`_far_or_drop`, ~100
+                # lines up) named its measurement; this one — the non-corridor branch, reached
+                # when `_place` fails — passed none, so a dropped slot position could reach the
+                # coverage ledger with nothing to identify it and degrade from `dropped` to
+                # `missing`. Scope that precisely: on this same branch the width and length
+                # drops immediately above ALREADY passed `wpd.id`/`lpd.id`. It was the position
+                # drop alone that was anonymous, which is why the asymmetry was easy to miss.
+                #
+                # I reverted this once, having "measured `main`" and found the record already
+                # carried `location_slot.length`. That measurement was of the OTHER call site:
+                # my test part only ever reached the corridor path. Instrumenting which line
+                # fires shows 12 nameless position drops across nist_ctc_03 and nist_ctc_04,
+                # all from here (#1231 review, finding 1).
+                _record_slot_drop(ctx, dwg, "position", i, name, s, pos.id)
         elif s.kind == "pocket" and s.frame.axis != "z":
             # Side-/front-opening pockets need two in-plane coordinates in their
             # end-on view.  The compiler approves one entry PER coordinate, each with its
@@ -556,7 +570,25 @@ def render_slots(dwg, plan, a, *, ctx, only=None) -> int:
                 if _place(axis, start, end, perp_lo, perp_hi, entry, kind, anchor="lo"):
                     count += 1
                 else:
-                    _record_slot_drop(ctx, dwg, "position", i, name, s)
+                    # `entry.id`: this is the non-Z POCKET branch, and it places one entry per
+                    # in-plane coordinate, so `entry` is the measurement being dropped. It
+                    # previously passed none, unlike the width/length drops above.
+                    #
+                    # `pos` is always None here, which is why passing `pos.id` raises — but not
+                    # for the reason an earlier version of this comment gave. The `elif` is
+                    # reached whenever the `if` is false, which includes a slot whose position
+                    # is merely too small to draw. It is None because `_compile_slot_positions`
+                    # emits only for `SlotFeature`, and `PocketFeature` is not a subclass of it
+                    # (#1231 review round 4).
+                    #
+                    # No TEST observes this — reverting it passes the full tier — but the
+                    # product does: 29 `pocket_dim_dropped` records across nist_ctc_01 and both
+                    # nist_ctc_05 fixtures gain a measurement id. An earlier version of this
+                    # comment said it was kept as correct-by-construction "not because anything
+                    # measured it", which had the direction exactly backwards: the change I
+                    # called unobservable fixes 29 records, while the one I reverted as
+                    # non-reproducing was leaving 12 broken (#1231 review, finding 3).
+                    _record_slot_drop(ctx, dwg, "position", i, name, s, entry.id)
     return count
 
 
@@ -683,6 +715,17 @@ def render_locations(dwg, plan, a, *, ctx, only=None, pinned=None) -> int:
             and a.is_rotational
             and _concentric_with_axis(a, rx, ry)
         ):
+            continue
+        # A slot's position is drawn by `render_slots`, from this same entry (it reads
+        # `slot_positions` by role). Reaching it here too is not a second view of one
+        # measurement, it is a DIFFERENT measurement with no compiled backing: this ladder
+        # takes the plan X/Y of `span[1]` and prints an offset from the datum, while the
+        # entry measures along the slot's long axis. It only ever arrived because the
+        # `loc.axis != "z"` filter above reads `axis` as "Z-normal", and for a slot `axis`
+        # is the LONG axis — so a Z-long slot fell through and an X- or Y-long one did not.
+        # The same feature type getting a plan location dim or not, depending on which way
+        # it happens to run, is the incoherence; every slot is now handled the one way (#1219).
+        if loc.role == SlotFeature.LOCATION_STEM:
             continue
         # Provenance (ADR 0010): the located feature. `resolve_feature` is the sanctioned
         # seam for exactly this — the corridor's feature map keys drop()/annotations_of().

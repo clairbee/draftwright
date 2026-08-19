@@ -1152,6 +1152,25 @@ def _compile_slot_positions(model: PartModel) -> tuple[list[ApprovedDimension], 
                 kind="length",
                 role=f.LOCATION_STEM,  # the feature owns its name (#966)
                 axis=f.long_axis,
+                # The direction the measurement RUNS, which this entry's DIRECTIONAL siblings
+                # state and it did not: `_compile_off_axis_hole_locations` passes
+                # `discriminator=meas`, a non-Z pocket the same. (Not "every sibling" — the
+                # Z-normal pocket ladder above deliberately passes none, and its comment says
+                # why.) That is the stronger framing: `discriminator=None` on a location entry
+                # MEANS "feeds both plan ladders", which is exactly what `render_locations`
+                # acted on — so on a Z-LONG slot (only nist_ctc_02 in the corpus) both ladders
+                # took it, and the Y one minted a dim claiming `location_slot.length`, a Z
+                # extent of 94.1, while drawing 430 (#1219).
+                #
+                # `axis` stays the long axis. For a SlotFeature `frame.axis` IS the long axis,
+                # and structurally so: all three construction sites — `detect.py:344`,
+                # `detect.py:367`, `declare.py:1158` — pass `axis=long_axis` unconditionally,
+                # so passing `f.frame.axis` here to "match the siblings" would be a no-op
+                # dressed up as a fix. (A draft justified this by counting slots in the corpus,
+                # which is both weaker and, at "25", wrong: there are 24.) The field genuinely
+                # means the feature normal elsewhere and the long axis here; that inconsistency
+                # is real, and naming it beats papering over it.
+                discriminator=f.long_axis,
             )
         )
     return approved, omissions
