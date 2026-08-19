@@ -15,7 +15,7 @@ from b123d_recognisers import (
 from build123d import Align, Box, Compound, Cone, Cylinder, Pos, Rot
 
 from draftwright import Sheet, build_drawing
-from draftwright.linting.hole_coverage import hole_requirement_outcomes
+from draftwright.linting.hole_coverage import canonical_hole_sites, hole_requirement_outcomes
 from draftwright.linting.issues import LintIssue
 from draftwright.model.compiled import compile_dimensions
 from draftwright.model.declare import hole as declare_hole
@@ -2317,6 +2317,45 @@ def test_unmatched_second_face_countersink_fails_closed_in_hole_ledger():
     assert [
         issue.code for issue in drawing.lint() if issue.code == "hole_requirement_unverifiable"
     ] == ["hole_requirement_unverifiable"] * 2
+
+    # `members` is EMPTY here, deliberately — the decision #1229 asked for, not an unfilled
+    # field. The tail exists precisely because the seat cannot be attributed to a hole: the
+    # `HoleRecord` waist has one countersink slot and a second seat cannot be joined to IR
+    # provenance without guessing which face it represents.
+    #
+    # Two attempts to give it a key failed, both plausibly. The seat's own opening centre is a
+    # raw world coordinate in a canonical field — it read `(0, 0, 6)` here and became `(0, 0, 0)`,
+    # colliding with the bore's key, when the solid was translated by −6. Looking up the hole the
+    # seat matched is in the right space, but `countersink_matches_hole` can accept several holes
+    # and choosing among them is the recogniser's question, not a lint module's.
+    assert all(item.members == () for item in unverifiable), [
+        (item.parameter_id, item.members) for item in unverifiable
+    ]
+
+
+def test_an_unmatched_countersink_is_still_counted_and_still_unattributable():
+    """The point of `unverifiable`: counted in the denominator, deliberately not joined.
+
+    Guards against someone "fixing" the empty `members` by inventing an attribution. If the
+    `HoleRecord` waist ever grows a second countersink slot, this seat becomes attributable and
+    the whole tail should go — that is #1229's real remainder, and this test should fail loudly
+    when it happens rather than the tail quietly persisting.
+    """
+    drawing = build_drawing(_two_face_countersunk_hole(), page="A3")
+    unverifiable = [item for item in _outcomes(drawing) if item.state == "unverifiable"]
+    assert {item.parameter_id for item in unverifiable} == {
+        "countersink.angle",
+        "countersink.diameter",
+    }
+    assert _completeness(drawing)["unverifiable"] == 2
+    for item in unverifiable:
+        assert item.members == (), (item.parameter_id, item.members)
+        assert item.source_at == (0.0, 0.0, 6.0), item.source_at
+        # `source_at` is the seat's own location and is NOT a canonical key — it is diagnostic
+        # only. That distinction is the whole of #1229 seam 1.
+        assert item.source_at not in {
+            site for hole in drawing.recognition().holes for site in canonical_hole_sites(hole)
+        }
 
 
 def test_unattached_external_countersink_false_positive_is_not_a_hole_requirement():

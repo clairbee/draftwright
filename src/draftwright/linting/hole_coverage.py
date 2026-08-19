@@ -122,7 +122,15 @@ def _members(source, *, rounded: bool = True) -> tuple[tuple[float, float, float
     if recognised is not None:
         points = tuple(hole.location for hole in recognised)
         axis = _axis_letter(HoleSpec.from_hole(recognised[0]).axis)
-        through = all(HoleSpec.from_hole(hole).bottom == "through" for hole in recognised)
+        # From the group's own spec, like `axis` above — NOT `all(...)` over the members.
+        # `bottom` is a `HoleSpec` field and patterns are built by grouping on `_spec_key`, so
+        # a group cannot mix through and blind: the `all()` was exactly equivalent while
+        # reading as if it handled a case the grouping forbids, next to a line deciding the
+        # same question the other way (#1229). Note this is NOT symmetric with `axis`: within
+        # a spec group the members share a ROUNDED axis but their raw axes still differ, which
+        # is why that one must come through the spec. `bottom` needs no such normalisation —
+        # it comes through the spec to say plainly which value defines the group.
+        through = HoleSpec.from_hole(recognised[0]).bottom == "through"
     elif hasattr(source, "location"):
         points = (source.location,)
         axis = _axis_letter(HoleSpec.from_hole(source).axis)
@@ -1005,8 +1013,35 @@ def hole_requirement_outcomes(
     # outcomes instead of hiding the standalone recognition inventory as a duplicate.
     for countersink in unmatched_countersinks:
         at = _point(countersink.location)
+        # `members` is EMPTY, deliberately, and that is the answer to the question #1229 posed
+        # rather than a field left unfilled. It is worth recording how the other answer failed,
+        # because it looked obviously right twice.
+        #
+        # `members` is published in `canonical_hole_sites` space — a hole's coordinate along its
+        # own axis is zeroed — so a consumer joins on it to identify WHICH recognised hole an
+        # outcome accounts for. This tail has no such hole. That is the whole reason the outcome
+        # is `unverifiable`: the `HoleRecord` waist has one countersink slot, and a second seat
+        # cannot be joined to IR provenance without guessing which face the slot represents.
+        #
+        # Attempt 1 passed the seat's own opening centre. That is a raw world coordinate in a
+        # canonical field: on `_two_face_countersunk_hole` it read `(0, 0, 6)`, and translating
+        # the solid by −6 made it `(0, 0, 0)` and collide with the bore's key. A key whose
+        # meaning moves with the part is the defect `canonical_hole_sites` exists to prevent.
+        #
+        # Attempt 2 looked up the hole the seat matched and published ITS canonical site. That
+        # is in the right space, but `countersink_matches_hole` can accept more than one hole —
+        # its tolerances scale with diameter — so the lookup needs a rule for choosing among
+        # them, and `next()` silently chose "first". Which hole a seat physically sits on is the
+        # recogniser's question (ADR 0013), not a policy for draftwright to invent in a lint
+        # module; getting it wrong publishes a confident, canonical-looking key pointing at the
+        # wrong hole, which is worse than publishing none.
+        #
+        # So: none. `unverifiable` with no members says exactly what is true — this requirement
+        # is real, it is counted in the denominator, and it cannot be attributed. A consumer
+        # that finds nothing to join is correctly informed. Closing the gap properly means the
+        # waist carrying more than one countersink slot, which is #1229's real remainder.
         outcomes.extend(
-            HoleRequirementOutcome("hole", at, 1, parameter, "unverifiable")
+            HoleRequirementOutcome("hole", at, 1, parameter, "unverifiable", members=())
             for parameter in ("countersink.diameter", "countersink.angle")
         )
     return outcomes
