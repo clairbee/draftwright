@@ -160,6 +160,15 @@ _GEOMETRY_AWARE_CODES = frozenset(
         "pmi_not_extracted",
         "placement_unsatisfiable",
         "pmi_dropped",
+        # The withholding pair (#1216). Registered for exactly the reason the note above
+        # gives: `step_dim_withheld` and `overall_dim_withheld` REPLACE a silence, not a
+        # different finding, and the content is equally missing — an approved dimension that
+        # is not on the sheet. Omitting them let a drawing with no overall width report
+        # `geometry_issues: 0` alongside `passed: True`, which is the same mistake that note
+        # was written about, in the change that quotes it (#1216 review r10, F4).
+        # `missing_principal_dimension`, the direct analogue, is three lines up.
+        "step_dim_withheld",
+        "overall_dim_withheld",
     }
 )
 
@@ -2156,6 +2165,7 @@ class Drawing:
         from draftwright.annotations.orchestrator import (
             _maybe_tabulate_holes,
             drain_and_reconcile,
+            retract_resolved_withholdings,
             run_stages,
         )
         from draftwright.annotations.sections import (
@@ -2652,6 +2662,15 @@ class Drawing:
                 "tabulate": _s_tabulate,
             }
         )
+        # The same close-out the auto pass runs. A withholding is recorded by the pass that
+        # could not place the mark and must be withdrawn if a later stage drew it — and the
+        # declared route runs its own copy of the stage list, so leaving the retraction on the
+        # auto path alone made the two fail in OPPOSITE directions: auto retracted, declared
+        # never did, and `_crowded_staircase` finalised with every rung on the sheet and the
+        # build still claiming one was withheld. That is an ADR 0011 round-trip parity break
+        # (#1216 review r10, F3).
+        if model is not None:
+            retract_resolved_withholdings(self, ctx, compile_dimensions(model))
 
     def _replay_intent(self, it: Intent) -> None:
         """Place one recorded intent by calling its live verb (#426 Phase 1)."""
@@ -2876,12 +2895,67 @@ class Drawing:
         groups = self._hole_spec_groups(view)
         if not groups:
             return None
+        # The compiler's text for every cell this table prints, keyed the way the coverage
+        # registration below already keys it. A table row IS a dimension — `⌀ 8 ±0.05` in a
+        # cell states exactly what `⌀8 ±0.05` states beside a leader — but this verb formatted
+        # its own numbers off the recognised geometry, so an authored tolerance was approved,
+        # claimed by the table's provenance, and never printed (#1216 review r9). Read from
+        # `_part_model` rather than `model()`: an attribute, so a declared build is not made
+        # to recognise anything by adding a table (ADR 0017).
+        approved: dict = {}
+        omitted: set = set()
+        if self._part_model is not None:
+            from draftwright.model.compiled import compile_dimensions as _compile_table
+            from draftwright.model.compiled import resolve_feature as _resolve_table
+
+            _plan = _compile_table(self._part_model)
+            approved = {
+                (_resolve_table(group.ref), dim.parameter_id): dim
+                for group in _plan.of_kind("hole")
+                for dim in group.dims
+            }
+            # What the compiler REFUSED, separately from what it merely has no entry for.
+            # `Omission.authored` is the author's own `dimension(...)` set leaving a
+            # measurement out — ADR 0016's suppression-by-omission — and printing it anyway
+            # is the compiled-plan boundary broken from the other side: not "a renderer
+            # rebuilt a suppressed value" but "a renderer printed one the author deleted"
+            # (#1216 review r10, F6).
+            omitted = {
+                (omission.feature, omission.parameter_id)
+                for omission in _plan.diagnostics
+                if omission.authored
+            }
+
+        def _cell(owner, parameter, fallback):
+            """The plan's text for *owner*'s *parameter*, else *fallback*.
+
+            The fallback covers the one case it is for: `_hole_spec_groups` is geometry-derived
+            and can group holes the compiler has NO entry for at all, and an empty cell there
+            would be worse than the measured value. It does not cover a measurement the author
+            omitted — that is a decision, and it is honoured by printing nothing, which is what
+            the escalated table has always done for the same case.
+            """
+            if (owner, parameter) in omitted:
+                return ""
+            dim = approved.get((owner, parameter))
+            if dim is None:
+                return fallback
+            return f"{dim.value_text}{_tol_suffix(dim.tolerance, self.draft)}"
+
         rows = [("TAG", "⌀", "DEPTH", "QTY")]
         diams = []
-        for tag, _owner, holes, count in groups:
+        for tag, owner, holes, count in groups:
             h = holes[0]
-            depth = "THRU" if h.through else (_fmt(h.depth) if h.depth else "")
-            rows.append((tag, f"ø{_fmt(h.diameter)}", depth, str(count)))
+            dia = _cell(owner, "bore.diameter", _fmt(h.diameter))
+            # An empty diameter empties the whole cell and takes `THRU` with it, exactly as the
+            # escalated table does (`orchestrator._table_row`): a bare `ø` with no number, or a
+            # `THRU` qualifying a diameter that is not printed, states less than nothing.
+            depth = (
+                ("THRU" if dia else "")
+                if h.through
+                else (_cell(owner, "bore.depth", _fmt(h.depth)) if h.depth else "")
+            )
+            rows.append((tag, f"ø{dia}" if dia else "", depth, str(count)))
             # Legacy physical-diameter lint counts one structured entry per bore.
             # Repeat the value exactly as many times as the visible QTY asserts, just as
             # automatic escalation does, while the semantic ledger below retains the
@@ -3045,62 +3119,34 @@ class Drawing:
         live = {id(i) for i in self.items} | {id(v) for v in view_shapes}
         for stale in [k for k in self._ann_box_cache if k not in live]:
             del self._ann_box_cache[stale]
-        # Most annotations are at sheet scale, but a non-sheet-scale view (the
-        # enlarged detail view, #42) tags its dims with `_dw_scale`. Lint each
-        # scale group with its own drawing_scale so label-vs-measured is correct
-        # per view. The common single-scale case is byte-identical to before.
-        by_scale: dict = {}
-        for ann in self.items:
-            by_scale.setdefault(getattr(ann, "_dw_scale", self.scale), []).append(ann)
-        if len(by_scale) <= 1:
-            issues = lint_drawing(
-                self.items,
-                page_bbox=page_bbox,
-                drawing_scale=self.scale,
-                view_shapes=view_shapes,
-                view_names=view_names,
-                view_edge_cache=self._view_edge_cache,
-                ann_box_cache=self._ann_box_cache,
-                view_material_fields=self.material_fields(),
-                _aggregation=aggregation,
-            )
-        else:
-            # The scale split exists so `label_vs_measured` compares each annotation
-            # against ITS OWN scale — an enlarged detail view (#42) carries `_dw_scale`.
-            # `view_overlap` and `view_out_of_bounds` compare views to EACH OTHER and to
-            # the page, so they do not depend on the annotations at all and passing the
-            # views to every group emitted their findings once PER GROUP — 1 -> 2 purely
-            # from tagging one annotation with a second scale (#1204). (Measured on
-            # `Box(50,50,50)` at A1, which reproduces on macOS and NOT on Linux, where that
-            # drawing emits no view findings at all; the tests use a fixture that forces
-            # them rather than relying on a layout.)
-            #
-            # That made `lint_summary()["by_code"]`, the error/warning counts and the
-            # quality score a function of how annotations happen to be GROUPED rather than
-            # of the drawing — the same class of defect as #1196, where lint text depended
-            # on memory addresses.
-            #
-            # So only the view-vs-view and view-vs-page checks are restricted to the
-            # first group; the annotation-vs-view ones still run for every group, because
-            # each group holds DIFFERENT annotations. A first cut nulled `view_shapes` for
-            # later groups instead and lost their `view_annotation_inside_extents`
-            # findings — 2 became 1 on the same fixture, trading a double-count for a
-            # missed defect.
-            issues = []
-            for index, (_scale, _anns) in enumerate(by_scale.items()):
-                first = index == 0
-                issues += lint_drawing(
-                    _anns,
-                    page_bbox=page_bbox,
-                    drawing_scale=_scale,
-                    view_shapes=view_shapes,
-                    view_names=view_names,
-                    check_view_placement=first,
-                    view_edge_cache=self._view_edge_cache,
-                    ann_box_cache=self._ann_box_cache,
-                    view_material_fields=self.material_fields(),
-                    _aggregation=aggregation,
-                )
+        # ONE call over every annotation. Most annotations are at sheet scale; a non-sheet-scale
+        # view (the enlarged detail view, #42) tags its dims with `_dw_scale`, and
+        # `_lint_dim` reads that tag per item so `label_vs_measured` still compares each
+        # annotation against ITS OWN scale.
+        #
+        # This used to pre-split the items by scale and call `lint_drawing` once per group. The
+        # split made the PAIRWISE checks — `annotation_overlap`, `label_centerline_overlap`,
+        # `leader_line_through_text` — blind across groups, because each call only ever saw one
+        # group's items. A detail view's dimensions and its own caption are always in different
+        # groups AND spatially adjacent by construction, so the pair most likely to collide was
+        # the one pair never compared (#1216).
+        #
+        # Collapsing it also retires #1204's first-group restriction: `view_overlap` and
+        # `view_out_of_bounds` compare views to each other and to the page, so passing the views
+        # to every group emitted their findings once PER GROUP and made `by_code`, the
+        # error/warning counts and the quality score a function of how annotations happened to be
+        # grouped. With a single call there are no groups to double-count.
+        issues = lint_drawing(
+            self.items,
+            page_bbox=page_bbox,
+            drawing_scale=self.scale,
+            view_shapes=view_shapes,
+            view_names=view_names,
+            view_edge_cache=self._view_edge_cache,
+            ann_box_cache=self._ann_box_cache,
+            view_material_fields=self.material_fields(),
+            _aggregation=aggregation,
+        )
         if self.part is not None and physical:
             # Reuse the single feature inventory from the build (#244) when present,
             # so lint does not re-detect holes/patterns/turned-steps; fall back to

@@ -54,6 +54,11 @@ _LEGIBILITY_CODES = frozenset(
         "label_centerline_overlap",
         "leader_crosses_silhouette",
         "leader_line_through_text",
+        # The overall extents' own placement failure. Separate from `placement_unsatisfiable`
+        # because that code is a required *scale* drop and reporting through it refused to
+        # build drawings that previously built (#1216 review r9); the sheet is equally less
+        # readable either way, so it scores the same.
+        "overall_dim_withheld",
         "placement_unsatisfiable",
         "view_annotation_inside_extents",
         "view_annotation_overlap",
@@ -218,6 +223,13 @@ _UNSCORED_CODES = frozenset(
         "authored_omission",
         "axial_length_missing",
         "boss_height_missing",
+        # The `*_withheld` family (#1216), kept together and in place alphabetically. Each is a
+        # claim the drawing declined to make because it could not make it honestly, and said
+        # so: a jittered pattern pitch, a step height the page cannot carry, and an `n×` mark
+        # whose collapsed members do not all carry the same band. Not a fidelity fault (nothing
+        # false was printed) and not a legibility one (nothing was misplaced); an omission is
+        # completeness's ledger, which builds from requirement outcomes rather than from lint.
+        "collapsed_tolerance_withheld",
         "dimension_kind_unsupported",
         "feature_count_mismatch",
         "feature_no_centermark",
@@ -232,6 +244,8 @@ _UNSCORED_CODES = frozenset(
         "pmi_not_lowered",
         "pmi_not_rendered",
         "pmi_present_but_ignored",
+        "step_dim_withheld",
+        "pattern_pitch_tolerance_withheld",
         "pocket_not_located",
         # Neither confirmed nor refuted: the annotation renders no readable text, or the
         # compiler approved the measurement with no displayable value. Reported so an

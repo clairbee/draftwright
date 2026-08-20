@@ -30,6 +30,7 @@ from draftwright._core import (
     _iso_bbox,
     _log,
     _tag_sequence,
+    _tol_suffix,
     _wrap_rows,  # noqa: F401 — re-exported via the annotate facade (#700: one copy, in _core)
     layout_frame,
 )
@@ -710,12 +711,86 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
             "projection_symbol": _s_projection_symbol,
         }
     )
+    retract_resolved_withholdings(dwg, ctx, _runtime_plan)
     if ctx.trace is not None:  # snapshot the run's escalations into the trace (#736)
         ctx.trace.record_escalations(ctx.escalations)
     # The escalations live only on this per-run ctx (#639), discarded when _auto_annotate
     # returns — so nothing carries stale drops into a later deferred edit (#440), and there is
     # no drawing-level list to clear.
     return _runtime_plan.diagnostics
+
+
+#: Codes that say "the compiler approved this measurement and it is not on the sheet". They are
+#: recorded by the pass that could not place the mark, which is the only place that knows WHY —
+#: which strip was full and who filled it. It is not the place that knows whether some LATER
+#: pass drew the measurement anyway.
+_WITHHOLDING_CODES = ("step_dim_withheld", "overall_dim_withheld")
+
+
+def _approved_per_measurement(plan) -> dict:
+    """How many marks the largest approved set under each `DimensionId` carries.
+
+    Not one, in general. A `step_height` ladder gives EVERY rung the same
+    `_dim_id(step, "step_height.length")` — five rungs, one id (ADR 0016 Amdt 3: the parameter
+    id is the canonical spelling, and a per-level identity does not exist). So "this id is
+    claimed by some annotation" cannot mean "this measurement is on the sheet" for a ladder,
+    and a retraction written that way withdraws the whole report as soon as ONE rung places
+    (#1216 review r10, F1). Counting is what the collapse leaves available.
+
+    The MAXIMUM over containers, not the sum: the plan represents the same five step heights
+    twice, once as a `step_height` ladder and once as five `step_level` group dims, so summing
+    expects ten marks for five measurements and no drawing can ever satisfy it. That arithmetic
+    is why the first count-based cut retracted nothing at all.
+    """
+    counts: dict = {}
+
+    def _tally(entries) -> None:
+        per: dict = {}
+        for entry in entries:
+            if entry.id is not None:
+                per[entry.id] = per.get(entry.id, 0) + 1
+        for mid, n in per.items():
+            counts[mid] = max(counts.get(mid, 0), n)
+
+    for group in plan.groups:
+        _tally(group.dims)
+    for ladder in plan.ladders:
+        _tally(ladder.rungs)
+    return counts
+
+
+def retract_resolved_withholdings(dwg, ctx, plan) -> None:
+    """Withdraw a withholding whose measurement reached the sheet after all.
+
+    `render_height_ladder` runs long before the detail view exists, so a rung it could not fit
+    in the front-right strip may still be dimensioned in an enlarged detail. Reported at record
+    time and never revisited, `step_dim_withheld` fired on `_crowded_staircase` — a part whose
+    five approved rungs are ALL claimed, by `dim_detail_a_step0..2` and `dim_step_0..1` — and
+    said they "are not dimensioned at this scale", which was false (#1216 review r9, F5).
+
+    The same shape as the `callout_dropped` and `location_ref_dropped` retractions above, and
+    the same rule `solve_corridor` applies to a deduped loser: a drop is only a drop if the
+    measurement is still absent when the run finishes.
+
+    Fails closed, and this is the part that took two rounds to get right. The predicate is
+    "as many annotations claim this id as the plan approved entries under it", not "some
+    annotation claims it": with one id per ladder the second retracts a five-rung withholding
+    on the strength of one drawn rung, which is the silent omission the report exists to end,
+    restored by its own fix (#1216 review r10, F1).
+    """
+    approved = _approved_per_measurement(plan)
+    drawn: dict = {}
+    for name in dwg.registry.names():
+        for mid in dwg.registry.measurement_of(name) or ():
+            drawn[mid] = drawn.get(mid, 0) + 1
+    for code in _WITHHOLDING_CODES:
+        ctx.drop_issues_where(
+            code,
+            lambda issue: (
+                bool(issue.measurement_ids)
+                and all(drawn.get(mid, 0) >= approved.get(mid, 1) for mid in issue.measurement_ids)
+            ),
+        )
 
 
 def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
@@ -886,6 +961,13 @@ def _maybe_tabulate_holes_impl(dwg, a: Analysis, *, ctx, plan=None):
                 hole.feature, compiled_dimensions_by_feature.get(hole.feature, ())
             )
         }
+        # No `_tol_suffix` here, deliberately. A location cannot be toleranced: `location` is
+        # not among any feature's `parameters()`, so there is no key to author one against, and
+        # `_compile_locations` / `_compile_off_axis_hole_locations` assign no tolerance.
+        # Measured across the guard corpus, decorating every parameter of every feature through
+        # both key shapes: 204 compiled locations, 0 with a tolerance. The first cut of this
+        # composed the suffix here anyway — a reader with no writer, which is precisely the
+        # dead-code defect this PR filed against #1234's `depth_tol` (#1216 review r9, F3).
         approved_locations = {
             (resolve_feature(location.ref), tuple(location.span[1]), location.discriminator): (
                 location.value_text
@@ -895,8 +977,19 @@ def _maybe_tabulate_holes_impl(dwg, a: Analysis, *, ctx, plan=None):
         }
 
         def _approved_hole_text(hole, parameter):
+            """A table cell's text, authored tolerance included (#1216 review r9).
+
+            A table row is a dimension: `⌀ 8` in a hole-table cell states the same
+            requirement `⌀8` states beside a leader, so it carries the same ±. Escalating
+            a toleranced callout into a table used to drop the tolerance on the way — the
+            requirement left the sheet because the drawing got denser, which is #1215's
+            failure mode at a site its sweep could not see (the guard reads `label`, and a
+            table's text lives in its rows).
+            """
             dimension = approved_hole_dimensions.get(hole.feature, {}).get(parameter)
-            return "" if dimension is None else dimension.value_text
+            if dimension is None:
+                return ""
+            return f"{dimension.value_text}{_tol_suffix(dimension.tolerance, dwg.draft)}"
 
         def _table_row(tag, hole):
             diameter_text = _approved_hole_text(hole, "bore.diameter")

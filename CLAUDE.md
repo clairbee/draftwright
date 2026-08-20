@@ -71,7 +71,9 @@ Key invariants — each is machine-enforced, and the guard test is the authority
   `test_recognition_manifest` fail-closed).
 - Renderers emit dimensional content only from `model/compiled.py`'s plan — suppression
   is content they never receive (ADR 0016 Amdt 1, `test_compiled_plan_boundary`,
-  `test_label_provenance`).
+  `test_label_provenance`) — and the converse: nothing the plan approves may reach the
+  sheet stating less, or vanish unreported (ADR 0016 Amdt 6,
+  `test_issue_1215_no_approved_tolerance_is_dropped`).
 
 ## Architecture decisions — READ `docs/adr/` FIRST
 
@@ -107,7 +109,10 @@ recogniser contract (external `b123d-recognisers`) · **0014** collect-then-solv
 placement, 4 amendments (late leader stage; material-re-entry penalty; budgets must
 measure, not predict) · **0015** the part-drawing compiler as built ·
 **0016** declared dimensioning intent (authored sets suppress by omission; compiled-
-plan boundary) · **0017** recognition inventory as first-class result (ownership
+plan boundary, 5 amendments numbered 1, 3–6 — Amdt 6 is its converse: a tolerance
+reaches the sheet through the LABEL, never `tolerance=`, and an approved dimension that
+cannot be placed is reported against its measurement, not dropped in silence; at 5 it is
+at the threshold where a superseding ADR is preferable) · **0017** recognition inventory as first-class result (ownership
 landed; correspondence work evidence-gated by #1018) · **0018** requirement-driven
 view planning (**accepted, nothing implemented yet** — the evidence list is the
 per-slice gate).

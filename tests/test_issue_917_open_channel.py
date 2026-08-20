@@ -71,7 +71,10 @@ def test_corrected_fixture_has_one_channel_and_one_independent_wall_thickness():
 
     first = [(issue.severity, issue.code) for issue in drawing.lint()]
     second = [(issue.severity, issue.code) for issue in drawing.lint()]
-    assert first == second == []
+    # `step_dim_withheld` (#1216): the channel floor is a step level whose page span is below
+    # the dimensioning floor, so the compiler approves a rung the sheet does not carry. The
+    # point of this pair of reads is that lint is IDEMPOTENT, which the equality still asserts.
+    assert first == second == [("info", "step_dim_withheld")]
 
 
 def test_every_independent_channel_chain_measurement_has_actionable_lint():

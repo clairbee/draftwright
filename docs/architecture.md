@@ -426,6 +426,23 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
     (`tests/test_label_provenance.py`: a renderer that formats a number got it as a
     number rather than as the compiler's `value_text`). Hole callouts (`hc_`) are the
     one renderer still on the legacy surface (#926); the label budget drawdown is #927.
+  - **Amendment 6 — the converse**: a renderer must emit everything the plan approves,
+    and where it cannot place it, must say so. Two failure modes, one rule. (a) An
+    authored tolerance reaches the sheet composed into the **label** — helpers resolve
+    `label if label is not None else _number_with_units(measured, tolerance)`, and every
+    dimension here passes a label, so a forwarded `tolerance=` renders nothing while
+    type-checking and reading back correctly from `Dimension.label`. (b) An approved
+    dimension that no annotation claims must be reported: a starved overall extent and a
+    rung below the legibility floor both used to vanish with the lint clean. The report
+    carries the measurement, must not gate the build (reporting through
+    `placement_unsatisfiable` made `build_drawing(scale=…)` raise on parts that had always
+    built), and is retracted if a later pass draws the measurement after all. Whether
+    either should instead be *placed* is an open ADR 0014 question (#1236); reporting is
+    not contingent on answering it. The converse is asserted over `plan.groups` and
+    `plan.ladders` only — a contingency is deliberately undrawn (Amdt 5) and a location
+    carries no tolerance. Guarded by
+    `tests/test_issue_1215_no_approved_tolerance_is_dropped.py`, which sweeps every
+    parameter of every feature through both `decorations=` key shapes.
   **Not** shipped: the emitter dimension-mirror (phase 4). `emit_sheet_script` refuses a
   model with an authored set rather than silently writing `auto_dimensions()`, because
   naming a feature in a generated script would have to address it by position — #922.

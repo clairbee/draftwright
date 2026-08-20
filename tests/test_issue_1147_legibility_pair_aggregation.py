@@ -242,7 +242,7 @@ def test_ledger_retains_plain_issue_values_so_custom_replacements_cannot_reuse_t
     assert recorded() is None, "the summary ledger must not retain issues beyond its scope"
 
 
-def test_multi_scale_drawing_groups_each_annotation_inside_its_own_structural_pass():
+def test_multi_scale_drawing_aggregates_across_both_scale_groups():
     drawing = build_drawing(Box(20, 15, 10))
     items = _crossed_items()
     for item in items[:1] + items[2:7]:
@@ -264,7 +264,16 @@ def test_multi_scale_drawing_groups_each_annotation_inside_its_own_structural_pa
 
     legibility = drawing.lint_summary()["quality"]["legibility"]
 
-    assert legibility["raw_issues"] == 10
+    # 20, not 10. This test used to pin the per-scale-group split: each label was compared only
+    # with the five centre marks carrying its own `_dw_scale`, so 5 + 5. That split is what made
+    # the pairwise checks blind across groups (#1216) — a label overlapping a centre mark is a
+    # geometric fact, and which view's scale tagged the mark has nothing to do with it. Every
+    # label now meets every mark: 2 × 10.
+    #
+    # What this test is FOR is unchanged, and is the point: the aggregation still collapses the
+    # raw findings to 2 primaries and the score is still 0.9. The pairing got complete; the
+    # aggregation did not move.
+    assert legibility["raw_issues"] == 20
     assert legibility["primary_issues"] == 2
     assert legibility["score"] == pytest.approx(0.9)
 

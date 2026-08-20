@@ -349,6 +349,7 @@ def hole_callout_spec(group: DimensionGroup) -> dict | None:
     # segment that won the counterbore/spotface precedence — resolving them independently is
     # the #920 defect that paired one role's ⌀ with the other's depth.
     recess_dia_pd, recess_depth_pd = _recess_plan(group)
+    depth_pd = _planned(group, "depth", "bore")
     csink_dia_pd = _planned(group, "diameter", "countersink")
     csink_angle_pd = _planned(group, "angle", "countersink")
 
@@ -390,6 +391,10 @@ def hole_callout_spec(group: DimensionGroup) -> dict | None:
         "suffix": suffix,
         "tolerance": bore_tol,  # P2a: ± on the bore ⌀, baked into the callout string below
         # ...and one per remaining term, baked in the same way (#1234 review r7).
+        # A BLIND hole's own depth tolerance. `callout_from_spec` and `compose.py` were both
+        # given readers for this key and the spec never wrote it, so the reader always resolved
+        # to None — dead code shipped alongside the fix it belonged to (#1234 review r8).
+        "depth_tol": _tol_of(depth_pd),
         "cbore_dia_tol": _tol_of(recess_dia_pd),
         "cbore_depth_tol": _tol_of(recess_depth_pd),
         "csink_dia_tol": _tol_of(csink_dia_pd),
