@@ -80,6 +80,7 @@ from draftwright.annotations._common import (
     register_corridor,
     strip_free_span,
     strip_obstacles,
+    strip_occupants,
 )
 from draftwright.annotations.leaders import (
     _GREEDY_MATERIAL_LOOKAHEAD,
@@ -3310,16 +3311,24 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         return 0
     n = 0
 
-    def _queue(name, strip, view, tier, distance, build, footprint=None, measurement=None):
-        def _drop(nm, _view=view, _strip=strip, _mid=measurement):
+    def _queue(
+        name,
+        strip,
+        above_strip,
+        view,
+        tier,
+        distance,
+        xs,
+        label,
+        build,
+        footprint=None,
+        measurement=None,
+    ):
+        def _report(nm, _view=view, _strip=strip, _above=above_strip, _mid=measurement):
             # An overall extent is the one dimension every drawing must carry, and until
             # #1216 review r9 its drop was the only one in the engine that reported NOTHING:
             # `on_drop` was `lambda _nm: None`, so a starved strip removed the width from the
-            # sheet and the build, the lint and the score all stayed clean. Reproduced on an
-            # 80x80 plate with a hexagonal boss, where the A/F callout's leader spans the
-            # whole plan-below corridor: `m_env_width` is force-kept and mandatory and still
-            # solves to `strip_full`, leaving the part's width undimensioned and unremarked.
-            # Live on three CTC fixtures; the placement fix is #1236.
+            # sheet and the build, the lint and the score all stayed clean.
             #
             # NOT `placement_unsatisfiable`, which is what the height ladder records and what
             # this reported in its first cut. That code is a **required scale drop**
@@ -3333,24 +3342,73 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             # code; neither raises through this one (#1216 review r9, F1).
             #
             # The SEVERITY is `error` and that is deliberate. `_is_required_scale_drop` never
-            # reads severity — it matches the code name and the `*_dropped` suffix — so the
-            # first fix for the above downgraded the one thing that was not causing it, and
-            # left a drawing with no overall width reporting `passed: True`. The part's
-            # principal extent is missing; that is an error, and `test_e2e_standards` carries
-            # a named quarantine for the three CTC fixtures where it is already true (#1236)
-            # rather than the finding being priced below the gate (#1216 review r10, F5).
+            # reads severity — it matches the code name and the `*_dropped` suffix — so an
+            # earlier fix downgraded the one thing that was not causing the raise, and left a
+            # drawing with no overall width reporting `passed: True` (#1216 review r10, F5).
             #
             # `measurement=` so the report is joined to the measurement it is about, rather
             # than being an unattributed issue that any absence-shaped code could stand in for.
-            msg = full_strip_message(
-                f"overall {'width' if nm.endswith('width') else 'depth'} dimension not placed "
-                f"({_view}-view below strip full)",
-                dwg,
-                _strip,
-                _view,
-                "y",
+            # Both strips were tried, so both sets of blockers are named — a message that
+            # says "below and above strips full" and then lists only the below occupants
+            # half-attributes the refusal (#1239 review F3). `full_strip_message` extends a
+            # single-strip message; two strips are composed here from the same helper it uses.
+            which = "width" if nm.endswith("width") else "depth"
+            msg = (
+                f"overall {which} dimension not placed ({_view}-view below and above strips full)"
             )
+            for side_name, side_strip in (("below", _strip), ("above", _above)):
+                occupants = strip_occupants(dwg, side_strip, _view, "y") if side_strip else []
+                if occupants:
+                    msg = f"{msg[:-1]}; {side_name} occupied by: {', '.join(occupants)})"
             ctx.record_issue("error", "overall_dim_withheld", msg, measurement=_mid)
+
+        def _drop(nm, _view=view, _above=above_strip, _mid=measurement, _xs=xs, _label=label):
+            # Opposite-strip fallthrough (#1236). A feature leader placed before the drain —
+            # a polygonal boss's A/F callout on CTC-01, slot width dims on CTC-04 — can span
+            # the whole below corridor, and no corridor-side fix reaches it: the leader is not
+            # a corridor candidate, so registration ORDER cannot arbitrate against it, and a
+            # reserved band would tax every drawing's leader placement to protect a rare
+            # starvation. What the engine already does for a starved slot or plate dim is
+            # retry on the opposite strip (`_far_or_drop`, `render_plates`); the overall
+            # extent now does the same. An overall dimension above the view is ordinary
+            # drafting; a missing one is not.
+            #
+            # DEFERRED to ctx.post_drain, the #684 rule: this drop fires mid-drain, and
+            # placing onto the above strip immediately could occupy space a not-yet-solved
+            # corridor's force candidate needs. Post-drain, the above strip's occupants are
+            # final and `place_strip_candidates` spaces into what is genuinely free.
+            def _retry():
+                bounds = dwg.view_bounds(_view)
+                if _above is not None and bounds is not None:
+                    lift = bounds[3] + _WITNESS_LIFT_MM
+                    if not place_strip_candidates(
+                        dwg,
+                        _above,
+                        _view,
+                        "y",
+                        [
+                            (
+                                nm,
+                                lambda pos, _l=lift: _dim(
+                                    (_xs[0], _l, 0),
+                                    (_xs[1], _l, 0),
+                                    "above",
+                                    pos - _l,
+                                    dwg.draft,
+                                    label=_label,
+                                ),
+                            )
+                        ],
+                        tier,
+                        ctx=ctx,
+                        measurements={nm: _mid},
+                        trace=ctx.trace,
+                        trace_label=f"{nm}_above_fallthrough",
+                    ):
+                        return  # placed above — the measurement is on the sheet
+                _report(nm)
+
+            ctx.post_drain.append(_retry)
 
         register_corridor(
             ctx,
@@ -3380,9 +3438,12 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         _queue(
             "m_env_width",
             a.pv_zones.below,
+            a.pv_zones.above,
             "plan",
             _SLOT_DIM_WIDTH,
             abs(x1 - x0),
+            (p1[0], p2[0]),
+            _env_label(width, dwg.draft),
             lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(width, dwg.draft): _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
@@ -3415,9 +3476,12 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         _queue(
             "m_env_depth",
             a.sv_zones.below,
+            a.sv_zones.above,
             "side",
             _SLOT_DIM_DEPTH,
             abs(y1 - y0),
+            (p1[0], p2[0]),
+            _env_label(depth, dwg.draft),
             lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(depth, dwg.draft): _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),

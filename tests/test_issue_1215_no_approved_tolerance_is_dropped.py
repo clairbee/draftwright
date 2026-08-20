@@ -551,48 +551,76 @@ def _starved_extent_plate():
     return plate + boss.part
 
 
-def test_a_starved_overall_extent_is_reported():
-    """The overall extents were the only dimensions in the engine whose drop said nothing.
+def test_a_starved_overall_extent_recovers_to_the_above_strip():
+    """#1236: a feature leader spanning the below corridor must not cost the part its width.
 
-    Their corridor candidate carried `on_drop=lambda _nm: None` while every neighbouring pass
-    recorded `placement_unsatisfiable`, so a starved strip removed the part's width from the
-    sheet and the build issues, the lint and the score all stayed clean (#1216 review r9).
-
-    This asserts the REPORT, not the placement. Whether a feature leader may starve a mandatory
-    extent is an ADR 0014 question and is filed separately; it cannot be looked at at all while
-    the drop is invisible.
+    The hex boss's A/F leader fills the plan-below corridor, so `m_env_width` — force-kept,
+    mandatory — solves to `strip_full` there. For three review rounds that was the end of it:
+    the drop was first silent, then reported. Now it does what a starved slot or plate dim has
+    always done — retries on the opposite strip after every corridor has drained — because no
+    corridor-side fix reaches a leader (it is not a corridor candidate, so ordering cannot
+    arbitrate against it) and an overall dimension above the view is ordinary drafting.
     """
     drawing = build_drawing(_starved_extent_plate(), title="T", number="N")
-    # The precondition: this fixture really does lose the width dimension.
+    assert "m_env_width" in drawing.registry.names(), (
+        "the width no longer recovers: the fallthrough regressed, or the fixture stopped "
+        "starving the below strip and this test asserts nothing"
+    )
+    # It really is ABOVE the view — the precondition that the below strip was starved, and
+    # the fallthrough (not the ordinary corridor) placed it.
+    bounds = drawing.view_bounds("plan")
+    box = drawing.registry.named("m_env_width").label_bbox
+    assert box[1] > bounds[3], (
+        f"m_env_width's label sits at {box}, not above the plan view (top {bounds[3]}) — the "
+        "below strip stopped starving, so this fixture no longer reaches the fallthrough"
+    )
+    assert not [i for i in drawing.lint() if i.code == "overall_dim_withheld"]
+    assert not [i for i in drawing.lint() if i.severity == "error"]
+
+
+def test_a_doubly_starved_extent_is_still_reported(monkeypatch):
+    """Both strips full: the fallthrough fails and the drop must be reported, not vanish.
+
+    Constructed by refusing the fallthrough's own placement call (matched on its trace label,
+    every other call passes through untouched), because a fixture that genuinely fills BOTH
+    strips of a view would be an elaborate layout accident waiting to rot. The assertions are
+    the #1216 requirements: error severity so `passed` fails, the measurement attributed, the
+    occupants named — and NOT `placement_unsatisfiable`, which `builder._is_required_scale_drop`
+    matches by name and which made `build_drawing(scale=...)` raise (#1216 review r9/r10).
+    """
+    from draftwright.annotations import _common as common_mod
+    from draftwright.annotations import from_model as fm
+
+    real = common_mod.place_strip_candidates
+
+    def refuse_fallthrough(*args, **kwargs):
+        # Exact names, not a suffix: the slot fallthrough's label `slot_above_fallthrough`
+        # also ends `_above_fallthrough`, so a suffix match would refuse a different pass on a
+        # slotted fixture and the docstring's "every other call passes through untouched"
+        # would be false (#1239 review F2).
+        if kwargs.get("trace_label") in (
+            "m_env_width_above_fallthrough",
+            "m_env_depth_above_fallthrough",
+        ):
+            return args[4]  # the (name, build) pairs, unplaced — the real return shape
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fm, "place_strip_candidates", refuse_fallthrough)
+    drawing = build_drawing(_starved_extent_plate(), title="T", number="N")
     assert "m_env_width" not in drawing.registry.names(), (
-        "precondition: this part now places its overall width, so the fixture no longer "
-        "reaches the starved-strip path"
+        "precondition: the refusal did not apply — the fallthrough placed the width anyway, "
+        "so nothing below tests the report"
     )
     reported = [i for i in drawing.lint() if i.code == "overall_dim_withheld"]
-    # Error severity, so a drawing missing its principal extent does not report `passed: True`.
-    # The scale gate keys on the CODE, not on this (#1216 review r10, F5).
-    assert all(i.severity == "error" for i in reported), [i.severity for i in reported]
-    summary = drawing.lint_summary()
-    assert summary["passed"] is False
-    # And it COUNTS as missing geometry. `_GEOMETRY_AWARE_CODES` exists so a lost requirement
-    # cannot report `geometry_issues: 0` alongside a drawing that lacks it; both withholding
-    # codes replace a silence rather than a different finding, so the count must include them
-    # (#1216 review r10, F4). Without the registration this drawing reported 0.
-    assert summary["geometry_issues"] >= 1, summary
-    assert any("width" in str(i.message) for i in reported), (
-        "the overall width never reached the sheet and nothing said so: "
-        f"{[(i.code, i.severity) for i in drawing.lint()]}"
+    assert reported, (
+        f"both strips full and nothing said so: {[(i.severity, i.code) for i in drawing.lint()]}"
     )
-    # It names what filled the strip, which is the whole point of reporting it,
+    assert all(i.severity == "error" for i in reported)
     assert any("occupied by" in str(i.message) for i in reported)
-    # and it carries the measurement, so a guard can ask about THIS extent rather than
-    # accepting any absence-shaped code in the build (#1216 review r9).
     assert any(getattr(i, "measurement_ids", ()) for i in reported)
-    # NOT `placement_unsatisfiable`: that code is a required scale drop, and reporting through
-    # it made `build_drawing(scale=...)` raise on parts that had always built. Asserted here so
-    # the code cannot drift back.
     assert not [i for i in drawing.lint() if i.code == "placement_unsatisfiable"]
-    build_drawing(_starved_extent_plate(), scale=1.0, title="T", number="N")
+    assert drawing.lint_summary()["passed"] is False
+    build_drawing(_starved_extent_plate(), scale=1.0, title="T", number="N")  # must not raise
 
 
 def _blind_plate_for_table():

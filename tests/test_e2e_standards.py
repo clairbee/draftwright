@@ -47,31 +47,11 @@ def _assert_meets_standards(dwg, svg_path, dxf_path):
     assert any(isinstance(a, TitleBlock) for a in dwg.items), "no title block"
     assert len(dwg.items) >= 2, "expected dimensions + title block"
 
-    # Lint: no error-severity issues (warnings tolerated).
-    #
-    # ONE quarantined exception, #1236: a feature leader or a slot dim can fill a view's below
-    # corridor and starve the mandatory overall extent out of it, so CTC-01 and CTC-04 draw no
-    # overall width. That is a real defect and it is not new — it became visible only when
-    # #1216 gave the drop a lint code, because `render_envelope`'s candidate carried
-    # `on_drop=lambda _nm: None` and the dimension had been vanishing in silence.
-    #
-    # Quarantined rather than priced down. Reporting it below error severity would have kept
-    # this assertion green without listing anything, and a drawing missing its principal extent
-    # would report `passed: True` — moving the evidence under the gate instead of recording
-    # that the gate is failed for a known, filed reason (#1216 review r10, F5).
-    #
-    # Matched on the code AND the message, so any OTHER placement error on these fixtures still
-    # fails here. The ratchet that stops this quarantine outliving the defect is
-    # `test_issue_1215_no_approved_tolerance_is_dropped.py::test_a_starved_overall_extent_is_reported`,
-    # which asserts the extent is still absent and so fails the day #1236 is fixed.
-    errors = [
-        i
-        for i in dwg.lint()
-        if i.severity == "error"
-        and not (
-            i.code == "overall_dim_withheld" and "overall width dimension not placed" in i.message
-        )
-    ]
+    # Lint: no error-severity issues (warnings tolerated). This briefly carried a named
+    # quarantine for #1236 — CTC-01/04's overall width starved out of the below corridor by a
+    # feature leader — removed when the opposite-strip fallthrough landed and all ten CTC
+    # fixtures drew both extents again.
+    errors = [i for i in dwg.lint() if i.severity == "error"]
     assert not errors, f"lint errors: {[(i.code, i.message) for i in errors]}"
 
     data = Path(svg_path).read_text(encoding="utf-8")
