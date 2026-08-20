@@ -506,6 +506,14 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
   breaks its claimed contract; a green suite alone is not evidence that the guard is
   load-bearing.
 
+- **0019** — **Proposed**: **display-complete labels and a dimension-outcome ledger** —
+  finishing the 0016 Amdt 1 boundary after epic #1215/#1216's ten review rounds showed its
+  half-built state: `ApprovedDimension` gains `display_text` (tolerance suffix, fit class and
+  collapse wording included) so renderers render and never compose; `_tol_suffix` moves below
+  the model rank and drawn precision becomes a compile input; dimension outcomes reconcile at
+  one end-of-build seam on both routes, replacing the withholding-code/retraction machinery;
+  ladder rungs get per-mark identity (amending 0016 Amdt 3). Success criterion is a
+  net-negative diff.
 - **0018** — **Accepted** (2026-08-16; #1130): **requirement-driven view planning
   and editable sheet layout**. One view-planning model between drawing requirements and
   projection: authored `ViewConstraints` and the automatic planner share one semantic
