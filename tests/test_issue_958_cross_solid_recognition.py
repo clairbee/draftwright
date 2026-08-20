@@ -76,7 +76,13 @@ def test_attached_pad_remains_recognised_once():
         if name.startswith("m_pad")
     } == {"m_pad0_width": "20", "m_pad0_length": "30"}
     assert not [name for name in drawing.annotations() if name.startswith("m_slot")]
-    assert drawing.lint() == []
+    # The pad's own height above the plate is a `step_level` the compiler approves and the
+    # legibility floor discards — 9 mm of page against a 12 mm minimum — so this drawing gives
+    # the pad a width and a length and no height. That was invisible until `step_dim_withheld`
+    # (#1216); the assertion was `== []` and the missing dimension was part of what it blessed.
+    assert [(issue.severity, issue.code) for issue in drawing.lint()] == [
+        ("info", "step_dim_withheld")
+    ]
 
 
 def test_faces_from_three_bodies_do_not_form_a_pocket():

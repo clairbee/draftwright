@@ -1381,6 +1381,12 @@ def _add_grid_pitch_dims(
         line_tol = min(l1, l2) * 0.25
         line = [idx for idx in range(len(pts)) if abs(across(idx) - lo_across) < line_tol]
         hi = max(line, key=along)
+        # The holes this dim actually spans, in the order it spans them. `members[lo:hi+1]`
+        # is a slice of the IR's member order, which on a grid walks the lattice in neither
+        # direction: on a 3x2 grid it hands `_pitch_text` five points whose consecutive gaps
+        # are a mix of row and column spacing, so every uniform grid read as jittered and had
+        # its authored tolerance withheld (#1216 review r9).
+        spanned = [members[idx] for idx in sorted(line, key=along)]
         span = along(hi) - along(lo)
         n = round(span / pitch_page) + 1
         discriminator = (
@@ -1394,7 +1400,7 @@ def _add_grid_pitch_dims(
             members[lo],
             members[hi],
             n,
-            _pitch_text(pitch, members[lo : hi + 1], dwg.draft, ctx=ctx),
+            _pitch_text(pitch, spanned, dwg.draft, ctx=ctx),
             to_page,
             f"{name_prefix}_{view}{j}_{sub}",
             feature=feature,
@@ -1427,7 +1433,7 @@ def _pitch_text(pitch, members, draft, ctx=None, name=None) -> str:
     precision records `pattern_pitch_tolerance_withheld`, so an author who tolerances a jittered
     pitch is told the drawing cannot state it rather than being shown a number that is wrong.
     """
-    text = pitch.value_text
+    text = str(pitch.value_text)
     if pitch.tolerance is None:
         return text
     # Compared at the drawn precision, never FORMATTED here: the printed value is the compiler's

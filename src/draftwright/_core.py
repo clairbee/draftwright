@@ -507,6 +507,36 @@ _MIN_STEP_SEP_MM = _FONT_SIZE + 2 * _PAD
 _MIN_LOC_SEP_MM = draft_preset(font_size=_FONT_SIZE, decimal_precision=1).arrow_length + _PAD
 
 
+def _classify_steps(step_zs, bb_min_z, scale, *, allow_short=False):
+    """``(kept, too_close, too_short)`` — every step height, sorted into its outcome.
+
+    The one predicate. :func:`_legible_steps` is the historical two-value view of this and
+    delegates here, so the "which steps are dimensioned" rule cannot be stated twice and
+    drift; the third list exists because it was previously stated ZERO times.
+
+    ``too_short`` is the silent case (#1216 review r9). A step whose page distance from the
+    part's base cannot carry a dimension is skipped, and unlike ``too_close`` the skip
+    incremented no counter, raised no escalation and produced no lint — so a blind hole in a
+    plate had its ``step_height`` approved by the compiler, dropped here, and the drawing
+    linted perfectly clean with the measurement nowhere on it. Callers report it; the guard in
+    ``tests/test_issue_1215_no_approved_tolerance_is_dropped.py`` requires that they do.
+    """
+    kept: list[float] = []
+    too_close: list[float] = []
+    too_short: list[float] = []
+    last = None
+    for z in sorted(step_zs):
+        if not allow_short and (z - bb_min_z) * scale < _MIN_STEP_DIM_MM:
+            too_short.append(z)
+            continue
+        if last is not None and (z - last) * scale < _MIN_STEP_SEP_MM:
+            too_close.append(z)
+            continue
+        kept.append(z)
+        last = z
+    return kept, too_close, too_short
+
+
 def _legible_steps(step_zs, bb_min_z, scale, *, allow_short=False):
     """Step heights worth dimensioning at *scale*, and how many were too close.
 
@@ -518,19 +548,14 @@ def _legible_steps(step_zs, bb_min_z, scale, *, allow_short=False):
     when they do not fit inline (#565). Returns ``(kept_zs, n_too_close)``:
     the heights to dimension, and the count dropped for spacing (the caller
     surfaces these via lint; the full-fidelity answer is a detail view, #42).
+
+    The steps dropped as too SHORT are not in either return value — see
+    :func:`_classify_steps`, which is where this rule now lives.
     """
-    kept: list[float] = []
-    n_too_close = 0
-    last = None
-    for z in sorted(step_zs):
-        if not allow_short and (z - bb_min_z) * scale < _MIN_STEP_DIM_MM:
-            continue
-        if last is not None and (z - last) * scale < _MIN_STEP_SEP_MM:
-            n_too_close += 1
-            continue
-        kept.append(z)
-        last = z
-    return kept, n_too_close
+    kept, too_close, _too_short = _classify_steps(
+        step_zs, bb_min_z, scale, allow_short=allow_short
+    )
+    return kept, len(too_close)
 
 
 def _legible_locations(positions, scale):

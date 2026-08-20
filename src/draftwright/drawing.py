@@ -2876,12 +2876,47 @@ class Drawing:
         groups = self._hole_spec_groups(view)
         if not groups:
             return None
+        # The compiler's text for every cell this table prints, keyed the way the coverage
+        # registration below already keys it. A table row IS a dimension — `⌀ 8 ±0.05` in a
+        # cell states exactly what `⌀8 ±0.05` states beside a leader — but this verb formatted
+        # its own numbers off the recognised geometry, so an authored tolerance was approved,
+        # claimed by the table's provenance, and never printed (#1216 review r9). Read from
+        # `_part_model` rather than `model()`: an attribute, so a declared build is not made
+        # to recognise anything by adding a table (ADR 0017).
+        approved: dict = {}
+        if self._part_model is not None:
+            from draftwright.model.compiled import compile_dimensions as _compile_table
+            from draftwright.model.compiled import resolve_feature as _resolve_table
+
+            approved = {
+                (_resolve_table(group.ref), dim.parameter_id): dim
+                for group in _compile_table(self._part_model).of_kind("hole")
+                for dim in group.dims
+            }
+
+        def _cell(owner, parameter, fallback):
+            """The plan's text for *owner*'s *parameter*, else *fallback*.
+
+            The fallback is not decoration: `_hole_spec_groups` is geometry-derived and can
+            group holes the compiler never approved a dimension for, and a table that prints
+            an empty cell there would be worse than one that prints the measured value.
+            """
+            dim = approved.get((owner, parameter))
+            if dim is None:
+                return fallback
+            return f"{dim.value_text}{_tol_suffix(dim.tolerance, self.draft)}"
+
         rows = [("TAG", "⌀", "DEPTH", "QTY")]
         diams = []
-        for tag, _owner, holes, count in groups:
+        for tag, owner, holes, count in groups:
             h = holes[0]
-            depth = "THRU" if h.through else (_fmt(h.depth) if h.depth else "")
-            rows.append((tag, f"ø{_fmt(h.diameter)}", depth, str(count)))
+            depth = (
+                "THRU"
+                if h.through
+                else (_cell(owner, "bore.depth", _fmt(h.depth)) if h.depth else "")
+            )
+            dia = _cell(owner, "bore.diameter", _fmt(h.diameter))
+            rows.append((tag, f"ø{dia}", depth, str(count)))
             # Legacy physical-diameter lint counts one structured entry per bore.
             # Repeat the value exactly as many times as the visible QTY asserts, just as
             # automatic escalation does, while the semantic ledger below retains the

@@ -30,6 +30,7 @@ from draftwright._core import (
     _iso_bbox,
     _log,
     _tag_sequence,
+    _tol_suffix,
     _wrap_rows,  # noqa: F401 — re-exported via the annotate facade (#700: one copy, in _core)
     layout_frame,
 )
@@ -888,15 +889,26 @@ def _maybe_tabulate_holes_impl(dwg, a: Analysis, *, ctx, plan=None):
         }
         approved_locations = {
             (resolve_feature(location.ref), tuple(location.span[1]), location.discriminator): (
-                location.value_text
+                f"{location.value_text}{_tol_suffix(location.tolerance, dwg.draft)}"
             )
             for location in compiled.locations
             if location.span is not None
         }
 
         def _approved_hole_text(hole, parameter):
+            """A table cell's text, authored tolerance included (#1216 review r9).
+
+            A table row is a dimension: `⌀ 8` in a hole-table cell states the same
+            requirement `⌀8` states beside a leader, so it carries the same ±. Escalating
+            a toleranced callout into a table used to drop the tolerance on the way — the
+            requirement left the sheet because the drawing got denser, which is #1215's
+            failure mode at a site its sweep could not see (the guard reads `label`, and a
+            table's text lives in its rows).
+            """
             dimension = approved_hole_dimensions.get(hole.feature, {}).get(parameter)
-            return "" if dimension is None else dimension.value_text
+            if dimension is None:
+                return ""
+            return f"{dimension.value_text}{_tol_suffix(dimension.tolerance, dwg.draft)}"
 
         def _table_row(tag, hole):
             diameter_text = _approved_hole_text(hole, "bore.diameter")

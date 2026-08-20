@@ -221,6 +221,10 @@ _UNSCORED_CODES = frozenset(
         # telling the author so. Not a fidelity fault (nothing false was printed) and not a
         # legibility one (nothing was misplaced): informational (#1216).
         "pattern_pitch_tolerance_withheld",
+        # Same shape one line up: an omission the drawing REPORTS. A step height the page
+        # cannot carry is missing content, not misplaced content, so it belongs to
+        # completeness's ledger and scores on no lint component (#1216).
+        "step_dim_withheld",
         "boss_height_missing",
         "dimension_kind_unsupported",
         "feature_count_mismatch",

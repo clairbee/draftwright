@@ -46,6 +46,7 @@ from draftwright._core import (
     _WITNESS_LIFT_MM,
     DetailRequest,
     _annotation_diameter_sources,
+    _classify_steps,
     _concentric_with_axis,
     _dim,
     _first_free_index,
@@ -53,7 +54,6 @@ from draftwright._core import (
     _greedy_strip_ys,
     _iso_bbox,
     _legible_locations,
-    _legible_steps,
     _log,
     _solve_strip_ys,
     _text_size,
@@ -3277,6 +3277,28 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
     n = 0
 
     def _queue(name, strip, view, tier, distance, build, footprint=None, measurement=None):
+        def _drop(nm, _view=view, _strip=strip):
+            # An overall extent is the one dimension every drawing must carry, and until
+            # #1216 review r9 its drop was the only one in the engine that reported NOTHING:
+            # `on_drop` was `lambda _nm: None`, so a starved strip removed the width from the
+            # sheet and the build, the lint and the score all stayed clean. Reproduced on an
+            # 80x80 plate with a hexagonal boss, where the A/F callout's leader spans the
+            # whole plan-below corridor: `m_env_width` is force-kept and mandatory and still
+            # solves to `strip_full`, leaving the part's width undimensioned and unremarked.
+            # The height ladder has reported its own drops this way since #736; this is the
+            # same code, not a new mechanism. Whether a leader should be allowed to starve a
+            # mandatory extent at all is a placement-policy question (ADR 0014) and is filed
+            # separately — reporting it is not contingent on deciding it.
+            msg = full_strip_message(
+                f"overall {'width' if nm.endswith('width') else 'depth'} dimension dropped "
+                f"({_view}-view below strip full)",
+                dwg,
+                _strip,
+                _view,
+                "y",
+            )
+            ctx.record_issue("error", "placement_unsatisfiable", msg)
+
         register_corridor(
             ctx,
             (view, "below"),
@@ -3289,7 +3311,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
                 build=build,
                 order=(_OVERALL_SUBCHAIN, distance, name),
                 on_place=lambda _nm: None,
-                on_drop=lambda _nm: None,
+                on_drop=_drop,
                 priority=_MANDATORY_OVERALL_PRIORITY,
                 force=True,
                 measurement=measurement,  # which envelope extent this is (#1002)
@@ -4046,13 +4068,33 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
         # Legibility is a PLACEMENT decision — whether two rungs are too close to dimension
         # depends on the page, not the model — so it stays here while the rung set itself
         # comes from the compiler. Both bounds come off the approved span, not the bbox.
-        kept_z, n_close = _legible_steps(
+        kept_z, close_z, short_z = _classify_steps(
             [r.span[1][2] for r in rungs],
             rungs[0].span[0][2],
             frame.scale,
             allow_short=has_shoulders,
         )
+        n_close = len(close_z)
         kept_level_set = set(kept_z)
+        if short_z:
+            # The compiler approved these rungs and the page cannot carry them: their span
+            # from the part's base is shorter than a dimension's own ink. Reported, not
+            # merely skipped — that skip was the engine's last silent one, and it took a
+            # blind hole in a plate (its floor IS a step level) from "approved by the
+            # compiler" to "absent from the drawing" with the lint clean (#1216 review r9).
+            #
+            # Deliberately NOT a `*_dropped` code: those score against legibility, and this
+            # is an omission, which is completeness's ledger. Whether the right answer is a
+            # detail-view escalation (as the too-close case gets) or a compiler that never
+            # approves a rung this short is a policy decision, and it is not made here.
+            # Saying so is not contingent on making it.
+            ctx.record_issue(
+                "info",
+                "step_dim_withheld",
+                f"{len(short_z)} approved step height(s) span less than "
+                f"{_MIN_STEP_DIM_MM:.0f} mm on the page from the part base and are not "
+                "dimensioned at this scale",
+            )
         if n_close:
             # When detail recovery is enabled the enlarged view owns the omitted rungs.
             # Report the source-view drop only when no recovery was requested; a failed

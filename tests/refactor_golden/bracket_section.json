@@ -352,7 +352,13 @@
       "view": null
     }
   ],
-  "build_issues": [],
+  "build_issues": [
+    [
+      "info",
+      "step_dim_withheld",
+      "1 approved step height(s) span less than 12 mm on the page from the part base and are not dimensioned at this scale"
+    ]
+  ],
   "item_count": 22,
   "views": {
     "front": [

@@ -66,7 +66,11 @@ def test_pocket_rim_tip_is_axis_independent(rotation):
     )
 
     assert _tip_is_on_rim(dwg, view, pocket, callout.tip)
-    assert dwg.lint() == []
+    # `step_dim_withheld` (#1216) — the pocket floor is a step level, and whether its span
+    # clears the page's dimensioning floor depends on which view it lands in: of the
+    # orientations here only `x-depth` reports it. This test is about the leader's tip, so it
+    # asserts the leader draws nothing wrong rather than pinning an orientation-dependent set.
+    assert [issue.code for issue in dwg.lint() if issue.code != "step_dim_withheld"] == []
 
 
 @pytest.mark.parametrize("axis", ["long", "width"], ids=["long-axis", "width-axis"])
