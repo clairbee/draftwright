@@ -594,8 +594,15 @@ def test_a_doubly_starved_extent_is_still_reported(monkeypatch):
     real = common_mod.place_strip_candidates
 
     def refuse_fallthrough(*args, **kwargs):
-        if str(kwargs.get("trace_label", "")).endswith("_above_fallthrough"):
-            return [name for name, _build in args[4]]
+        # Exact names, not a suffix: the slot fallthrough's label `slot_above_fallthrough`
+        # also ends `_above_fallthrough`, so a suffix match would refuse a different pass on a
+        # slotted fixture and the docstring's "every other call passes through untouched"
+        # would be false (#1239 review F2).
+        if kwargs.get("trace_label") in (
+            "m_env_width_above_fallthrough",
+            "m_env_depth_above_fallthrough",
+        ):
+            return args[4]  # the (name, build) pairs, unplaced — the real return shape
         return real(*args, **kwargs)
 
     monkeypatch.setattr(fm, "place_strip_candidates", refuse_fallthrough)

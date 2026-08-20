@@ -80,6 +80,7 @@ from draftwright.annotations._common import (
     register_corridor,
     strip_free_span,
     strip_obstacles,
+    strip_occupants,
 )
 from draftwright.annotations.leaders import (
     _GREEDY_MATERIAL_LOOKAHEAD,
@@ -3323,7 +3324,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         footprint=None,
         measurement=None,
     ):
-        def _report(nm, _view=view, _strip=strip, _mid=measurement):
+        def _report(nm, _view=view, _strip=strip, _above=above_strip, _mid=measurement):
             # An overall extent is the one dimension every drawing must carry, and until
             # #1216 review r9 its drop was the only one in the engine that reported NOTHING:
             # `on_drop` was `lambda _nm: None`, so a starved strip removed the width from the
@@ -3347,14 +3348,18 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             #
             # `measurement=` so the report is joined to the measurement it is about, rather
             # than being an unattributed issue that any absence-shaped code could stand in for.
-            msg = full_strip_message(
-                f"overall {'width' if nm.endswith('width') else 'depth'} dimension not placed "
-                f"({_view}-view below and above strips full)",
-                dwg,
-                _strip,
-                _view,
-                "y",
+            # Both strips were tried, so both sets of blockers are named — a message that
+            # says "below and above strips full" and then lists only the below occupants
+            # half-attributes the refusal (#1239 review F3). `full_strip_message` extends a
+            # single-strip message; two strips are composed here from the same helper it uses.
+            which = "width" if nm.endswith("width") else "depth"
+            msg = (
+                f"overall {which} dimension not placed ({_view}-view below and above strips full)"
             )
+            for side_name, side_strip in (("below", _strip), ("above", _above)):
+                occupants = strip_occupants(dwg, side_strip, _view, "y") if side_strip else []
+                if occupants:
+                    msg = f"{msg[:-1]}; {side_name} occupied by: {', '.join(occupants)})"
             ctx.record_issue("error", "overall_dim_withheld", msg, measurement=_mid)
 
         def _drop(nm, _view=view, _above=above_strip, _mid=measurement, _xs=xs, _label=label):
