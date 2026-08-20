@@ -35,6 +35,7 @@ architecture** table; open retired or superseded records only for design history
 | [0016](0016-declared-dimensioning-intent.md) | Declared dimensioning intent: capture what to measure, let the engine place it | Declare which measurements matter as scale-independent intent routed through the planner and corridor solve; never hardcode dimension geometry. | Accepted; epic #867 complete; phase 6 landed (#940) | `test_compiled_plan_boundary.py`, `test_issue_1215_no_approved_tolerance_is_dropped.py`, `test_label_provenance.py`, `test_sheet_emit.py`, `test_add_dimension.py` |
 | [0017](0017-recognition-inventory-correspondence-and-measurement-provenance.md) | One recognition result per run; correspondence is evidence-gated | Produce one external immutable recognition result held by Draftwright's per-run cache; require vertical-slice evidence before generalising correspondence, identity, requirements, outcomes, or reconciliation. | Accepted; external cache ownership clarified, extensions gated by #1018 | `test_external_recognition_boundary.py`, `test_recognition_manifest.py`, `test_declared_recognition_gate.py` |
 | [0018](0018-requirement-driven-view-planning-and-editable-sheet-layout.md) | Requirement-driven view planning and editable sheet layout | Use one `ViewSpec` vocabulary and planner with distinct authored `ViewConstraints` and immutable `ResolvedViewPlan`; jointly validate views, typography, convention, scale, paper and layout against requirement survival. If accepted, supersedes ADR 0004's fixed-topology assumption while retaining compose-then-pack. | Proposed; tracked by #1130 | Required guards are listed in the ADR |
+| [0019](0019-display-complete-labels-and-dimension-outcomes.md) | Display-complete labels and a dimension-outcome ledger | The compiled plan carries the full label text (tolerance and collapse wording included) so renderers render and never compose; dimension outcomes reconcile at one seam on both build routes; ladder rungs get per-mark identity. Finishes the ADR 0016 Amdt 1 boundary; supersedes Amdt 6's enforcement mechanism. | Proposed | `test_issue_1215_no_approved_tolerance_is_dropped.py` reduces to plan-equality when implemented |
 
 ## Historical records
 
@@ -49,7 +50,7 @@ architecture** table; open retired or superseded records only for design history
 - Compiler and state ownership: 0001 → 0005 → 0015.
 - Recognition and public declaration: 0007 → 0013 → 0011 → 0015.
 - Layout and placement: 0004 → 0014 → 0012 → 0018.
-- Declared intent and the editable surface: 0001 → 0011 → 0012 → 0016 → 0018.
+- Declared intent and the editable surface: 0001 → 0011 → 0012 → 0016 → 0018 → 0019.
 - Quality and correction: 0002, with provenance from 0010.
 - Recognition correspondence and completeness: 0007 → 0013 → 0015 → 0017.
 
