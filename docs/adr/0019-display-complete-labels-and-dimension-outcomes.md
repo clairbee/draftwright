@@ -63,9 +63,9 @@ correlated marks") is the precedent and folds into this as the general case.
 Consequences inside the compiler:
 
 - `_tol_suffix` moves below the model rank (next to `_geometry._fmt`, the shared bottom-leaf
-  formatter, taking `FitClass` with it or importing from `fits`, also a leaf). The drawn
-  precision becomes an explicit compile input — which is where the `±0.02 → "±0.0"` honesty
-  defect gets fixed once: a band that rounds to zero at the drawn precision is **withheld and
+  formatter, taking `FitClass` with it or importing from `fits`, also a leaf). Formatting is
+  governed by the one frozen policy of §4 — which is where the `±0.02 → "±0.0"` honesty defect
+  gets fixed once: a band that rounds to zero at the drawn precision is **withheld and
   diagnosed**, not printed.
 - Collapse honesty becomes one compiler rule with one implementation: an `N×` mark states a
   band only when every member states the same band at the drawn precision (the rule
@@ -80,32 +80,86 @@ predicate-engineering — three of its predicates reported green over live drops
 fourth was exact — to string equality: *the claiming annotation's rendered text contains the
 plan's `display_text` for each claimed mark, verbatim.*
 
-### 2. Dimension outcomes reconcile at one seam
+### 2. The plan states its expectations; outcomes reconcile against them at one seam
 
-A single end-of-build reconciliation joins the compiled plan against the registry (the ADR
-0010 claim seam) and produces an outcome per approved mark: `placed`, `dropped` (a pass
-reported why — strip full, occupants named), or `withheld` (the compiler or a collapse rule
-declined, diagnosed). It runs on **both** routes (`_auto_annotate` and `finalize()`), so
-live/declared parity holds by construction rather than by remembering to call a helper twice.
+A bare join of approved entries against registry claims cannot produce the outcome set — a
+compiler-withheld mark is *absent* from the approved plan, and a collapse-withheld band leaves
+its mark *placed* with only a component missing, so neither is distinguishable from placement
+loss by looking at claims. Inferring them back at the seam would recreate exactly the
+withholding-code machinery this ADR deletes. So the compiler says what it expects, explicitly:
 
-Per-pass reporting keeps exactly one job: the *reason* (only the pass knows which strip was
-full and who filled it). Whether an absence exists is computed centrally — which deletes the
-retraction pass, the withholding-code join, and the max-count workaround wholesale. The
-outcome ledger feeds completeness the way hole/slot/channel/flat requirement outcomes already
-do; `passed`/`geometry_issues` read the ledger, not a code list.
+The plan carries an **expected-mark table** — one record per mark it has ruled on:
+
+```
+ExpectedMark:
+  mark:       DimensionMarkId        # §3 — per mark, not per addressable parameter
+  mandatory:  bool                   # a principal extent is; a best-effort slot dim is not
+  display:    str                    # §1's display_text for this mark
+  components: {value: expected, band: expected | withheld(reason)}
+```
+
+A compiler refusal (an authored omission, a zero-band round, a collapse whose members disagree)
+is *recorded in the table* at compile time, with its reason — never inferred later. The
+end-of-build reconciliation is then a mechanical join of expected marks against registry claims
+(the ADR 0010 seam): every expected mark is `placed`, `dropped` (a pass recorded why — strip
+full, occupants named), or `withheld` (the table says which component and why). It runs on
+**both** routes (`_auto_annotate` and `finalize()`), so live/declared parity holds by
+construction rather than by remembering to call a helper twice.
+
+Per-pass reporting keeps exactly one job: the *reason for a drop* (only the pass knows which
+strip was full and who filled it). Whether an absence exists is computed centrally — which
+deletes the retraction pass, the withholding-code join, and the max-count workaround wholesale.
+The outcome ledger feeds completeness the way hole/slot/channel/flat requirement outcomes
+already do; `passed`/`geometry_issues` read the ledger, not a code list.
 
 The severity question dissolves rather than being answered: a missing principal extent is a
-`dropped` outcome on a mandatory mark, which is what gates `passed` — no lint code has to be
+`dropped` outcome on a `mandatory` mark, which is what gates `passed` — no lint code has to be
 simultaneously "loud enough to fail a drawing" and "quiet enough not to abort a build"
-(`_is_required_scale_drop` keys on outcome stage, not on a name).
+(`_is_required_scale_drop` keys on outcome, not on a name).
 
-### 3. Per-mark identity
+### 3. Per-mark identity — a new type, not an overloaded `DimensionId`
 
-Ladder rungs (and any collapsed set that renders one mark per member) get a discriminator on
-their `DimensionId` — `step_height.length.0`, `.1`, … — amending Amendment 3: the parameter id
-remains the canonical *addressing* spelling for authored intent, and the discriminator exists
-only where one parameter produces several marks. Addressing is unchanged (an author still
-writes `dimension(step, "length", role="step_height")`); accounting stops being blind.
+`DimensionId` identifies the *addressable* dimension, and a correlated ladder is deliberately
+one addressable set — suppression, deduplication, lookup and provenance equality all rely on
+that. Splitting it per rung would change equality semantics under every one of those consumers
+while claiming addressing is unchanged. So per-mark identity is a **separate type**:
+
+```
+DimensionMarkId = (dimension: DimensionId, discriminator: int | None)
+```
+
+Authored intent, suppression and dedup keep the base `DimensionId` untouched. The expected-mark
+table (§2) and registry claims use `DimensionMarkId`; `registry.measurement_of` grows a
+mark-level reading beside the existing one, and the dimension-level view is derived
+(`mark.dimension`), so every current consumer keeps its semantics by construction rather than
+by audit. The discriminator is non-`None` only where one parameter produces several marks
+(ladder rungs, collapsed member sets); everywhere else the mark id is the dimension id plus
+`None`, and the two-level structure is invisible. Amends Amendment 3: the parameter id remains
+the canonical *addressing* spelling; marks are an accounting refinement below it, not a second
+address.
+
+### 4. One plan, one formatting policy, one owner
+
+`compile_dimensions` has ~32 call sites across eight files today, including `sheet_emit`,
+`evaluation` and `linting/evidence`, several with no `Draft` in reach — and it is freely
+recomputed during rendering and later verification. "Callers pass the build's precision" would
+permit two compiles of one model to disagree about `display_text` between render time and
+reconciliation time, which is a new spelling of the drift this ADR exists to end. So:
+
+- **A `FormattingPolicy`** (drawn precision + the number/band/fit formatting rules) is a
+  frozen value object at the bottom rank. The engine has ONE default (`_fmt`'s current 1 dp);
+  a `Draft` *carries* a policy rather than being one.
+- **The compiled plan is a build-owned artifact.** `BuildState` compiles at most once per
+  build and hands the same plan to rendering, the drain, and reconciliation — the ADR 0017
+  recognition-once pattern, applied to the plan. `Drawing` exposes it; passes stop calling
+  `compile_dimensions` themselves.
+- **The plan records its policy.** `RenderableDimensionPlan.policy` makes a cross-policy
+  comparison detectable instead of silently wrong: reconciliation asserts the plan it joins is
+  the plan that rendered.
+- **Buildless consumers are defined, not exempted.** `sheet_emit` and `evaluation` compile
+  under the engine default policy explicitly; `linting/evidence` reads the drawing's stored
+  plan when one exists and compiles under the default otherwise. Same code path, stated
+  policy, no ambient assumption.
 
 ## What this deletes
 
@@ -117,9 +171,9 @@ two boundary guards.
 
 ## Consequences / risks
 
-- `compile_dimensions` gains the drawn precision as an input; callers that compile without a
-  draft (`Drawing.model()`-adjacent probes) pass the build's. One more argument, one fewer
-  distributed assumption.
+- The build-owned plan (§4) is the larger migration: ~32 `compile_dimensions` references
+  collapse toward one compile per build plus the two stated buildless entry points. Mechanical,
+  and each removed re-compile also removes a place the plan could drift from itself.
 - Compound callouts (`hc_*`) remain assembled render-side from per-term display text — full
   string assembly in the compiler would move `⌴`/`↧` glyph policy down a rank for no gain; the
   boundary is "no term's text is composed render-side", not "one string per annotation".
@@ -131,11 +185,17 @@ two boundary guards.
 
 ## Evidence-gated work plan
 
-1. **`display_text` + precision input + zero-band withholding** — gate: the r10 F7 case
-   (`±0.02` at 1 dp) is withheld-and-diagnosed, not printed; label-provenance forbids the old
-   formatter outside `model/`.
-2. **Migrate renderers** (mechanical, several PRs) — gate: `annotations/`, `drawing.py`,
-   `compose.py` import no suffix formatter; guard reduces to equality.
-3. **Outcome ledger + per-mark ids** — gate: the partial-ladder case (two rungs, one drawn)
-   yields one `placed` + one `dropped` outcome on both routes; the retraction pass and
-   withholding joins are deleted; `passed` reads the ledger.
+1. **`FormattingPolicy` + build-owned plan** (§4) — gate: one compile per build measured by
+   counter; `sheet_emit`/`evaluation`/`evidence` byte-identical output before and after; the
+   plan self-describes its policy.
+2. **`display_text` + zero-band withholding** (§1, §2's table without the ledger) — gate: the
+   r10 F7 case (`±0.02` at 1 dp) is withheld-and-diagnosed, not printed; label-provenance
+   forbids the old formatter outside `model/`.
+3. **Migrate renderers** (mechanical, several PRs) — gate: `annotations/`, `drawing.py`,
+   `compose.py` import no suffix formatter; the #1215 guard reduces to equality against
+   `display_text`.
+4. **`DimensionMarkId` + the outcome ledger** (§2, §3) — gates: every existing consumer of
+   `DimensionId` equality (suppression, dedup, provenance, `measurement_keys`) passes
+   unchanged with marks present; the partial-ladder case (two rungs, one drawn) yields one
+   `placed` + one `dropped` outcome on both routes; the retraction pass and withholding joins
+   are deleted; `passed` reads the ledger.
