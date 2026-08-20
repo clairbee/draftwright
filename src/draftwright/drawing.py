@@ -46,6 +46,7 @@ from draftwright._core import (
     _fmt,
     _log,
     _tag_sequence,
+    _tol_suffix,
     place_annotation,
 )
 from draftwright.annotations._common import (
@@ -992,7 +993,11 @@ class Drawing:
             slot: strip slot depth (mm); the perpendicular space reserved per dim.
             feature: optional source IR feature to attribute this dim to, so
                 :meth:`drop` / :meth:`annotations_of` can find it (#398).
-            **kwargs: forwarded to ``Dimension`` (e.g. ``label=``, ``tolerance=``).
+            **kwargs: forwarded to ``Dimension`` (e.g. ``label=``). ``tolerance=`` is
+                folded into the label rather than forwarded — your own ``label=`` included —
+                because helpers do ``rendered = label if label is not None else …``, so an
+                explicit label DISCARDS a forwarded tolerance and a label is always
+                present here (#1234).
 
         Deprecated for normal editable scripts: prefer :meth:`dimension` for
         feature-backed linear dimensions and :meth:`locate` for feature-backed
@@ -1062,9 +1067,26 @@ class Drawing:
         # no label is given, which is scale-too-big at non-1:1 scales. Supply the
         # real-world length (page distance ÷ drawing scale) unless the caller set
         # an explicit label.
-        if "label" not in kwargs:
+        # The suffix goes into the LABEL, and it has to. Injecting a label is exactly what makes
+        # `tolerance=` unreachable: helpers do
+        # `rendered = label if label is not None else …`, so an explicit label discards it.
+        # Both public verbs that reach here — the deprecated `place_dim` and the preferred
+        # `dimension` — documented `tolerance=` as forwarded while it silently vanished
+        # (#1234 review r3). Composing it here closes both.
+        #
+        # Popped UNCONDITIONALLY, and composed onto whichever label is used. Doing it only in
+        # the inject branch left the defect alive for a caller passing BOTH `label=` and
+        # `tolerance=`: the tolerance stayed in kwargs and `Dimension` discarded it, which is
+        # the very thing being fixed, surviving in one branch (#1234 review r4).
+        tolerance = kwargs.pop("tolerance", None)
+        # `.get(...) is None`, not `not in`: an explicit `label=None` is helpers' documented
+        # "auto", and testing membership composed the suffix onto the literal `None`, so the
+        # sheet printed the string "None". A public API made to print garbage by the fix for a
+        # public API that printed nothing (#1234 review r5).
+        if kwargs.get("label") is None:
             page_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             kwargs["label"] = _fmt(page_len / self.scale)
+        kwargs["label"] = f"{kwargs['label']}{_tol_suffix(tolerance, draft)}"
         return self._add(
             _dim(p1, p2, side, max(dist, 4.0), draft, **kwargs), name, feature=feature
         )
@@ -1236,9 +1258,18 @@ class Drawing:
             for k, v in it.kwargs.items()
             if k not in {"param", "role", "side", "view", "name", "pin", "priority", "slot"}
         }
-        if "label" not in dim_kwargs:
+        # The same composition as `_place_dim`, and for the same reason: this is the DEFERRED
+        # twin of that function, so a tolerance reaching it must go into the label or helpers
+        # discard it. Without this the identical public call rendered `80 +0.2 -0.1` live and a
+        # bare `80` the moment the author added `pin=True` or `priority=` — a divergence #1215
+        # INTRODUCED, since before it neither path rendered anything. `pin=True` is ADR 0012's
+        # first-class corridor candidate, so it was the going-forward surface that lost the
+        # requirement (#1234 review r4).
+        tolerance = dim_kwargs.pop("tolerance", None)
+        if dim_kwargs.get("label") is None:  # `None` is "auto"; see `_place_dim` (#1234 r5)
             page_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             dim_kwargs["label"] = _fmt(page_len / self.scale)
+        dim_kwargs["label"] = f"{dim_kwargs['label']}{_tol_suffix(tolerance, self.draft)}"
         slot = it.kwargs.get("slot", 8.0)
         axis = "y" if side in ("above", "below") else "x"
         ax = 1 if axis == "y" else 0
@@ -1323,7 +1354,9 @@ class Drawing:
         ``"side"``) where the span projects non-degenerate — a length along the turning
         axis vanishes in its end-on view, so the view follows the geometry. Pass ``view=``
         to force one of those three (a non-orthographic view foreshortens the span and is
-        rejected). ``side`` defaults to ``"above"``; ``kwargs`` forward to the dimension.
+        rejected). ``side`` defaults to ``"above"``; ``kwargs`` forward to the dimension —
+        except ``tolerance=``, which is folded into the label (see :meth:`place_dim`),
+        because helpers discard a forwarded tolerance whenever a label is present.
         In deferred mode, ``pin=True`` anchors the dimension at its natural slot coordinate
         inside the shared corridor solve, and ``priority=`` controls over-capacity survival.
         Live placement still uses the single-position escape hatch and pins only the placed

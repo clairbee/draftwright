@@ -42,6 +42,7 @@ from draftwright._core import (
     _largest_empty_rect,
     _legible_steps,
     _log,
+    _tol_suffix,
 )
 from draftwright._geometry import _leader_ink_polygons, _stroke_polygon
 from draftwright.annotations._common import carve_free_segments, strip_obstacles
@@ -862,7 +863,24 @@ def _overall_height_name(dwg, a: Analysis) -> str | None:
     **unambiguous**: zero or several surviving candidates (e.g. a hand-authored
     twin of the height dim, or a square part whose depth label equals its height)
     return ``None``, and the caller simply proceeds without a demotion retry."""
+    # Compare the VALUE, not the whole label. An authored `envelope().tolerance(..., on=
+    # "height")` composes a suffix into `dim_height`'s label (#1215), so `'10'` becomes
+    # `'10 ±0.1'` and an exact-equality match against a re-derived numeric silently found
+    # nothing — in both the canonical branch and the generalised fallback. The failure is
+    # quiet by design ("no demotion, the safe outcome"), so a toleranced part would simply
+    # stop retrying and drop its detail view instead (#1234 review r4).
     height_label = _fmt(a.z_size)
+
+    def _is_height(obj) -> bool:
+        # No `is None` guard: a missing label stringifies to "None", which cannot equal a
+        # formatted number, so that branch had no outcome of its own — only an uncoverable
+        # partial, which codecov correctly flagged (#1234 review r6).
+        #
+        # The suffix is appended, so the value is the leading token. `_tol_suffix` emits
+        # " ±t", " +hi -lo" and a fit class's " h6" — all space-separated — and a bare label
+        # has no space, so splitting once is exact for every form.
+        return str(getattr(obj, "label", None)).split(" ", 1)[0] == height_label
+
     # The auto pass names the overall height `dim_height`; subject it to the SAME
     # demotion-safety guards as the generalised names (user review, #661): never
     # demote a PINNED dim (a pin is the user's "this stays put", ADR 0012), and
@@ -874,7 +892,7 @@ def _overall_height_name(dwg, a: Analysis) -> str | None:
     if (
         canonical is not None
         and not dwg.registry.is_pinned("dim_height")
-        and getattr(canonical, "label", None) == height_label
+        and _is_height(canonical)
     ):
         return "dim_height"
     candidates = []
@@ -884,7 +902,7 @@ def _overall_height_name(dwg, a: Analysis) -> str | None:
         for name, obj in dwg.annotations_of(feat).items():
             if dwg.registry.is_pinned(name):
                 continue
-            if getattr(obj, "label", None) != height_label:
+            if not _is_height(obj):
                 continue
             box = _anno_box(obj)
             if box is not None and (box[3] - box[1]) > (box[2] - box[0]):
@@ -1019,7 +1037,14 @@ def _request_prismatic_detail(dwg, a: Analysis, *, ctx, plan) -> None:
         placed = 0
         for i, z in enumerate(det_kept):
             rung = rung_by_level[z]
-            label = rung.final_label  # the compiler's label, not a second derivation
+            # The compiler's label plus its tolerance — NOT a second derivation of the value.
+            # Before #1215 the tolerance was dropped everywhere, so the sheet was at least
+            # self-consistent. Composing it on the main view alone made a toleranced staircase
+            # contradict itself: the levels the legibility gate moved here are dimensioned ONLY
+            # in the detail, so three of five authored ± requirements vanished while two showed
+            # — a machinist reads the bare ones as falling under the general block
+            # (#1234 review r6).
+            label = rung.final_label + _tol_suffix(rung.tolerance, dwg.draft)
             try:
                 if has_level_supports:
                     source_x = source_x_by_z[z]

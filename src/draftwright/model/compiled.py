@@ -69,6 +69,7 @@ from draftwright.model.ir import (
 from draftwright.model.planner import (
     _AUTHORED_OMISSION,
     DimensionId,
+    _decorated,
     authored_location_omitted,
     location_datum,
     plan_dimensions,
@@ -740,6 +741,20 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
         )
         return ((x, y, step.base), (x, y, z)), bounds
 
+    # An authored `.tolerance(...)` on a step level, through the one owner. The PLAIN ladder
+    # rungs carry it; the `N× rise` representative below deliberately does not, because a ±
+    # on a collapsed representative would claim it of every level (#28 / P2a).
+    #
+    # The seventh site of #1215's discard, and the last: a bare `.tolerance()` on a step level
+    # reached `model.decorations` and was dropped here, so `dim_step_0` printed `14` where the
+    # author wrote `14 ±0.05`. `sheet.py` promises a bare tolerance "folds onto every parameter
+    # of that kind" (#1234 review r5).
+    step_height_param = next((pm for pm in step.parameters() if pm.role == "step_height"), None)
+    step_tol = (
+        _decorated(model, step, step_height_param).tolerance
+        if step_height_param is not None
+        else None
+    )
     heights = []
     for z in sorted(step.levels):
         span, support_bounds = _height_evidence(z)
@@ -748,6 +763,7 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
                 id=_dim_id(step, "step_height.length"),
                 value_text=_fmt(z - step.base),
                 value=z - step.base,
+                tolerance=step_tol,
                 span=span,
                 ref=step_ref,
                 rendered_label=_fmt(z - step.base),
@@ -799,6 +815,15 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
         hi[_di[axis]] = pos
         return (tuple(lo), tuple(hi))
 
+    # Shoulders carry their authored tolerance too. Without this the SAME `DimensionId` sat in
+    # `plan.groups` with a tolerance (via `_compile_groups`) and in `plan.ladders` without one,
+    # and `evidence.compiled_values` merges both into one multimap — a one-owner violation of
+    # the same shape as #1154, five lines below where #1215 added the height rungs'
+    # (#1234 review r6).
+    shoulder_param = next((pm for pm in step.parameters() if pm.role == "step_position"), None)
+    shoulder_tol = (
+        _decorated(model, step, shoulder_param).tolerance if shoulder_param is not None else None
+    )
     shoulders = [
         ApprovedDimension(
             id=_dim_id(step, "step_position.length"),
@@ -807,6 +832,7 @@ def _compile_step_ladders(model: PartModel, marked) -> tuple[list[ApprovedLadder
             span=_shoulder_span(axis, pos),
             ref=step_ref,
             axis=axis,
+            tolerance=shoulder_tol,
             rendered_label=_fmt(abs(pos - step.datum[_di[axis]])),
         )
         for axis, pos in sorted(step.shoulders)
@@ -933,6 +959,20 @@ def _compile_overall_height(
         identity = _envelope_from_bbox(bb)
     env_ref = FeatureRef(env) if env is not None else None
     x, y = float(bb.max.X), float(bb.min.Y)
+    # An authored `envelope().tolerance(...)` on the height, through the one owner
+    # (`_decorated`) rather than read off `model.decorations` here — a second reader is how
+    # a decorated parameter and an undecorated one came to look interchangeable (#1154).
+    # A part with no `EnvelopeFeature` has nothing to key a decoration on, and #876 already
+    # says declaring `.envelope()` is how the overall height becomes nameable, so `None` here
+    # is the right answer rather than a gap (#1215).
+    # `next()` with no default, deliberately: `EnvelopeFeature.parameters()` always returns a
+    # `height` role, so a guard for its absence is a branch no test can take — and one that
+    # would silently drop an authored tolerance if the contract ever changed. Raising is the
+    # honest failure.
+    height_tol = None
+    if env is not None:
+        height_param = next(pm for pm in env.parameters() if pm.role == "height")
+        height_tol = _decorated(model, env, height_param).tolerance
     ladder = ApprovedLadder(
         "overall_height",
         (
@@ -942,6 +982,15 @@ def _compile_overall_height(
                 value=value,
                 span=((x, y, float(bb.min.Z)), (x, y, float(bb.max.Z))),
                 ref=env_ref,
+                tolerance=height_tol,
+                # `rendered_label` is the BARE value while `tolerance` is set beside it, so for
+                # a toleranced rung this field is not the "complete compiler-owned label" its
+                # own docstring promises — the renderer composes the suffix. It has to:
+                # `_tol_suffix` lives in `_core` at rank 1 and this module is rank 0, so the
+                # compiler cannot build the string. Today the overall-height rung has exactly
+                # one consumer (`render_height_ladder`), which does compose it; a second
+                # consumer trusting the docstring would silently drop the tolerance
+                # (#1234 review, F8/finding 6).
                 rendered_label=_fmt(value),
             ),
         ),

@@ -319,9 +319,22 @@ class TestSheetTolerance:
     def _dias(self, dwg):
         return {n: dwg.get_annotation(n).label for n in dwg.annotations() if n.startswith("m_dia")}
 
-    def _steplen_tol(self, dwg, name):
-        o = dwg.get_annotation(name)
-        return o._dw_spec.kwargs.get("tolerance")
+    def _steplen_label(self, dwg, name):
+        """The step-length dim's rendered LABEL.
+
+        This used to read `_dw_spec.kwargs["tolerance"]` — the constructor argument. helpers do
+        `rendered = label if label is not None else ...`, so an explicit label DISCARDS
+        `tolerance=`, and these dims always pass one. Three tests here read it — two asserting
+        a value, one asserting its absence — so a tolerance that never reached the sheet was
+        guarded as if it had, including one named
+        `test_step_length_tolerance_reaches_dimension` (#1234 review round 2).
+        """
+        return str(getattr(dwg.get_annotation(name), "label", ""))
+
+    def _steplen_labels(self, dwg):
+        return {
+            self._steplen_label(dwg, n) for n in dwg.annotations() if n.startswith("m_steplen")
+        }
 
     def test_boss_diameter_tolerance_renders_on_leader(self):
         shaft = self._stepped_shaft()
@@ -345,8 +358,7 @@ class TestSheetTolerance:
         s.step(diameter=8, length=20, at=(0, 0, 0), axis="x").tolerance(0.0, 0.2)
         s.step(diameter=12, length=10, at=(15, 0, 0), axis="x")
         dwg = s.build()
-        tols = {self._steplen_tol(dwg, n) for n in dwg.annotations() if n.startswith("m_steplen")}
-        assert (0.0, 0.2) in tols
+        assert "20 +0.2 -0.0" in self._steplen_labels(dwg), self._steplen_labels(dwg)
 
     @staticmethod
     def _pocket_part():
@@ -414,9 +426,182 @@ class TestSheetTolerance:
         dwg = s.build()
         # the bare .tolerance() went to the length dim; the OD leader stays plain
         assert all("±" not in lbl and "+" not in lbl for lbl in self._dias(dwg).values())
-        assert 0.1 in {
-            self._steplen_tol(dwg, n) for n in dwg.annotations() if n.startswith("m_steplen")
-        }
+        labels = self._steplen_labels(dwg)
+        assert "20 ±0.1" in labels, labels
+        # PER-PARAMETER. A mutation taking the first non-None tolerance in the chain gave the
+        # UNDECORATED rung `10 ±0.1` too — a requirement the author never wrote — and passed the
+        # entire fast tier. The commit that introduced this fix asserted per-parameter behaviour
+        # in prose with nothing behind it (#1234 review r3).
+        assert "10" in labels, labels
+
+    def test_a_uniform_run_collapses_without_a_tolerance(self):
+        """`N× v` carries no ±, and now something says so.
+
+        A per-step tolerance on N collapsed equal steps would be a false claim: the label
+        states one representative value for the whole run. `_draw_step_chain` says exactly that
+        in a comment, and a mutation appending the suffix to the collapse label passed the whole
+        fast tier — the invariant was prose only (#1234 review r3).
+        """
+        from build123d import Cylinder, Rot
+
+        shaft = Rot(0, 90, 0) * Cylinder(4, 40)
+        s = Sheet(shaft).auto_dimensions()
+        for i in range(4):
+            s.step(diameter=8, length=10, at=(i * 10, 0, 0), axis="x").tolerance(0.1)
+        dwg = s.build()
+        collapsed = [lbl for lbl in self._steplen_labels(dwg) if "×" in lbl]
+        assert collapsed, self._steplen_labels(dwg)
+        for label in collapsed:
+            assert "±" not in label and "+" not in label, label
+
+    def test_the_public_dimension_verbs_render_a_tolerance(self):
+        """Both verbs that route through `_place_dim`, and both label branches.
+
+        `Drawing.dimension` is the PREFERRED verb and discarded `tolerance=` outright — only
+        the deprecated `place_dim` got a caveat first. And composing the suffix solely in the
+        inject branch left a caller passing BOTH `label=` and `tolerance=` with the same silent
+        discard: the defect surviving in one branch of its own fix (#1234 review r3, r4).
+        """
+        from build123d import Box
+
+        from draftwright.builder import build_drawing
+
+        dwg = build_drawing(Box(90, 60, 20), title="T", number="N-1")
+        envelope = next(f for f in dwg.model().features if f.kind == "envelope")
+
+        injected = dwg.dimension(
+            envelope, "length", role="width", side="above", tolerance=(0.1, 0.2)
+        )
+        assert str(dwg.get_annotation(injected).label) == "90 +0.2 -0.1"
+
+        dwg.place_dim(
+            (10, 10, 0),
+            (60, 10, 0),
+            "below",
+            "plan",
+            dwg.draft,
+            name="u0",
+            label="CUSTOM",
+            tolerance=0.05,
+        )
+        assert str(dwg.get_annotation("u0").label) == "CUSTOM ±0.1"
+
+    @pytest.mark.parametrize("extra", [{}, {"pin": True}, {"priority": 5.0}])
+    def test_a_deferred_dimension_renders_its_tolerance(self, extra):
+        """The corridor route — `_queue_dimension_intent`, the deferred twin of `_place_dim`.
+
+        It injects a label of its own, so it discarded the tolerance the same way. Fixing only
+        the live path made the SAME public call diverge: `80 +0.2 -0.1` immediately, a bare `80`
+        the moment the author added `pin=True` — ADR 0012's first-class corridor candidate, so
+        the going-forward surface was the one losing the requirement. #1215 introduced that
+        divergence; before it, neither path rendered anything (#1234 review r4).
+        """
+        from build123d import Box
+
+        from draftwright.builder import build_drawing
+
+        dwg = build_drawing(Box(80, 50, 20), auto_dims=False, title="T", number="N-1")
+        envelope = next(f for f in dwg.model().features if f.kind == "envelope")
+        with dwg.deferred():
+            dwg.dimension(
+                envelope,
+                "length",
+                role="width",
+                side="below",
+                name="tst",
+                tolerance=(0.1, 0.2),
+                **extra,
+            )
+        assert str(dwg.get_annotation("tst").label) == "80 +0.2 -0.1"
+
+    @staticmethod
+    def _staircase():
+        from build123d import Box, Pos
+
+        return (
+            Box(120, 60, 15)
+            + Pos(-20, 0, 15) * Box(80, 60, 15)
+            + Pos(-40, 0, 30) * Box(40, 60, 15)
+        )
+
+    def test_a_step_level_tolerance_renders_on_every_rung(self):
+        """The seventh site of #1215's discard, and the last one the sweep found.
+
+        `sheet.py` promises a bare `.tolerance(...)` "folds onto every parameter of that kind";
+        a step level's rungs dropped it, so `dim_step_0` printed `15` where the author wrote
+        `15 ±0.05`. The compiler built the rungs with no tolerance and the renderer keyed its
+        suffix map to `dim_height` alone (#1234 review r5).
+        """
+        from draftwright.sheet import Sheet as _S
+
+        for tol, expected in ((None, {"15", "30"}), (0.05, {"15 ±0.1", "30 ±0.1"})):
+            sheet = _S(self._staircase(), title="T", number="N")
+            handle = sheet.step_level(self._staircase())
+            if tol is not None:
+                handle.tolerance(tol)
+            sheet.auto_dimensions()
+            dwg = sheet.build()
+            labels = {
+                str(dwg.get_annotation(n).label)
+                for n in dwg.annotations()
+                if n.startswith("dim_step_")
+            }
+            assert labels == expected, (tol, labels)
+
+    def test_the_representative_step_rung_carries_no_tolerance(self):
+        """`N× rise` states ONE value for the whole run, so a ± would claim the author's
+        tolerance of every level at once — the same rule the turned-step collapse follows."""
+        from build123d import Box, Pos
+
+        from draftwright.sheet import Sheet as _S
+
+        def uniform():
+            part = Box(120, 60, 10)
+            for i in range(1, 4):
+                part += Pos(-10 * i, 0, 10 * i) * Box(120 - 20 * i, 60, 10)
+            return part
+
+        sheet = _S(uniform(), title="T", number="N")
+        sheet.step_level(uniform()).tolerance(0.05)
+        sheet.auto_dimensions()
+        dwg = sheet.build()
+        rep = [n for n in dwg.annotations() if n.startswith("dim_step_typ")]
+        assert rep, sorted(dwg.annotations())
+        for name in rep:
+            label = str(dwg.get_annotation(name).label)
+            assert "×" in label and "±" not in label and "+" not in label, label
+
+    def test_an_explicit_none_label_still_means_auto(self):
+        """`label=None` is helpers' documented "auto". Composing the suffix onto whatever was
+        in `kwargs` printed the literal string `None` on the sheet — a public API made to print
+        garbage by the fix for a public API that printed nothing (#1234 review r5)."""
+        from build123d import Box
+
+        from draftwright.builder import build_drawing
+
+        dwg = build_drawing(Box(90, 60, 20), title="T", number="N-1")
+        dwg.place_dim((10, 10, 0), (60, 10, 0), "below", "plan", dwg.draft, name="u0", label=None)
+        assert str(dwg.get_annotation("u0").label) == "50"
+
+    @pytest.mark.parametrize("extra", [{"pin": True}, {"priority": 5.0}])
+    def test_a_deferred_none_label_still_means_auto(self, extra):
+        """The deferred half of the `label=None` fix, which had nothing holding it.
+
+        Reverting only `_queue_dimension_intent` to `"label" not in dim_kwargs` passed the
+        entire fast tier — the commit said "both sites now test `kwargs.get("label") is None`",
+        and the code did while only one was tested (#1234 review r6).
+        """
+        from build123d import Box
+
+        from draftwright.builder import build_drawing
+
+        dwg = build_drawing(Box(80, 50, 20), auto_dims=False, title="T", number="N-1")
+        envelope = next(f for f in dwg.model().features if f.kind == "envelope")
+        with dwg.deferred():
+            dwg.dimension(
+                envelope, "length", role="width", side="below", name="tst", label=None, **extra
+            )
+        assert str(dwg.get_annotation("tst").label) == "80"
 
     def test_step_on_diameter_tolerances_the_od(self):
         shaft = self._stepped_shaft()
@@ -436,7 +621,7 @@ class TestSheetTolerance:
         dwg = s.build()
         assert all("±" not in lbl and "+" not in lbl for lbl in self._dias(dwg).values())
         assert all(
-            self._steplen_tol(dwg, n) is None
+            "±" not in self._steplen_label(dwg, n) and "+" not in self._steplen_label(dwg, n)
             for n in dwg.annotations()
             if n.startswith("m_steplen")
         )

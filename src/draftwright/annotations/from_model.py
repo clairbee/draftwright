@@ -138,11 +138,20 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
         # diameter carrying tolerance/fit text, "8 ±0.05"); no tolerance → empty suffix.
         dia += _tol_suffix(spec.get("tolerance"), draft)
 
-    depth = f(spec["depth"])
-    cbore_dia = f(spec["cbore_dia"])
-    cbore_depth = f(spec["cbore_depth"])
-    csink_dia = f(spec.get("csink_dia"))
-    csink_angle = f(spec.get("csink_angle"))
+    def ft(value, key):
+        """A formatted term with its own authored tolerance baked in.
+
+        Every term of a compound callout can be toleranced, not just the bore. `.get()`
+        because hand-built specs in tests omit the keys (#1234 review r7).
+        """
+        text = f(value)
+        return None if text is None else text + _tol_suffix(spec.get(key), draft)
+
+    depth = ft(spec["depth"], "depth_tol")
+    cbore_dia = ft(spec["cbore_dia"], "cbore_dia_tol")
+    cbore_depth = ft(spec["cbore_depth"], "cbore_depth_tol")
+    csink_dia = ft(spec.get("csink_dia"), "csink_dia_tol")
+    csink_angle = ft(spec.get("csink_angle"), "csink_angle_tol")
     suffix = spec["suffix"]
     callout = HoleCallout(
         dia,
@@ -3226,6 +3235,32 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
     return n
 
 
+def _env_label(approved, draft) -> str:
+    """An envelope extent's label, authored tolerance included (#1215).
+
+    Composed here, exactly as `render_boss_heights` and the plate-thickness and channel-width
+    dims already do — `pd.value_text + _tol_suffix(pd.tolerance, draft)`.
+
+    NOT passed as `Dimension(tolerance=...)`, which is what the first version of this fix did
+    and why it rendered nothing: helpers' `Dimension` does
+    `rendered = label if label is not None else draft._number_with_units(measured, tolerance)`,
+    so an explicit label DISCARDS the tolerance. Every dimension here passes a label, because
+    the compiler owns the value text. Measured then: `label`, glyph count and label width were
+    byte-identical with and without a tolerance, and the exported SVG had the same 115 paths
+    (#1234 review).
+
+    `_tol_suffix` also renders a `FitClass`, which the ink path's `_number_with_units` raises
+    on — so composing the label is the only route that satisfies #1215's fit-class line.
+
+    One consequence worth naming: every `_dim` call site in this package passes a label, so
+    helpers' own `_number_with_units` formatting is unreachable. That is why the sheet is
+    internally consistent on limit-pair ORDER — `_tol_suffix` renders `+upper -lower` for an
+    envelope extent and a hole callout alike, while `_number_with_units` would render the
+    opposite. The consistency is real but it rests on that unreachability (#1234 review r2).
+    """
+    return f"{approved.value_text}{_tol_suffix(approved.tolerance, draft)}"
+
+
 def render_envelope(dwg, plan, a, *, ctx) -> int:
     """Overall width (plan, below) + depth (side, below) envelope dims via the IR,
     registered into the same below-strip corridor as feature/location/GD&T/PMI candidates.
@@ -3273,7 +3308,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             "plan",
             _SLOT_DIM_WIDTH,
             abs(x1 - x0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value_text: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(width, dwg.draft): _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -3281,8 +3316,18 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
                 dwg.draft,
                 label=_v,
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=width.value_text: dim_footprint(
-                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
+            # The footprint measures the string the Dimension will RENDER, because a footprint
+            # that does not model the ink is wrong by construction. That is the whole
+            # justification — no test observes it, and two earlier versions of this comment
+            # invented a failure mode that does not occur.
+            #
+            # Measured: `dim_footprint` is span-dominated, so for these extents the hull is
+            # IDENTICAL with and without the suffix. It differs only inside the outside-arrow
+            # flip regime (span ~8-20 mm), and there the toleranced footprint reserves LESS in
+            # the strip-depth direction, not more — the opposite of "reserves too little"
+            # (#1234 review r2).
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(width, dwg.draft): (
+                dim_footprint((_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v)
             ),
             measurement=width.id,
         )
@@ -3298,7 +3343,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             "side",
             _SLOT_DIM_DEPTH,
             abs(y1 - y0),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value_text: _dim(
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(depth, dwg.draft): _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -3306,8 +3351,8 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
                 dwg.draft,
                 label=_v,
             ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=depth.value_text: dim_footprint(
-                (_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(depth, dwg.draft): (
+                dim_footprint((_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v)
             ),
             measurement=depth.id,
         )
@@ -3386,7 +3431,18 @@ def _draw_step_chain(
     gap = draft.font_size + 4 * draft.pad_around_text
     horizontal = abs(segs[0].pb[0] - segs[0].pa[0]) >= abs(segs[0].pb[1] - segs[0].pa[1])
     vals = [seg.value for seg in segs]
-    labels = [seg.label if seg.label is not None else _fmt(seg.value) for seg in segs]
+    # The suffix rides the LABEL, for the reason `_env_label` documents: helpers discard
+    # `tolerance=` whenever an explicit label is given, and one always is here. This site
+    # passed `tolerance=seg.tolerance` to `_dim` and rendered nothing — the same defect #1215
+    # fixed for the envelope, ninety lines away, with three tests reading the discarded kwarg
+    # (two asserting a value, one asserting its absence).
+    # The file already contradicted itself: `label_widths` below sizes the staggering decision
+    # with `_fmt(seg.value) + _tol_suffix(...)`, i.e. it measured a string this line refused to
+    # draw (#1234 review round 2).
+    labels = [
+        seg.label if seg.label is not None else _fmt(seg.value) + _tol_suffix(seg.tolerance, draft)
+        for seg in segs
+    ]
     mean_v = sum(vals) / len(vals)
     if (
         allow_collapse
@@ -3478,7 +3534,6 @@ def _draw_step_chain(
                         dist,
                         draft,
                         label=labels[i],
-                        tolerance=seg.tolerance,
                     ),
                     seg.measurements,
                 )
@@ -3980,6 +4035,11 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 "representative step-height dimension dropped (front-view right strip full)",
                 rep.id,
                 rep.value,
+                # NO tolerance, deliberately. `N× rise` states one value for the whole run, so
+                # a ± here would claim the author's tolerance of every level at once — the same
+                # rule the turned-step collapse follows (#28 / P2a). The plain rungs below each
+                # state their own measurement and do carry it (#1234 review r5).
+                None,
             )
         )
     elif rungs:
@@ -4032,6 +4092,7 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                     "step-height dimension dropped (front-view right strip full)",
                     rung.id,
                     None,  # no `N×` prefix: the label states the span itself
+                    rung.tolerance,
                 )
             )
 
@@ -4047,21 +4108,49 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 "overall height dimension dropped (front-view right strip full)",
                 height.id,
                 None,  # no `N×` prefix
+                height.tolerance,
             )
         )
 
+    # Authored tolerances reach the sheet here, composed into the LABEL like every other
+    # toleranced Dimension in this module. Passing one as `Dimension(tolerance=...)` renders
+    # nothing, because an explicit label discards it — see `_env_label` (#1215).
+    #
+    # Keyed per rung, not just the overall height. An earlier version said "a step rung's
+    # tolerance is a separate question"; it is only separate for the `N× rise` REPRESENTATIVE,
+    # where a ± would claim the tolerance of every level. A plain ladder's rungs each state
+    # their own measurement, and `.tolerance()` on a step level was being dropped exactly as
+    # the envelope's was (#1234 review r5).
+    _tolerances = {c[0]: c[8] for c in chain}
+
     names = [c[0] for c in chain]
     solved: dict[str, float] = {}
-    for k, (name, zbase, ztop, label, _tsize, drop_msg, mid, per_unit) in enumerate(chain):
+    for k, (name, zbase, ztop, label, _tsize, drop_msg, mid, per_unit, _rt) in enumerate(chain):
 
-        def _build(pos, name=name, zbase=zbase, ztop=ztop, label=label, k=k, per_unit=per_unit):
+        def _build(
+            pos,
+            name=name,
+            zbase=zbase,
+            ztop=ztop,
+            label=label,
+            k=k,
+            per_unit=per_unit,
+            _tol=_tolerances.get(name),
+        ):
             base = edge2
             for pn in reversed(names[:k]):  # nearest already-built predecessor's line
                 if pn in solved:
                     base = solved[pn]
                     break
             solved[name] = pos
-            dim = _dim((base, zbase, 0), (base, ztop, 0), "right", pos - base, draft, label=label)
+            dim = _dim(
+                (base, zbase, 0),
+                (base, ztop, 0),
+                "right",
+                pos - base,
+                draft,
+                label=label + _tol_suffix(_tol, draft),
+            )
             if per_unit is not None:
                 # What this dimension's `N× v` label actually measures. Lint reads it in
                 # preference to parsing the label, because `N× v` is drawn under two
@@ -4070,7 +4159,16 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
                 dim._dw_label_value = per_unit
             return dim
 
-        def _foot(pos, zbase=zbase, ztop=ztop, label=label, k=k):
+        # The footprint measures the RENDERED string, so it carries the same suffix the
+        # Dimension draws. Correctness, not a measured failure mode — see the note in
+        # `render_envelope`; the invented "packs the strip too tightly" claim is withdrawn.
+        def _foot(
+            pos,
+            zbase=zbase,
+            ztop=ztop,
+            label=label + _tol_suffix(_tolerances.get(name), draft),
+            k=k,
+        ):
             # Predecessor-aware prediction (#689 review): the conservative edge-anchored
             # witness can falsely exhaust the strip when an inner obstacle sits in the
             # already-traversed region. Use the same solved map the build chain uses.
@@ -4128,7 +4226,10 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
     for i, rung in enumerate(short_rungs):
         name = f"dim_step_{i}"
         zbase, ztop = _zspan(rung)
-        label = rung.final_label
+        # Same composition as the main chain: this is the SHORT-RISE escape, solved in the left
+        # strip because external arrows would swamp the right one. It is the same measurement
+        # by another route, and it dropped the tolerance (#1234 review r6).
+        label = rung.final_label + _tol_suffix(rung.tolerance, draft)
 
         def _build_left(pos, zbase=zbase, ztop=ztop, label=label):
             return _dim(
@@ -4247,7 +4348,11 @@ def render_step_positions(dwg, plan, frame, *, ctx) -> int:
         edge = p1[1]
         name = f"dim_shoulder_{axis}{i}"
 
-        def _build(pos, p1=p1, p2=p2, edge=edge, label=rung.final_label, direction=direction):
+        # The compiler's label plus its tolerance — a shoulder states a position the author can
+        # tolerance like any other (#1234 review r6).
+        shoulder_label = rung.final_label + _tol_suffix(rung.tolerance, draft)
+
+        def _build(pos, p1=p1, p2=p2, edge=edge, label=shoulder_label, direction=direction):
             return _dim(
                 (p1[0], edge, 0),
                 (p2[0], edge, 0),
