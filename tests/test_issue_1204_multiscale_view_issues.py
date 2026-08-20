@@ -318,3 +318,18 @@ class TestTheReasonForTheSplitIsStillHonoured:
         one_to_one: list = []
         _lint_dim(item, None, one_to_one, 1.0)
         assert "(÷3.0 = 15.000)" in one_to_one[0].message, one_to_one[0].message
+
+    def test_a_degenerate_item_scale_falls_back_to_the_sheet_scale(self):
+        # `drawing_scale` is validated positive by `lint_drawing`; a per-annotation
+        # `_dw_scale` is not on that path. A zero tag must fall back rather than divide:
+        # before the guard, `measured / 0` raised past the validated entry point.
+        from types import SimpleNamespace
+
+        from draftwright.linting.structural import _lint_dim
+
+        issues: list = []
+        item = SimpleNamespace(label="10", measured_length=20.0, _dw_scale=0.0)
+        _lint_dim(item, None, issues, 2.0)  # 20 / 2.0 = 10 — clean via the fallback
+        assert not [i for i in issues if i.code == "label_vs_measured"], (
+            f"the zero-tag fallback did not use the sheet scale: {[i.message for i in issues]}"
+        )

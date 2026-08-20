@@ -812,3 +812,74 @@ def test_only_an_absence_code_counts_as_reporting_an_absence():
             f"{code} says a DRAWN annotation is hard to read, not that a measurement is "
             "missing, and it must not stand in for a report that one is"
         )
+
+
+def _jittered_pattern():
+    """Holes at −30, −10, 10.3, 30: the recogniser's 2% jitter admits them as ONE linear
+    pattern, and the middle gap is 20.3 against a nominal of 20."""
+    part = Box(140, 60, 12)
+    for x in (-30.0, -10.0, 10.3, 30.0):
+        part -= Pos(x, 0, 0) * Cylinder(3, 40)
+    return part
+
+
+def test_a_jittered_pattern_withholds_its_pitch_tolerance_and_says_so():
+    """The r8 finding, as a test rather than a probe — the fix shipped without one.
+
+    #1234 printed `3× 20 ±0.1` over that 20.3 mm gap: a claim six times tighter than the part,
+    on the strength of "gaps are identical by construction", which the recogniser's own
+    tolerance disproves. The rule now is equal at the DRAWN precision; a pattern that fails it
+    prints the bare collapse and records `pattern_pitch_tolerance_withheld` against the pitch's
+    measurement, so an author who tolerances a jittered pitch is told rather than lied to.
+    """
+    base = build_drawing(_jittered_pattern(), title="T", number="N")
+    model = base.model()
+    pattern = next(f for f in model.features if f.kind == "pattern")
+    param = next(pm for pm in pattern.parameters() if pm.role == "pitch")
+    drawing = build_drawing(
+        _jittered_pattern(),
+        model=model,
+        decorations={(pattern, param.kind, param.role): _TOL},
+        title="T",
+        number="N",
+    )
+    # The precondition: the tolerance was approved — this is a withholding, not a suppression.
+    approved = _approved_with_tolerance(compile_dimensions(drawing.model()))
+    pitch_ids = [m for m in approved if str(m.parameter).startswith("pitch")]
+    assert pitch_ids, f"precondition: no toleranced pitch approved: {list(approved)}"
+
+    labels = {
+        name: str(drawing.registry.named(name).label)
+        for name in drawing.registry.names()
+        if name.startswith("dim_pitch")
+    }
+    assert labels, "precondition: no pitch dimension placed"
+    assert all("±" not in label for label in labels.values()), (
+        f"a jittered pattern claims its authored band of every gap: {labels}"
+    )
+    withheld = [i for i in drawing.registry.issues if i.code == "pattern_pitch_tolerance_withheld"]
+    assert withheld, "the tolerance was withheld silently"
+    assert any(set(i.measurement_ids) & set(pitch_ids) for i in withheld), (
+        "the withholding is not attributed to the pitch it is about"
+    )
+
+    # The control: exactly uniform spacing keeps the suffix — so the assertion above is about
+    # the jitter, not about pitch tolerances never rendering.
+    uniform = build_drawing(_linear_pattern(), title="T", number="N")
+    upattern = next(f for f in uniform.model().features if f.kind == "pattern")
+    uparam = next(pm for pm in upattern.parameters() if pm.role == "pitch")
+    udrawing = build_drawing(
+        _linear_pattern(),
+        model=uniform.model(),
+        decorations={(upattern, uparam.kind, uparam.role): _TOL},
+        title="T",
+        number="N",
+    )
+    ulabels = [
+        str(udrawing.registry.named(n).label)
+        for n in udrawing.registry.names()
+        if n.startswith("dim_pitch")
+    ]
+    assert any("±" in label for label in ulabels), (
+        f"a uniform pattern lost its pitch tolerance: {ulabels}"
+    )

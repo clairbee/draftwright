@@ -1413,7 +1413,7 @@ def _add_grid_pitch_dims(
     _axis_dim(u2, l2, 1)
 
 
-def _pitch_text(pitch, members, draft, ctx=None) -> str:
+def _pitch_text(pitch, members, draft, *, ctx) -> str:
     """The collapsed pitch label, with its authored tolerance only when that is TRUE.
 
     An `N× v` label states one value for every gap in the array. A ± on it therefore claims
@@ -1445,15 +1445,14 @@ def _pitch_text(pitch, members, draft, ctx=None) -> str:
     varying = [g for g in gaps if round(g, places) != nominal]
     if gaps and not varying:
         return text + _tol_suffix(pitch.tolerance, draft)
-    if ctx is not None:
-        ctx.record_issue(
-            "info",
-            "pattern_pitch_tolerance_withheld",
-            f"pattern pitch {text}: {len(varying)} of {len(gaps)} gaps differ from it at the "
-            "drawn precision, so the authored tolerance is not stated — an N× label would "
-            "claim it of every gap",
-            measurement=pitch.id,
-        )
+    ctx.record_issue(
+        "info",
+        "pattern_pitch_tolerance_withheld",
+        f"pattern pitch {text}: {len(varying)} of {len(gaps)} gaps differ from it at the "
+        "drawn precision, so the authored tolerance is not stated — an N× label would "
+        "claim it of every gap",
+        measurement=pitch.id,
+    )
     return text
 
 
