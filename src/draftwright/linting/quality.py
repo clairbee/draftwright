@@ -217,6 +217,10 @@ _UNSCORED_CODES = frozenset(
         "authored_dim_degenerate",
         "authored_omission",
         "axial_length_missing",
+        # The drawing is CORRECT here — it withheld a claim it could not honestly make, and is
+        # telling the author so. Not a fidelity fault (nothing false was printed) and not a
+        # legibility one (nothing was misplaced): informational (#1216).
+        "pattern_pitch_tolerance_withheld",
         "boss_height_missing",
         "dimension_kind_unsupported",
         "feature_count_mismatch",

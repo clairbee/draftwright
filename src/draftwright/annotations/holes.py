@@ -1214,7 +1214,7 @@ def _add_furniture(
             members[0],
             members[-1],
             len(members),
-            pitch.value_text + _tol_suffix(pitch.tolerance, dwg.draft),
+            _pitch_text(pitch, members, dwg.draft, ctx=ctx),
             to_page,
             f"dim_pitch_{view}{j}",
             feature=feat,
@@ -1394,7 +1394,7 @@ def _add_grid_pitch_dims(
             members[lo],
             members[hi],
             n,
-            pitch.value_text + _tol_suffix(pitch.tolerance, dwg.draft),
+            _pitch_text(pitch, members[lo : hi + 1], dwg.draft, ctx=ctx),
             to_page,
             f"{name_prefix}_{view}{j}_{sub}",
             feature=feature,
@@ -1405,6 +1405,50 @@ def _add_grid_pitch_dims(
 
     _axis_dim(u1, l1, 0)
     _axis_dim(u2, l2, 1)
+
+
+def _pitch_text(pitch, members, draft, ctx=None, name=None) -> str:
+    """The collapsed pitch label, with its authored tolerance only when that is TRUE.
+
+    An `N× v` label states one value for every gap in the array. A ± on it therefore claims
+    that tolerance of each gap — so it is only honest when the gaps agree at the displayed
+    precision. The recogniser admits jitter (`_PATTERN_REL_TOL = 0.02`, `_PATTERN_ABS_TOL =
+    0.1 mm`), so "identical by construction" is false: holes at x = −30, −10, 10.3, 30 collapse
+    to one pitch dim, and composing the suffix there printed `3× 20 ±0.1` over a gap of 20.3 —
+    0.3 mm out against an authored ±0.05, a claim six times tighter than the part (#1216 review
+    of #1234 r8).
+
+    This is the rule the engine already applies to the step chain — "a per-step ± would be a
+    false claim on N equal steps, so the collapse carries NO tolerance" — and the one the detail
+    redraw uses to decide whether to regroup at all: equal at `_fmt` precision, not within a
+    percentage.
+
+    Withholding is not silent: a pattern whose spacing does not survive its own displayed
+    precision records `pattern_pitch_tolerance_withheld`, so an author who tolerances a jittered
+    pitch is told the drawing cannot state it rather than being shown a number that is wrong.
+    """
+    text = pitch.value_text
+    if pitch.tolerance is None:
+        return text
+    # Compared at the drawn precision, never FORMATTED here: the printed value is the compiler's
+    # `value_text` and this function must not mint a second one. The label-provenance ratchet
+    # caught exactly that in the first cut of this (#1002).
+    places = draft.decimal_precision
+    nominal = round(pitch.value, places)
+    gaps = [math.dist(tuple(a), tuple(b)) for a, b in zip(members, members[1:], strict=False)]
+    varying = [g for g in gaps if round(g, places) != nominal]
+    if gaps and not varying:
+        return text + _tol_suffix(pitch.tolerance, draft)
+    if ctx is not None:
+        ctx.record_issue(
+            "info",
+            "pattern_pitch_tolerance_withheld",
+            f"pattern pitch {text}: {len(varying)} of {len(gaps)} gaps differ from it at the "
+            "drawn precision, so the authored tolerance is not stated — an N× label would "
+            "claim it of every gap",
+            measurement=pitch.id,
+        )
+    return text
 
 
 def _place_pitch_dim(
@@ -1749,7 +1793,7 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 members[0],
                 members[-1],
                 len(members),
-                pitch.value_text + _tol_suffix(pitch.tolerance, dwg.draft),
+                _pitch_text(pitch, members, dwg.draft, ctx=ctx),
                 to_page,
                 f"dim_pocketpat_pitch_{view}{i}",
                 feature=g.ref,
@@ -1868,7 +1912,7 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
                 members[0],
                 members[-1],
                 len(members),
-                pitch.value_text + _tol_suffix(pitch.tolerance, dwg.draft),
+                _pitch_text(pitch, members, dwg.draft, ctx=ctx),
                 to_page,
                 f"dim_slotpat_pitch_{view}{i}",
                 feature=g.ref,

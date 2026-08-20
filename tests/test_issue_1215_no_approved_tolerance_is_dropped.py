@@ -111,6 +111,16 @@ def _chamfered_block():
     return chamfer(part.edges().filter_by(Axis.Z), 3)
 
 
+def _blind_holes():
+    """BLIND holes: `HoleFeature.parameters()` emits the depth role only when a hole is not
+    through, so a corpus of through holes leaves `bore.depth` unswept — which is how a reader
+    for `depth_tol` shipped against a key the spec never wrote (#1234 review r8)."""
+    part = Box(80, 60, 12)
+    for x in (-20, 20):
+        part -= Pos(x, 0, 5) * Cylinder(5, 4)
+    return part
+
+
 def _plate_with_holes():
     return Box(90, 60, 12) - Pos(-25, 12, 0) * Cylinder(4, 40) - Pos(25, -12, 0) * Cylinder(4, 40)
 
@@ -121,6 +131,7 @@ _PARTS = {
     "linear_pattern": _linear_pattern,
     "short_first_rise": _short_first_rise,
     "turned_shaft": _turned_shaft,
+    "blind_holes": _blind_holes,
     "chamfered_block": _chamfered_block,
     "counterbored_plate": _counterbored_plate,
     "plate_with_holes": _plate_with_holes,
