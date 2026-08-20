@@ -2210,6 +2210,42 @@ def render_chamfers(dwg, plan, a, *, ctx, only=None) -> int:
     )
 
 
+def _collapsed_tolerance(members, *, ctx=None, noun=""):
+    """The tolerance an ``n×`` callout may state, or ``None``.
+
+    An `n× R5` label states one value for every member it collapses, so a ± on it claims that
+    tolerance of each of them. That is only true when they ALL carry it. This used to be
+    "first-AUTHORED tolerance wins" — scan the members and take the first non-``None`` — so
+    tolerancing ONE of four fillets printed `4× R5 ±0.1` and claimed the author's band of the
+    three they said nothing about (#1216 review r10, F8).
+
+    The rule `_pitch_text` applies to a pattern's collapsed pitch and `render_height_ladder`
+    applies to its `N× rise` representative ("a ± here would claim the author's tolerance of
+    every level"). Scanning order no longer matters, since the answer is now the same whatever
+    it is — which also retires the reason the scan used planner order rather than the
+    spatially-sorted one.
+
+    Withholding is not silent, for the same reason it is not silent for a pattern pitch: an
+    author who tolerances one member of a collapsed group has stated a requirement the sheet
+    does not carry, and being shown nothing is how #1215 happened.
+    """
+    tolerances = [pd.tolerance for _, pd in members]
+    first = tolerances[0] if tolerances else None
+    if tolerances and (first is None or any(tol != first for tol in tolerances)):
+        if ctx is not None and any(tol is not None for tol in tolerances):
+            stated = sum(tol is not None for tol in tolerances)
+            ctx.record_issue(
+                "info",
+                "collapsed_tolerance_withheld",
+                f"{stated} of {len(tolerances)} collapsed {noun} members carry a tolerance, so "
+                f"the one 'n×' label cannot state it — it would claim that band of every "
+                f"member",
+                measurement=[pd.id for _, pd in members if pd.id is not None],
+            )
+        return None
+    return first
+
+
 def _fillet_label(radius_text, count) -> str:
     """The fillet callout string: ``R{radius}``, prefixed ``{count}×`` when a set of equal
     fillets shares one callout (#561). Formatting lives in the render layer (ADR 0013 §7)."""
@@ -2230,8 +2266,9 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
     (the #629 class). The equal-radius ``n× R`` COLLAPSE stays render-side (grouping by
     radius here) — planner-side grouping is a structural change,
     explicitly out of scope for this migration (#698). Where grouped members' authored
-    tolerances differ, the first (member-order) authored one wins — the documented
-    ``render_diameters`` shared-ø precedent. ``g.view`` is safe: a FilletFeature's frame
+    tolerances differ — or only some carry one — the collapsed label states NONE of them
+    (:func:`_collapsed_tolerance`), because one ``n×`` mark would claim that band of every
+    member. ``g.view`` is safe: a FilletFeature's frame
     axis IS its edge axis (both ``detect.py`` and ``declare.fillet`` build
     ``Frame(…, axis)``), and ``_END_ON`` matches the pass's old z→plan / x→side /
     y→front map exactly."""
@@ -2268,10 +2305,7 @@ def render_fillets(dwg, plan, a, *, ctx, only=None) -> int:
         vb = dwg.view_bounds(view)
         if vb is None:
             continue
-        # First-AUTHORED tolerance wins: scan `members` in planner/model order (the
-        # render_diameters precedent — Codex review), not the spatially-sorted
-        # `ordered`, whose winner would change if the geometry moved.
-        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
+        tol = _collapsed_tolerance(members, ctx=ctx, noun="fillet")
         jobs.append(
             (
                 f"m_fillet_{axis}{gi}",
@@ -2374,7 +2408,7 @@ def render_flats(dwg, plan, a, *, ctx, only=None) -> int:
             continue
         # First-AUTHORED tolerance wins (planner/model order, not spatial — see the
         # fillet pass / render_diameters precedent, Codex review).
-        tol = next((pd.tolerance for _, pd in members if pd.tolerance is not None), None)
+        tol = _collapsed_tolerance(members, ctx=ctx, noun="flat")
         # The established centre-out positions remain first. Boundary-aware fallbacks are
         # now safe for every flat because direction + perpendicular line position + span make
         # aligned and slanted stock groups canonical (#1036); they also cover a lone flat
@@ -3289,15 +3323,22 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             #
             # NOT `placement_unsatisfiable`, which is what the height ladder records and what
             # this reported in its first cut. That code is a **required scale drop**
-            # (`builder._is_required_scale_drop`), so reporting through it did not merely make
-            # the omission visible — it made `build_drawing(part, scale=...)` raise
-            # `ScaleIncompatibilityError` on parts that had built for as long as the defect
-            # had existed, under the DEFAULT `scale_policy="fallback"`, after rebuilding the
-            # whole ISO ladder to no effect (the starving leader scales with the view). A
-            # drawing that no longer builds is worse than one that quietly lacks a dimension,
-            # and this PR's whole claim is that it reports without deciding placement. Measured
-            # on `_starved_extent_plate`: strict and fallback both raised at `error`
-            # /`placement_unsatisfiable`; neither raises here (#1216 review r9, F1).
+            # (`builder._is_required_scale_drop` matches it BY NAME), so reporting through it
+            # did not merely make the omission visible — it made `build_drawing(part, scale=...)`
+            # raise `ScaleIncompatibilityError` on parts that had built for as long as the
+            # defect had existed, under the DEFAULT `scale_policy="fallback"`, after rebuilding
+            # the whole ISO ladder to no effect (the starving leader scales with the view). A
+            # drawing that no longer builds is worse than one that quietly lacks a dimension.
+            # Measured on `_starved_extent_plate`: strict and fallback both raised through that
+            # code; neither raises through this one (#1216 review r9, F1).
+            #
+            # The SEVERITY is `error` and that is deliberate. `_is_required_scale_drop` never
+            # reads severity — it matches the code name and the `*_dropped` suffix — so the
+            # first fix for the above downgraded the one thing that was not causing it, and
+            # left a drawing with no overall width reporting `passed: True`. The part's
+            # principal extent is missing; that is an error, and `test_e2e_standards` carries
+            # a named quarantine for the three CTC fixtures where it is already true (#1236)
+            # rather than the finding being priced below the gate (#1216 review r10, F5).
             #
             # `measurement=` so the report is joined to the measurement it is about, rather
             # than being an unattributed issue that any absence-shaped code could stand in for.
@@ -3309,7 +3350,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
                 _view,
                 "y",
             )
-            ctx.record_issue("warning", "overall_dim_withheld", msg, measurement=_mid)
+            ctx.record_issue("error", "overall_dim_withheld", msg, measurement=_mid)
 
         register_corridor(
             ctx,

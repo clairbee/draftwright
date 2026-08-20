@@ -277,11 +277,22 @@ def _missing(text: str, approved) -> list[str]:
     return [f"{n}x{sfx!r}" for sfx, n in sorted(want.items()) if text.count(sfx) < n]
 
 
+#: An issue with one of these codes is the engine SAYING a measurement is not on the sheet.
+#: The join below is restricted to them because `measurement_ids` alone is far too weak a
+#: signal: `feature_leader_crossing` and `feature_leader_fixed_ink_unverified` carry a
+#: measurement on a callout that IS drawn, so a build with a crossing leader would have
+#: "reported" every absence in it (#1216 review r10, F9). Matched by suffix as well as by name
+#: so a drop code introduced tomorrow counts on the day it is written, which is the same choice
+#: `linting/quality.py` makes and for the same reason.
+_ABSENCE_CODES = ("placement_unsatisfiable",)
+_ABSENCE_SUFFIXES = ("_dropped", "_withheld")
+
+
 def _absence_reported(drawing) -> set:
     """The measurements the build SAID it did not place.
 
-    Joined by `measurement_ids`, not by code. The first cut of this asked only whether the
-    build recorded any issue whose code ended `_dropped` / `_withheld` / `_unsatisfiable`,
+    Joined by `measurement_ids`, not by code alone. The first cut of this asked only whether
+    the build recorded any issue whose code ended `_dropped` / `_withheld` / `_unsatisfiable`,
     which fails OPEN in the direction that matters: substituting an unrelated real code —
     `balloon_dropped`, which the orchestrator emits on exactly the dense sheets where a
     corridor starves — for the step-height report left `step_height.length` approved, drawn by
@@ -290,7 +301,8 @@ def _absence_reported(drawing) -> set:
     """
     reported: set = set()
     for issue in drawing.registry.issues:
-        reported |= set(getattr(issue, "measurement_ids", ()) or ())
+        if issue.code in _ABSENCE_CODES or issue.code.endswith(_ABSENCE_SUFFIXES):
+            reported |= set(getattr(issue, "measurement_ids", ()) or ())
     return reported
 
 
@@ -557,6 +569,16 @@ def test_a_starved_overall_extent_is_reported():
         "reaches the starved-strip path"
     )
     reported = [i for i in drawing.lint() if i.code == "overall_dim_withheld"]
+    # Error severity, so a drawing missing its principal extent does not report `passed: True`.
+    # The scale gate keys on the CODE, not on this (#1216 review r10, F5).
+    assert all(i.severity == "error" for i in reported), [i.severity for i in reported]
+    summary = drawing.lint_summary()
+    assert summary["passed"] is False
+    # And it COUNTS as missing geometry. `_GEOMETRY_AWARE_CODES` exists so a lost requirement
+    # cannot report `geometry_issues: 0` alongside a drawing that lacks it; both withholding
+    # codes replace a silence rather than a different finding, so the count must include them
+    # (#1216 review r10, F4). Without the registration this drawing reported 0.
+    assert summary["geometry_issues"] >= 1, summary
     assert any("width" in str(i.message) for i in reported), (
         "the overall width never reached the sheet and nothing said so: "
         f"{[(i.code, i.severity) for i in drawing.lint()]}"
@@ -604,32 +626,189 @@ def test_the_hole_table_depth_column_prints_the_authored_tolerance():
     assert not owed, f"hole_table_plan={text!r} owes {owed}"
 
 
-def test_a_withholding_is_retracted_when_a_later_pass_draws_the_measurement():
-    """A drop is only a drop if the measurement is still absent when the run finishes.
+def _partly_drawn_ladder():
+    """Two blind recesses at very different depths: two approved rungs, one below the floor.
 
-    `render_height_ladder` runs long before the detail view exists, so a rung it could not fit
-    in the front-right strip may still be dimensioned in an enlarged detail. Recorded and never
-    revisited, `step_dim_withheld` fired on `_crowded_staircase` — whose five approved rungs are
-    ALL claimed — and said they "are not dimensioned at this scale" (#1216 review r9, F5).
+    The case a retraction keyed on "is this id claimed" cannot see. Both rungs carry the SAME
+    `DimensionId` — `step_height.length`, one per feature, because there is no per-level
+    identity (ADR 0016 Amdt 3) — so the drawn rung claims the id on behalf of the undrawn one.
+    """
+    part = Box(120, 70, 40)
+    part -= Pos(-30, 0, 40 / 2 - 6 / 2 + 0.001) * Box(30, 30, 6)
+    part -= Pos(30, 0, 40 / 2 - 30 / 2 + 0.001) * Box(30, 30, 30)
+    return part
 
-    Both halves are asserted here: the part that recovers reports nothing, and the part that
-    does not still reports. Without the second, deleting the record entirely would pass.
+
+def test_a_withholding_is_retracted_only_when_every_mark_is_drawn():
+    """A drop is only a drop if the measurement is still absent when the run finishes — and a
+    collapsed id means "absent" has to be counted, not looked up.
+
+    Three cases, because the first two versions of this each got one of them wrong:
+
+    * `crowded_staircase` — five approved rungs, all five drawn (three in the enlarged detail).
+      Recorded and never revisited, `step_dim_withheld` fired here and said they "are not
+      dimensioned at this scale" (#1216 review r9, F5).
+    * `_partly_drawn_ladder` — two approved rungs, ONE drawn. A retraction asking whether the
+      id is claimed withdraws the report on the strength of that one, and the other rung is
+      absent from the drawing and from the lint: the exact silence the report exists to end,
+      restored by its own fix (#1216 review r10, F1).
+    * `blind_holes` — one approved rung, none drawn. Without it, deleting the record entirely
+      would pass.
     """
     recovered = build_drawing(_PARTS["crowded_staircase"](), title="T", number="N")
-    claimed: set = set()
-    for name in recovered.registry.names():
-        claimed |= set(recovered.registry.measurement_of(name) or ())
     ladder = compile_dimensions(recovered.model()).ladder("step_height")
-    assert ladder is not None and ladder.rungs, "precondition: this part has no step rungs"
-    assert all(rung.id in claimed for rung in ladder.rungs), (
-        "precondition: not every rung is drawn, so a standing withholding would be CORRECT "
-        "here and this asserts nothing"
+    assert ladder is not None and len(ladder.rungs) > 1, "precondition: no multi-rung ladder"
+    mid = ladder.rungs[0].id
+    claimers = [
+        name
+        for name in recovered.registry.names()
+        if mid in (recovered.registry.measurement_of(name) or ())
+    ]
+    # The precondition that the r9 version of this test could not state, because it compared
+    # collapsed ids to each other: every rung has a mark of its own.
+    assert len(claimers) == len(ladder.rungs), (
+        f"precondition: {len(ladder.rungs)} approved rungs and {len(claimers)} annotations "
+        f"claim them ({claimers}), so a standing withholding would be CORRECT here"
     )
     assert not [i for i in recovered.lint() if i.code == "step_dim_withheld"], (
         "every approved rung is on the sheet and the build still says one was withheld"
+    )
+
+    partial = build_drawing(_partly_drawn_ladder(), title="T", number="N")
+    partial_ladder = compile_dimensions(partial.model()).ladder("step_height")
+    assert partial_ladder is not None and len(partial_ladder.rungs) == 2, (
+        f"precondition: expected two approved rungs, got "
+        f"{None if partial_ladder is None else [r.value for r in partial_ladder.rungs]}"
+    )
+    partial_mid = partial_ladder.rungs[0].id
+    assert partial_ladder.rungs[1].id == partial_mid, (
+        "precondition: the two rungs no longer share one DimensionId, so this fixture no "
+        "longer reaches the collapse it exists to guard"
+    )
+    partial_claimers = [
+        name
+        for name in partial.registry.names()
+        if partial_mid in (partial.registry.measurement_of(name) or ())
+    ]
+    assert len(partial_claimers) == 1, (
+        f"precondition: expected exactly one rung drawn, got {partial_claimers}"
+    )
+    assert [i for i in partial.lint() if i.code == "step_dim_withheld"], (
+        "one of two approved rungs is on the sheet, the other is on neither the sheet nor the "
+        "lint, and the id they share made that look like success"
     )
 
     unrecovered = build_drawing(_PARTS["blind_holes"](), title="T", number="N")
     assert [i for i in unrecovered.lint() if i.code == "step_dim_withheld"], (
         "the blind hole's floor is approved and drawn by nothing, and nothing said so"
     )
+
+
+def test_the_public_hole_table_honours_an_authored_omission():
+    """Suppression by omission reaches the table too (ADR 0016, #1216 review r10, F6).
+
+    `add_hole_table()` fell back to formatting the recognised geometry whenever the compiler
+    had no dimension for a cell — which cannot tell "no entry exists" from "the author left
+    this out of their set". A script that dimensions a hole's LOCATION and not its diameter
+    got the diameter printed anyway, in a table, by a verb that had just been changed to read
+    from the plan. The escalated table has always emitted nothing for the same case.
+    """
+    from build123d import Align
+
+    from draftwright import Sheet
+
+    xyz_min = (Align.CENTER, Align.CENTER, Align.MIN)
+    plate = Box(90, 60, 12, align=xyz_min)
+    tool = Pos(-25, 12, 0) * Cylinder(4, 40, align=xyz_min)
+    sheet = Sheet(plate - tool, title="T", number="N")
+    sheet.hole(tool)
+    sheet.envelope()
+    sheet.dimension(sheet.features[0], "location")
+    drawing = sheet.build()
+
+    plan = compile_dimensions(drawing.model())
+    # The precondition: the compiler really did refuse the diameter, and refused it as the
+    # AUTHOR's omission rather than a planner rule.
+    authored = {o.parameter_id for o in plan.diagnostics if o.authored}
+    assert "bore.diameter" in authored, (
+        f"precondition: bore.diameter is not an authored omission here: "
+        f"{[(o.parameter_id, o.authored) for o in plan.diagnostics]}"
+    )
+    assert not [dim for group in plan.of_kind("hole") for dim in group.dims], (
+        "precondition: the compiler approved a hole dimension, so the fallback is not reached"
+    )
+
+    assert drawing.add_hole_table("plan", balloons=False) is not None
+    table = drawing.registry.named("hole_table_plan")
+    header, *body = table.table_rows
+    assert header[1] == "⌀" and len(body) == 1, table.table_rows
+    # The CELL, not a substring search. The first version of this asserted `"6" not in text`
+    # against a hole whose diameter is 8, so it could not fail — and did not, under the
+    # mutation that removes the gate it guards.
+    assert body[0][1] == "", (
+        f"the author omitted the bore diameter and the table printed it anyway: {table.table_rows}"
+    )
+
+
+def test_the_declared_route_retracts_too():
+    """Live and declared must agree about what was withheld (ADR 0011 round-trip).
+
+    The retraction was added to `_auto_annotate` only, and `Drawing.finalize()` runs its own
+    copy of the stage list — so the two paths failed in OPPOSITE directions: the auto build of
+    `_crowded_staircase` retracted, and the declared build of the same part finalised with all
+    five rungs on the sheet and the build still claiming one was withheld (#1216 review r10, F3).
+    """
+    drawing = build_drawing(_PARTS["crowded_staircase"](), auto_dims=False, title="T", number="N")
+    model = drawing.model()
+    step = next(f for f in model.features if f.kind == "step_level")
+    with drawing.deferred():
+        drawing.dimension(step, "length", role="step_height")
+
+    ladder = compile_dimensions(model).ladder("step_height")
+    mid = ladder.rungs[0].id
+    claimers = [
+        name
+        for name in drawing.registry.names()
+        if mid in (drawing.registry.measurement_of(name) or ())
+    ]
+    assert len(claimers) == len(ladder.rungs), (
+        f"precondition: the declared route drew {len(claimers)} marks for "
+        f"{len(ladder.rungs)} rungs ({claimers}), so a standing withholding would be correct"
+    )
+    assert not [i for i in drawing.lint() if i.code == "step_dim_withheld"], (
+        "the declared route drew every rung and still reports one withheld"
+    )
+
+
+def test_only_an_absence_code_counts_as_reporting_an_absence():
+    """`_absence_reported`'s vocabulary, asserted directly.
+
+    Restricting the join to absence-shaped codes cannot be demonstrated by mutating the corpus
+    — broadening a predicate only makes it more permissive, so every part still passes — but it
+    is load-bearing all the same: `feature_leader_crossing` and
+    `feature_leader_fixed_ink_unverified` carry a `measurement` on a callout that IS drawn
+    (`annotations/leaders.py`), so a build with one crossing leader would otherwise have
+    "reported" every absence in it (#1216 review r10, F9). Asserted here over a constructed
+    issue list, which is the only place the distinction is visible.
+    """
+    from types import SimpleNamespace
+
+    from draftwright.model.compiled import DimensionId
+
+    drawing = build_drawing(_PARTS["blind_holes"](), title="T", number="N")
+    feature = next(f for f in drawing.model().features if f.kind == "hole")
+    mid = DimensionId(feature, "bore.diameter")
+
+    def _with(code):
+        return SimpleNamespace(
+            registry=SimpleNamespace(issues=(SimpleNamespace(code=code, measurement_ids=(mid,)),))
+        )
+
+    assert _absence_reported(_with("step_dim_withheld")) == {mid}
+    assert _absence_reported(_with("callout_dropped")) == {mid}
+    assert _absence_reported(_with("placement_unsatisfiable")) == {mid}
+    for code in ("feature_leader_crossing", "feature_leader_fixed_ink_unverified"):
+        assert _absence_reported(_with(code)) == set(), (
+            f"{code} says a DRAWN annotation is hard to read, not that a measurement is "
+            "missing, and it must not stand in for a report that one is"
+        )

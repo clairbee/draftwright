@@ -160,6 +160,15 @@ _GEOMETRY_AWARE_CODES = frozenset(
         "pmi_not_extracted",
         "placement_unsatisfiable",
         "pmi_dropped",
+        # The withholding pair (#1216). Registered for exactly the reason the note above
+        # gives: `step_dim_withheld` and `overall_dim_withheld` REPLACE a silence, not a
+        # different finding, and the content is equally missing — an approved dimension that
+        # is not on the sheet. Omitting them let a drawing with no overall width report
+        # `geometry_issues: 0` alongside `passed: True`, which is the same mistake that note
+        # was written about, in the change that quotes it (#1216 review r10, F4).
+        # `missing_principal_dimension`, the direct analogue, is three lines up.
+        "step_dim_withheld",
+        "overall_dim_withheld",
     }
 )
 
@@ -2156,6 +2165,7 @@ class Drawing:
         from draftwright.annotations.orchestrator import (
             _maybe_tabulate_holes,
             drain_and_reconcile,
+            retract_resolved_withholdings,
             run_stages,
         )
         from draftwright.annotations.sections import (
@@ -2652,6 +2662,15 @@ class Drawing:
                 "tabulate": _s_tabulate,
             }
         )
+        # The same close-out the auto pass runs. A withholding is recorded by the pass that
+        # could not place the mark and must be withdrawn if a later stage drew it — and the
+        # declared route runs its own copy of the stage list, so leaving the retraction on the
+        # auto path alone made the two fail in OPPOSITE directions: auto retracted, declared
+        # never did, and `_crowded_staircase` finalised with every rung on the sheet and the
+        # build still claiming one was withheld. That is an ADR 0011 round-trip parity break
+        # (#1216 review r10, F3).
+        if model is not None:
+            retract_resolved_withholdings(self, ctx, compile_dimensions(model))
 
     def _replay_intent(self, it: Intent) -> None:
         """Place one recorded intent by calling its live verb (#426 Phase 1)."""
@@ -2884,23 +2903,40 @@ class Drawing:
         # `_part_model` rather than `model()`: an attribute, so a declared build is not made
         # to recognise anything by adding a table (ADR 0017).
         approved: dict = {}
+        omitted: set = set()
         if self._part_model is not None:
             from draftwright.model.compiled import compile_dimensions as _compile_table
             from draftwright.model.compiled import resolve_feature as _resolve_table
 
+            _plan = _compile_table(self._part_model)
             approved = {
                 (_resolve_table(group.ref), dim.parameter_id): dim
-                for group in _compile_table(self._part_model).of_kind("hole")
+                for group in _plan.of_kind("hole")
                 for dim in group.dims
+            }
+            # What the compiler REFUSED, separately from what it merely has no entry for.
+            # `Omission.authored` is the author's own `dimension(...)` set leaving a
+            # measurement out — ADR 0016's suppression-by-omission — and printing it anyway
+            # is the compiled-plan boundary broken from the other side: not "a renderer
+            # rebuilt a suppressed value" but "a renderer printed one the author deleted"
+            # (#1216 review r10, F6).
+            omitted = {
+                (omission.feature, omission.parameter_id)
+                for omission in _plan.diagnostics
+                if omission.authored
             }
 
         def _cell(owner, parameter, fallback):
             """The plan's text for *owner*'s *parameter*, else *fallback*.
 
-            The fallback is not decoration: `_hole_spec_groups` is geometry-derived and can
-            group holes the compiler never approved a dimension for, and a table that prints
-            an empty cell there would be worse than one that prints the measured value.
+            The fallback covers the one case it is for: `_hole_spec_groups` is geometry-derived
+            and can group holes the compiler has NO entry for at all, and an empty cell there
+            would be worse than the measured value. It does not cover a measurement the author
+            omitted — that is a decision, and it is honoured by printing nothing, which is what
+            the escalated table has always done for the same case.
             """
+            if (owner, parameter) in omitted:
+                return ""
             dim = approved.get((owner, parameter))
             if dim is None:
                 return fallback
@@ -2910,13 +2946,16 @@ class Drawing:
         diams = []
         for tag, owner, holes, count in groups:
             h = holes[0]
+            dia = _cell(owner, "bore.diameter", _fmt(h.diameter))
+            # An empty diameter empties the whole cell and takes `THRU` with it, exactly as the
+            # escalated table does (`orchestrator._table_row`): a bare `ø` with no number, or a
+            # `THRU` qualifying a diameter that is not printed, states less than nothing.
             depth = (
-                "THRU"
+                ("THRU" if dia else "")
                 if h.through
                 else (_cell(owner, "bore.depth", _fmt(h.depth)) if h.depth else "")
             )
-            dia = _cell(owner, "bore.diameter", _fmt(h.diameter))
-            rows.append((tag, f"ø{dia}", depth, str(count)))
+            rows.append((tag, f"ø{dia}" if dia else "", depth, str(count)))
             # Legacy physical-diameter lint counts one structured entry per bore.
             # Repeat the value exactly as many times as the visible QTY asserts, just as
             # automatic escalation does, while the semantic ledger below retains the

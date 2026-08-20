@@ -222,15 +222,14 @@ _UNSCORED_CODES = frozenset(
         "authored_dim_degenerate",
         "authored_omission",
         "axial_length_missing",
-        # The drawing is CORRECT here — it withheld a claim it could not honestly make, and is
-        # telling the author so. Not a fidelity fault (nothing false was printed) and not a
-        # legibility one (nothing was misplaced): informational (#1216).
-        "pattern_pitch_tolerance_withheld",
-        # Same shape one line up: an omission the drawing REPORTS. A step height the page
-        # cannot carry is missing content, not misplaced content, so it belongs to
-        # completeness's ledger and scores on no lint component (#1216).
-        "step_dim_withheld",
         "boss_height_missing",
+        # The `*_withheld` family (#1216), kept together and in place alphabetically. Each is a
+        # claim the drawing declined to make because it could not make it honestly, and said
+        # so: a jittered pattern pitch, a step height the page cannot carry, and an `n×` mark
+        # whose collapsed members do not all carry the same band. Not a fidelity fault (nothing
+        # false was printed) and not a legibility one (nothing was misplaced); an omission is
+        # completeness's ledger, which builds from requirement outcomes rather than from lint.
+        "collapsed_tolerance_withheld",
         "dimension_kind_unsupported",
         "feature_count_mismatch",
         "feature_no_centermark",
@@ -245,6 +244,8 @@ _UNSCORED_CODES = frozenset(
         "pmi_not_lowered",
         "pmi_not_rendered",
         "pmi_present_but_ignored",
+        "step_dim_withheld",
+        "pattern_pitch_tolerance_withheld",
         "pocket_not_located",
         # Neither confirmed nor refuted: the annotation renders no readable text, or the
         # compiler approved the measurement with no displayable value. Reported so an

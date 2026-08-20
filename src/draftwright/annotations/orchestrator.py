@@ -711,7 +711,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
             "projection_symbol": _s_projection_symbol,
         }
     )
-    _retract_resolved_withholdings(dwg, ctx)
+    retract_resolved_withholdings(dwg, ctx, _runtime_plan)
     if ctx.trace is not None:  # snapshot the run's escalations into the trace (#736)
         ctx.trace.record_escalations(ctx.escalations)
     # The escalations live only on this per-run ctx (#639), discarded when _auto_annotate
@@ -727,30 +727,68 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
 _WITHHOLDING_CODES = ("step_dim_withheld", "overall_dim_withheld")
 
 
-def _retract_resolved_withholdings(dwg, ctx) -> None:
+def _approved_per_measurement(plan) -> dict:
+    """How many marks the largest approved set under each `DimensionId` carries.
+
+    Not one, in general. A `step_height` ladder gives EVERY rung the same
+    `_dim_id(step, "step_height.length")` — five rungs, one id (ADR 0016 Amdt 3: the parameter
+    id is the canonical spelling, and a per-level identity does not exist). So "this id is
+    claimed by some annotation" cannot mean "this measurement is on the sheet" for a ladder,
+    and a retraction written that way withdraws the whole report as soon as ONE rung places
+    (#1216 review r10, F1). Counting is what the collapse leaves available.
+
+    The MAXIMUM over containers, not the sum: the plan represents the same five step heights
+    twice, once as a `step_height` ladder and once as five `step_level` group dims, so summing
+    expects ten marks for five measurements and no drawing can ever satisfy it. That arithmetic
+    is why the first count-based cut retracted nothing at all.
+    """
+    counts: dict = {}
+
+    def _tally(entries) -> None:
+        per: dict = {}
+        for entry in entries:
+            if entry.id is not None:
+                per[entry.id] = per.get(entry.id, 0) + 1
+        for mid, n in per.items():
+            counts[mid] = max(counts.get(mid, 0), n)
+
+    for group in plan.groups:
+        _tally(group.dims)
+    for ladder in plan.ladders:
+        _tally(ladder.rungs)
+    return counts
+
+
+def retract_resolved_withholdings(dwg, ctx, plan) -> None:
     """Withdraw a withholding whose measurement reached the sheet after all.
 
     `render_height_ladder` runs long before the detail view exists, so a rung it could not fit
     in the front-right strip may still be dimensioned in an enlarged detail. Reported at record
-    time and never revisited, `step_dim_withheld` therefore fired on `_crowded_staircase` — a
-    part whose five approved rungs are ALL claimed, by `dim_detail_a_step0..2` and
-    `dim_step_0..1` — and said they "are not dimensioned at this scale", which was false
-    (#1216 review r9, F5).
+    time and never revisited, `step_dim_withheld` fired on `_crowded_staircase` — a part whose
+    five approved rungs are ALL claimed, by `dim_detail_a_step0..2` and `dim_step_0..1` — and
+    said they "are not dimensioned at this scale", which was false (#1216 review r9, F5).
 
     The same shape as the `callout_dropped` and `location_ref_dropped` retractions above, and
     the same rule `solve_corridor` applies to a deduped loser: a drop is only a drop if the
-    measurement is still absent when the run finishes. Fails closed — an issue carrying no
-    measurement, or any of whose measurements is still unclaimed, stands.
+    measurement is still absent when the run finishes.
+
+    Fails closed, and this is the part that took two rounds to get right. The predicate is
+    "as many annotations claim this id as the plan approved entries under it", not "some
+    annotation claims it": with one id per ladder the second retracts a five-rung withholding
+    on the strength of one drawn rung, which is the silent omission the report exists to end,
+    restored by its own fix (#1216 review r10, F1).
     """
-    claimed: set = set()
+    approved = _approved_per_measurement(plan)
+    drawn: dict = {}
     for name in dwg.registry.names():
-        claimed |= set(dwg.registry.measurement_of(name) or ())
+        for mid in dwg.registry.measurement_of(name) or ():
+            drawn[mid] = drawn.get(mid, 0) + 1
     for code in _WITHHOLDING_CODES:
         ctx.drop_issues_where(
             code,
             lambda issue: (
                 bool(issue.measurement_ids)
-                and all(mid in claimed for mid in issue.measurement_ids)
+                and all(drawn.get(mid, 0) >= approved.get(mid, 1) for mid in issue.measurement_ids)
             ),
         )
 
