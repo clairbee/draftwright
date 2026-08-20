@@ -359,47 +359,70 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     )
 
 
-#: Bisection steps for :func:`_largest_clear_factor`. Each step is one re-projection plus a
-#: bbox read — measured at 0.3-0.5 ms on the parts in this suite — so eight steps resolve the
-#: factor to ~0.4 % of the growth corridor for a few milliseconds on the one path that grows.
-_ISO_CLEAR_STEPS = 8
+#: Bisection steps for :func:`_largest_clear_factor`. Five halvings of a corridor at most
+#: 0.3 wide resolve the factor to ~0.01 — under 1 % of the growth available, ~1 mm on a
+#: 130 mm iso, and far below the ~1.2 mm the obstacle boxes are already inflated by
+#: (`_STROKE_PAD`). Each step is one re-projection plus a bbox read, and that is NOT free on a
+#: real part: measured 0.28 ms on `Cylinder(20, 60)` but **14.2 ms** on CTC-01 AP203, so the
+#: search costs ~85 ms there. The first version of this comment said "0.3-0.5 ms … a few
+#: milliseconds", having measured only the trivial parts (#1240 review r2, F4).
+_ISO_CLEAR_STEPS = 5
 
 
-def _largest_clear_factor(dwg, a, hi, obstacles) -> float:
-    """The largest factor in ``[1, hi]`` whose RE-PROJECTED iso clears every obstacle.
+def _largest_clear_factor(dwg, a, hi, obstacles, base_box) -> float:
+    """A factor in ``[1, hi]`` whose RE-PROJECTED iso clears every obstacle, as large as this
+    search finds.
 
-    **Measured, not predicted** — ADR 0014 Amendment 3, and this function is the second time
-    that amendment has been learned the hard way. Its first version computed the answer from a
-    linear model: re-projection at factor *f* maps each bbox edge *e* to ``c + f*(e-c)`` about
-    the page centre. That is false. `_project_iso` scales the part about the WORLD ORIGIN, so a
-    solid carrying a non-identity Location — every authored `build123d` part, since the
-    primitives are centred by construction — has its projected bbox TRANSLATE as it scales:
+    **Measured, not predicted** — ADR 0014 Amendment 3. Its first version computed the answer
+    from a linear model: re-projection at factor *f* maps each bbox edge *e* to ``c + f*(e-c)``
+    about the page centre. That is false. The projected bbox is affine in *f* but carries a
+    translation term as well as the scale, so the model drifts linearly with the factor:
 
-        Cylinder(20, 60) at f=1.3, y edges predicted [86.15, 179.85], measured [93.49, 187.20]
+        Cylinder(20, 60)          f=1.2  +4.899 mm   f=1.3  +7.348 mm   (top edge)
+        Box(40, 30, 8)            f=1.2  +0.490 mm   f=1.3  +0.735 mm
+        nist_ctc_01_asme1_ap203   f=1.2  -0.816 mm   f=1.3  -1.225 mm
 
-    a 7.3 mm drift against a 0.98 clearance margin worth 0.75 mm. The prediction's "capped"
-    iso grew straight through the obstacle it was capped by, worst exactly where growth is
-    largest. STEP-imported solids arrive with identity Location and ARE linear, which is why
-    all ten CTC fixtures agreed with the model and the defect survived two hunts (#1240 review
-    F1).
+    against a clearance margin worth well under a millimetre. The prediction's "capped" iso
+    grew straight through the obstacle it was capped by, worst exactly where growth is largest.
 
-    Bisection on the real projection has no model to be wrong about. The drawing is left
-    projected at an arbitrary probe scale; the caller re-projects at the returned factor.
+    The size of the drift tracks how far the part sits from the origin it is scaled about, and
+    an authored `build123d` primitive — centred by construction, so carrying a non-identity
+    Location — drifts hardest. But it is NOT a property only authored parts have: the second
+    version of this docstring claimed "STEP-imported solids arrive with identity Location and
+    ARE linear", and CTC-01 above has an identity Location and drifts 1.2 mm. A false
+    explanation for why the first defect escaped, written into its fix (#1240 review r2, F3).
+
+    Bisection on the real projection has no model to be wrong about. `lo` is only ever assigned
+    a factor measured clear, so the result is always genuinely clear — but it is not
+    necessarily the LARGEST such factor: with several obstacles the clear set can be
+    non-contiguous, and a bisection that lands in a lower island stays there. Conservative in
+    the safe direction, and not worth exact interval arithmetic over an affine model this
+    function exists because a model was wrong (#1240 review r2, F5).
+
+    *base_box* is the iso bbox at sheet scale, which the caller has already measured. The
+    drawing is left projected at an arbitrary probe scale; the caller re-projects.
     """
     if not obstacles or hi <= 1.0:
         return float(hi)
 
+    def hits(box) -> bool:
+        return any(_boxes_overlap(box, obstacle) for obstacle in obstacles)
+
     def clear(factor) -> bool:
         _project_iso(dwg, a, a.SCALE * factor)
-        box = _iso_bbox(dwg)
-        return not any(_boxes_overlap(box, obstacle) for obstacle in obstacles)
+        return not hits(_iso_bbox(dwg))
 
+    # *base_box* is the caller's already-measured f=1 bbox, so the f=1 reading costs nothing.
+    # Passed in rather than read off `dwg`: reading it here would silently depend on the
+    # drawing being projected at sheet scale on entry, and the first version did exactly that
+    # — a caller (this file's own test) that had probed the projection first got 1.0 back for
+    # every input.
+    if hits(base_box):
+        # Already overlapping before any growth: growth is not what put it there, and shrinking
+        # is not this branch's job. Report no growth and leave the conflict to lint.
+        return 1.0
     if clear(hi):
         return float(hi)
-    if not clear(1.0):
-        # Already overlapping at sheet scale: growth is not what put it there and shrinking is
-        # not this branch's job. Report no growth and leave the conflict to lint.
-        return 1.0
     lo = 1.0
     for _ in range(_ISO_CLEAR_STEPS):
         mid = (lo + hi) / 2
@@ -449,6 +472,7 @@ def _fit_iso_view(dwg, a: Analysis, obstacles=()):
             region_left = max(region_left, sec_right + 4)
     region = (region_left, a.iso_bottom_limit, a.iso_right_limit, a.iso_top_limit)
     bb = _iso_bbox(dwg)
+    probed = False  # did the obstacle search leave the iso projected at a probe scale?
     ratios = [
         avail / extent
         for extent, avail in (
@@ -483,9 +507,9 @@ def _fit_iso_view(dwg, a: Analysis, obstacles=()):
         factor = max(factor, 1.0)  # grow branch must never shrink
         factor = min(factor, _ISO_MAX_GROW)  # never dwarf the dimensioned views
         if obstacles and factor > 1.0:
-            factor = _largest_clear_factor(dwg, a, factor, obstacles)
-            _project_iso(dwg, a, a.SCALE)  # undo the probes; the tail re-projects if it grows
-            factor = math.floor(factor * 10000) / 10000
+            searched = _largest_clear_factor(dwg, a, factor, obstacles, bb)
+            factor = math.floor(searched * 10000) / 10000
+            probed = True
     else:
         # Iso overflows; shrink to just fit with 2 % safety margin.
         #
@@ -498,6 +522,10 @@ def _fit_iso_view(dwg, a: Analysis, obstacles=()):
         # reported by `view_annotation_overlap` rather than prevented here (#1240 review F3).
         factor = math.floor(needed * 0.98 * 10000) / 10000
     if abs(factor - 1.0) < 0.05:
+        # Undo the probes ONLY here: every other exit re-projects at `factor` below, so the
+        # restore would be a wasted projection — and on CTC-01 a projection is 14 ms.
+        if probed:
+            _project_iso(dwg, a, a.SCALE)
         return  # within 5 % of sheet scale — no rescale, no NTS label
     _project_iso(dwg, a, a.SCALE * factor)
     bb = _iso_bbox(dwg)

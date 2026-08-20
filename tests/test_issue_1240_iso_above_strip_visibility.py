@@ -96,7 +96,7 @@ def test_the_clear_factor_search_measures_the_real_projection(monkeypatch):
 
     # An obstacle in the growth corridor, placed against the MEASURED trajectory.
     obstacle = (base[0], grown[3] - 6.0, base[2], grown[3] - 2.0)
-    factor = _largest_clear_factor(drawing, analysis, 1.3, [obstacle])
+    factor = _largest_clear_factor(drawing, analysis, 1.3, [obstacle], base)
     assert 1.0 < factor < 1.3, f"expected a bounded factor, got {factor}"
 
     _project_iso(drawing, analysis, analysis.SCALE * factor)
@@ -114,9 +114,12 @@ def test_the_clear_factor_search_measures_the_real_projection(monkeypatch):
 
 def test_the_clear_factor_search_degenerate_inputs():
     """No obstacles and a non-growing ceiling are returned untouched, without projecting."""
+    from draftwright._core import _iso_bbox as core_iso_bbox
+
     drawing, analysis = _built_with_analysis(Box(40, 30, 8), title="T", number="N")
-    assert _largest_clear_factor(drawing, analysis, 1.3, []) == 1.3
-    assert _largest_clear_factor(drawing, analysis, 1.0, [(0.0, 0.0, 1e4, 1e4)]) == 1.0
+    base = core_iso_bbox(drawing)
+    assert _largest_clear_factor(drawing, analysis, 1.3, [], base) == 1.3
+    assert _largest_clear_factor(drawing, analysis, 1.0, [(0.0, 0.0, 1e4, 1e4)], base) == 1.0
 
 
 def test_iso_growth_is_capped_by_a_planted_annotation_box(monkeypatch):
@@ -161,12 +164,12 @@ def test_iso_growth_is_capped_by_a_planted_annotation_box(monkeypatch):
         f"(pre {pre}, grown {grown})"
     )
 
-    real = builder_mod.strip_obstacles
+    real = builder_mod.annotation_ink_obstacles
 
     def with_planted(dwg, *args, **kwargs):
         return list(real(dwg, *args, **kwargs)) + [planted]
 
-    monkeypatch.setattr(builder_mod, "strip_obstacles", with_planted)
+    monkeypatch.setattr(builder_mod, "annotation_ink_obstacles", with_planted)
     prefit.clear()
     capped = build_drawing(part, title="T", number="N")
     capped_bb = _iso_bbox(capped)
@@ -316,3 +319,46 @@ def test_the_post_fit_recap_only_ever_tightens(monkeypatch):
         f"the re-cap loosened a limit set during annotation: {final} > {planted} — it is "
         "restoring from the snapshot instead of tightening"
     )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"frame": True}, {"frame": True, "zones": True}, {"frame": True, "auto_dims": False}],
+    ids=["plain", "frame", "frame+zones", "frame+script-path"],
+)
+def test_the_page_spanning_riders_do_not_neutralise_the_iso_fit(options):
+    """`--frame` must not disable the fit (#1240 review r2, F1).
+
+    The sheet frame and zone grid are registered annotations whose Compound bbox spans the
+    page — they carry no `.segments`, so the obstacle decomposition falls back to the full
+    geometry box. Handing the raw `strip_obstacles` set to the fit therefore made the iso
+    overlap an "obstacle" at every factor: `--frame` silently disabled growth and the NTS
+    caption with it, on 17 of 20 corpus fixtures, with the whole fast tier green. It also broke
+    script/CLI parity, because the `auto_dims=False` path computes its obstacles BEFORE the
+    frame is added and so kept growing — the one thing that branch's comment exists to protect.
+
+    `tests/test_iso_nts_caption_placement.py` makes the same point about the same riders for
+    the caption; this is the fit's copy of it, and the reason there is now one predicate
+    (`is_page_spanning_rider`) rather than a sixth hand-rolled filter.
+
+    All four configurations must agree: the riders are furniture, not obstacles.
+    """
+    part = Box(40, 30, 8) - Pos(-10, 5, 0) * Cylinder(3, 20) - Pos(10, -5, 0) * Cylinder(3, 20)
+    plain = build_drawing(part, title="T", number="N")
+    plain_iso = _iso_bbox(plain)
+    # The precondition: this part's iso GROWS, so a veto is observable at all.
+    assert "note_iso_nts" in plain.registry.names(), (
+        "precondition: the fixture's iso no longer grows, so no configuration can lose the fit"
+    )
+
+    drawing = build_drawing(part, title="T", number="N", **options)
+    iso = _iso_bbox(drawing)
+    # SIZE, not position: a frame legitimately shifts the layout (measured: the framed iso sits
+    # 3 mm lower). What the riders must not do is change how far the fit GROWS.
+    plain_size = (plain_iso[2] - plain_iso[0], plain_iso[3] - plain_iso[1])
+    size = (iso[2] - iso[0], iso[3] - iso[1])
+    assert size == pytest.approx(plain_size, abs=1e-6), (
+        f"{options} changed the fitted iso size: {size} vs {plain_size} — a page-spanning "
+        "rider is being treated as an obstacle, so the fit is vetoed"
+    )
+    assert "note_iso_nts" in drawing.registry.names(), f"{options} lost the NTS caption"

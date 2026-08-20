@@ -43,7 +43,11 @@ from draftwright._core import (
 )
 from draftwright._warnings import ScaleCompletenessWarning
 from draftwright.analysis import Analysis, _analyse
-from draftwright.annotations._common import SolveTrace, place_iso_nts_note, strip_obstacles
+from draftwright.annotations._common import (
+    SolveTrace,
+    annotation_ink_obstacles,
+    place_iso_nts_note,
+)
 from draftwright.annotations.gears import render_gear_tables
 from draftwright.annotations.orchestrator import (
     _auto_annotate,
@@ -467,7 +471,14 @@ def _assemble(
         # The placed annotations are the fit's obstacles (#1240): the grow branch may not
         # invade ink that placed legally against the pre-fit iso. Computed HERE because the
         # fit sits below the occupancy model and must not own an obstacle set (#1197).
-        _nts_bb = _fit_iso_view(dwg, a, obstacles=strip_obstacles(dwg))
+        #
+        # `annotation_ink_obstacles`, NOT `strip_obstacles`: the sheet frame and zone grid are
+        # registered annotations whose Compound bbox spans the page, so the raw strip set made
+        # the iso overlap an "obstacle" at every factor and `--frame` disabled the fit
+        # altogether — no growth, no NTS caption, fast tier green. It also broke script/CLI
+        # parity, since the `auto_dims=False` branch below computes its obstacles before the
+        # frame is added and so kept growing (#1240 review r2).
+        _nts_bb = _fit_iso_view(dwg, a, obstacles=annotation_ink_obstacles(dwg))
         _ix0, _iy0, _, _iy1 = _iso_bbox(dwg)
         _final_iso_x_lim = _ix0 - 4
         a.fv_zones.right.outer_limit = min(_fv_ol, _final_iso_x_lim)
@@ -502,7 +513,7 @@ def _assemble(
         # note is sheet furniture — like the title block below — that states the iso is
         # not to scale. Suppressing it here silently diverged the emitted-script drawing
         # (auto_dims=False) from the direct CLI, which always labels it (script↔CLI parity).
-        _nts_bb = _fit_iso_view(dwg, a, obstacles=strip_obstacles(dwg))
+        _nts_bb = _fit_iso_view(dwg, a, obstacles=annotation_ink_obstacles(dwg))
         _add_title_block(dwg, a)
         if a.frame:  # sheet border (#767) — auto path adds it via the orchestrator
             _add_sheet_frame(dwg, a)
