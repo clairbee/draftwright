@@ -982,6 +982,40 @@ def occupancy_boxes(o, stroke_pad=None):
 _STROKE_PAD = 1.2
 
 
+#: Annotations whose Compound bounding box spans the whole page. They carry no ``.segments``
+#: to decompose, so :func:`annotation_obstacle_boxes` falls back to the full geometry box and
+#: they swallow the sheet — any occupancy test that includes them is a silent no-op. Filtered
+#: by `late_furniture_obstacles` (#1145), by three checks in `linting/structural`, and — since
+#: #1240 review round 2 — by `annotation_ink_obstacles`, because the iso fit had picked
+#: `strip_obstacles` instead and `--frame` therefore disabled the fit entirely.
+_PAGE_SPANNING_RIDERS = ("is_sheet_frame", "is_zone_grid")
+
+
+def is_page_spanning_rider(annotation) -> bool:
+    """Is *annotation* one of the page-spanning riders (see :data:`_PAGE_SPANNING_RIDERS`)?
+
+    One predicate, because the filter has been written out by hand in five places and the
+    sixth site got it wrong: the fit's obstacle set omitted it and a framed sheet's iso stopped
+    growing, silently, with the whole fast tier green (#1240 review r2).
+    """
+    return any(getattr(annotation, rider, False) for rider in _PAGE_SPANNING_RIDERS)
+
+
+def annotation_ink_obstacles(dwg, *, named=False):
+    """Every placed annotation's decomposed ink, minus the page-spanning riders.
+
+    What a placement or fit outside the strip system needs: the same occupancy
+    :func:`strip_obstacles` computes, without the frame/zone-grid boxes that would make the
+    test vacuous — and WITHOUT the views that :func:`late_furniture_obstacles` adds, which the
+    iso fit must not see (it would treat itself as an obstacle and never grow).
+    """
+    return [
+        (name, box) if named else box
+        for name, box in strip_obstacles(dwg, named=True)
+        if not is_page_spanning_rider(dwg.get_annotation(name))
+    ]
+
+
 def late_furniture_obstacles(dwg, *, named=False):
     """Everything a POST-FIT placement must keep clear of, as AABBs.
 
@@ -1012,7 +1046,7 @@ def late_furniture_obstacles(dwg, *, named=False):
     ]
     for annotation_name, box in strip_obstacles(dwg, named=True):
         annotation = dwg.get_annotation(annotation_name)
-        if any(getattr(annotation, rider, False) for rider in ("is_sheet_frame", "is_zone_grid")):
+        if is_page_spanning_rider(annotation):
             continue
         obstacles.append((f"annotation:{annotation_name}", box))
 

@@ -52,6 +52,7 @@ from draftwright._core import (
 from draftwright.annotations._common import (
     PlacementContext,
     _register_hole_table_coverage,
+    annotation_ink_obstacles,
     carve_free_position,
     late_furniture_obstacles,
 )
@@ -2616,7 +2617,10 @@ class Drawing:
                     _project_iso(self, a, a.SCALE)
                 _resolve_details(self, a, ctx=ctx)
                 if "iso" in self.views:
-                    _fit_iso_view(self, a)
+                    # Obstacles as on the build path (#1240) — inert today, since a details
+                    # refit disables the grow branch, but the call must not drift from the
+                    # builder's shape or the next grow-path change silently loses the cap.
+                    _fit_iso_view(self, a, obstacles=annotation_ink_obstacles(self))
 
         def _s_tabulate():
             # Dense-scattered plan-view holes escalate to the hole TABLE + balloon ring —

@@ -34,6 +34,7 @@ from draftwright._core import (
 )
 from draftwright._geometry import (
     MaterialField,
+    _boxes_overlap,
     material_field,
 )
 
@@ -358,7 +359,84 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     )
 
 
-def _fit_iso_view(dwg, a: Analysis):
+#: Bisection steps for :func:`_largest_clear_factor`. Five halvings of a corridor at most
+#: 0.3 wide resolve the factor to ~0.01 — under 1 % of the growth available, ~1 mm on a
+#: 130 mm iso, and far below the ~1.2 mm the obstacle boxes are already inflated by
+#: (`_STROKE_PAD`). Each step is one re-projection plus a bbox read, and that is NOT free on a
+#: real part: measured 0.28 ms on `Cylinder(20, 60)` but **14.2 ms** on CTC-01 AP203, so the
+#: search costs ~85 ms there. The first version of this comment said "0.3-0.5 ms … a few
+#: milliseconds", having measured only the trivial parts (#1240 review r2, F4).
+_ISO_CLEAR_STEPS = 5
+
+
+def _largest_clear_factor(dwg, a, hi, obstacles, base_box) -> float:
+    """A factor in ``[1, hi]`` whose RE-PROJECTED iso clears every obstacle, as large as this
+    search finds.
+
+    **Measured, not predicted** — ADR 0014 Amendment 3. Its first version computed the answer
+    from a linear model: re-projection at factor *f* maps each bbox edge *e* to ``c + f*(e-c)``
+    about the page centre. That is false. The projected bbox is affine in *f* but carries a
+    translation term as well as the scale, so the model drifts linearly with the factor:
+
+        Cylinder(20, 60)          f=1.2  +4.899 mm   f=1.3  +7.348 mm   (top edge, macOS)
+        Box(40, 30, 8)            f=1.2  +0.490 mm   f=1.3  +0.735 mm
+        nist_ctc_01_asme1_ap203   f=1.2  -0.816 mm   f=1.3  -1.225 mm
+
+    against a clearance margin worth well under a millimetre. The prediction's "capped" iso
+    grew straight through the obstacle it was capped by, worst exactly where growth is largest.
+
+    The drift tracks the Location the engine gives `a.part` — the offset between the origin the
+    part is scaled about and the point the view is centred on. Two attempts to say more than
+    that were wrong and are worth recording, because both were written INTO a fix for the
+    previous one: "scales the part about the WORLD ORIGIN" (wrong mechanism), and
+    "STEP-imported solids arrive with identity Location and ARE linear" — CTC-01 above has an
+    identity input Location and drifts 1.2 mm (#1240 review r2, F3). The measured amount is
+    also platform-dependent: `Cylinder(20, 60)` drifts 7.35 mm on macOS and exactly zero on
+    Linux, which is why the guard for this is driven by a synthetic projection rather than by
+    any real part's incidental placement.
+
+    Bisection on the real projection has no model to be wrong about. `lo` is only ever assigned
+    a factor measured clear, so the result is always genuinely clear — but it is not
+    necessarily the LARGEST such factor: with several obstacles the clear set can be
+    non-contiguous, and a bisection that lands in a lower island stays there. Conservative in
+    the safe direction, and not worth exact interval arithmetic over an affine model this
+    function exists because a model was wrong (#1240 review r2, F5).
+
+    *base_box* is the iso bbox at sheet scale, which the caller has already measured. The
+    drawing is left projected at an arbitrary probe scale; the caller re-projects.
+    """
+    if not obstacles or hi <= 1.0:
+        return float(hi)
+
+    def hits(box) -> bool:
+        return any(_boxes_overlap(box, obstacle) for obstacle in obstacles)
+
+    def clear(factor) -> bool:
+        _project_iso(dwg, a, a.SCALE * factor)
+        return not hits(_iso_bbox(dwg))
+
+    # *base_box* is the caller's already-measured f=1 bbox, so the f=1 reading costs nothing.
+    # Passed in rather than read off `dwg`: reading it here would silently depend on the
+    # drawing being projected at sheet scale on entry, and the first version did exactly that
+    # — a caller (this file's own test) that had probed the projection first got 1.0 back for
+    # every input.
+    if hits(base_box):
+        # Already overlapping before any growth: growth is not what put it there, and shrinking
+        # is not this branch's job. Report no growth and leave the conflict to lint.
+        return 1.0
+    if clear(hi):
+        return float(hi)
+    lo = 1.0
+    for _ in range(_ISO_CLEAR_STEPS):
+        mid = (lo + hi) / 2
+        if clear(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _fit_iso_view(dwg, a: Analysis, obstacles=()):
     """Scale the iso view to fill its page zone; return its bbox when the result is
     NOT to sheet scale and therefore needs an NTS caption, else ``None``.
 
@@ -397,6 +475,7 @@ def _fit_iso_view(dwg, a: Analysis):
             region_left = max(region_left, sec_right + 4)
     region = (region_left, a.iso_bottom_limit, a.iso_right_limit, a.iso_top_limit)
     bb = _iso_bbox(dwg)
+    probed = False  # did the obstacle search leave the iso projected at a probe scale?
     ratios = [
         avail / extent
         for extent, avail in (
@@ -415,16 +494,41 @@ def _fit_iso_view(dwg, a: Analysis):
         # already-fitting orientation view at its current scale.
         return
     if needed >= 1.0:
-        # Iso fits; grow to 90 % of zone — leaves comfortable breathing room.
-        margin_pct = 0.90
-    else:
-        # Iso overflows; shrink to just fit with 2 % safety margin.
-        margin_pct = 0.98
-    factor = math.floor(needed * margin_pct * 10000) / 10000
-    if needed >= 1.0:
+        # Iso fits; grow to 90 % of zone — leaves comfortable breathing room — capped by the
+        # caller's obstacle boxes (#1240): the zone is the largest view-free rectangle, and
+        # annotations are free to live in it — the above strips run into it — so growing to
+        # the zone edge could grow ONTO a placed annotation, invisibly to both sides
+        # (annotations avoid the iso at its pre-fit size; the fit never saw annotations).
+        #
+        # The two margins guard DIFFERENT edges and must not compound: 0.90 is breathing room
+        # from the zone boundary, 0.98 (the shrink branch's own figure) is clearance off an
+        # obstacle's edge. The first cut multiplied the obstacle cap by both — an effective
+        # 0.88 — which turned any obstacle in the middle of the growth corridor into a veto:
+        # the capped factor fell under the 5 % no-op threshold and the iso stayed at sheet
+        # scale instead of growing up to the box.
+        factor = math.floor(needed * 0.90 * 10000) / 10000
         factor = max(factor, 1.0)  # grow branch must never shrink
         factor = min(factor, _ISO_MAX_GROW)  # never dwarf the dimensioned views
+        if obstacles and factor > 1.0:
+            searched = _largest_clear_factor(dwg, a, factor, obstacles, bb)
+            factor = math.floor(searched * 10000) / 10000
+            probed = True
+    else:
+        # Iso overflows; shrink to just fit with 2 % safety margin.
+        #
+        # NOT obstacle-checked, and deliberately not justified by "shrinking about the centre
+        # cannot create an overlap absent at 1.0" — the first version of this said that, and it
+        # rests on the same false linear model `_largest_clear_factor` exists to replace: the
+        # shrink translates too (a tall cylinder's bbox measured 3.5 mm below prediction at
+        # f=0.905). The real reason is that this branch has no choice: the iso OVERFLOWS its
+        # page region, so it must shrink whatever else is nearby, and a resulting collision is
+        # reported by `view_annotation_overlap` rather than prevented here (#1240 review F3).
+        factor = math.floor(needed * 0.98 * 10000) / 10000
     if abs(factor - 1.0) < 0.05:
+        # Undo the probes ONLY here: every other exit re-projects at `factor` below, so the
+        # restore would be a wasted projection — and on CTC-01 a projection is 14 ms.
+        if probed:
+            _project_iso(dwg, a, a.SCALE)
         return  # within 5 % of sheet scale — no rescale, no NTS label
     _project_iso(dwg, a, a.SCALE * factor)
     bb = _iso_bbox(dwg)

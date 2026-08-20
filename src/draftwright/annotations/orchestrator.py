@@ -328,7 +328,7 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
     # that the iso has been projected and fitted.  Always apply so that any
     # future allocations are bounded; warn when the cursor has already passed
     # the limit (dims already placed may overlap the iso view).
-    _iso_x0, _iso_y0, _, _iso_y1 = _iso_bbox(dwg)
+    _iso_x0, _iso_y0, _iso_x1, _iso_y1 = _iso_bbox(dwg)
     _iso_x_limit = _iso_x0 - 4
     # Only tighten a right strip when the iso shares the strip's y-range: a strip
     # that abuts the iso horizontally would otherwise lose annotation space, while
@@ -345,6 +345,28 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
             _right_strips.append(_rs)
     for _rs in _right_strips:
         _rs.outer_limit = min(_rs.outer_limit, _iso_x_limit)
+
+    # The same guard for the page-reaching ABOVE strips (#1240). The right strips have been
+    # iso-clamped since the zone carve; the above strips had only the per-pass m_locy clamp,
+    # so every other above-strip resident — GD&T frames, grid pitch dims, #1236's overall-
+    # extent fallthrough — could stack under the iso unchecked: `strip_obstacles` is
+    # annotations-only by documented design (views enter `late_furniture_obstacles`, not the
+    # strip carve), so nothing else stood between them. Same x/y transposition of the same
+    # rule, same overlap guard, same reason for it: clamping a strip the iso does not
+    # horizontally overlap would cost annotation space for nothing. The m_locy clamp stays —
+    # it fires earlier (a 14 mm approach buffer, not bbox overlap) and is strictly tighter.
+    _iso_y_limit = _iso_y0 - 4
+    for _as, _x0, _x1 in (
+        (a.pv_zones.above, a.PV_X - a.fv_hw, a.PV_X + a.fv_hw),
+        (a.sv_zones.above, a.SV_X - a.sv_hw, a.SV_X + a.sv_hw),
+    ):
+        # Clamp only when the iso is actually IN the strip's path — x-overlapping AND above
+        # the strip anchor. The right-strip block's warning transposes exactly: an iso that
+        # x-overlaps the view from BELOW it (a lower-right zone beside a wide plan) would
+        # otherwise push the outer_limit beneath the anchor and break every allocation — four
+        # hole/slot fixtures lost their location dims to precisely that in the first cut.
+        if _x0 < _iso_x1 and _iso_x0 < _x1 and _iso_y_limit > _as.anchor:
+            _as.outer_limit = min(_as.outer_limit, _iso_y_limit)
 
     # Per-hole annotations from the feature records (#91, #92, #95): each
     # hole is annotated in the view its axis is normal to.
