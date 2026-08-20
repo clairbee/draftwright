@@ -64,18 +64,73 @@ def _plate_with_locations():
 
 
 def test_the_clear_factor_search_measures_the_real_projection(monkeypatch):
-    """`_largest_clear_factor` must not believe a linear model of re-projection.
+    """The search must not believe a page-centre linear model of re-projection.
 
-    Its first version predicted the grown bbox as a scale about the page centre. `_project_iso`
-    scales the part about the WORLD ORIGIN, so a solid with a non-identity Location — every
-    authored `build123d` primitive — translates as it grows, and the prediction is wrong by
-    millimetres exactly where growth is largest (#1240 review F1):
+    Its first version predicted the grown bbox as a scale about the page centre. The real
+    projected bbox is affine in the factor but carries a TRANSLATION term as well, so the
+    prediction drifts — measured on macOS at +7.35 mm for `Cylinder(20, 60)` at f=1.3 — and the
+    "capped" iso grew through the obstacle it was capped by.
 
-        Cylinder(20, 60) at f=1.3 — predicted y [86.15, 179.85], measured [93.49, 187.20]
+    Driven against a SYNTHETIC projection rather than a real part. The first version of this
+    test used `Cylinder(20, 60)`, whose drift comes from the Location the engine gives
+    `a.part` — and that is platform-dependent: 7.35 mm on macOS, exactly **zero** on Linux, so
+    CI failed on its own "the fixture stopped drifting" precondition (which is the precondition
+    doing its job, and the fixture failing at it). A fake map pins the contract the search
+    exists to satisfy, identically everywhere:
 
-    So this asserts the property a model cannot give: at the returned factor, the ACTUAL
-    re-projected bbox clears the obstacle — checked here on the drifting part, with the
-    drift itself asserted so the test fails if the fixture stops exercising it.
+        half(f) = 10 f              — a scale about the centre, which a linear model gets right
+        drift(f) = 25 (f - 1)       — a translation, which it does not
+
+    so the top edge is `100 + 35f - 25`, reaching the obstacle at f = 1.1428 while a
+    page-centre model puts it at f = 1.5 and would return the full 1.3.
+    """
+    from draftwright import projection as projection_mod
+
+    centre, half_at_one, drift_rate = 100.0, 10.0, 25.0
+    state = {"factor": 1.0}
+
+    def fake_project(_dwg, analysis, scale):
+        state["factor"] = scale / analysis.SCALE
+
+    def fake_bbox(_dwg):
+        factor = state["factor"]
+        half = half_at_one * factor
+        drift = drift_rate * (factor - 1.0)
+        return (centre - half, centre - half + drift, centre + half, centre + half + drift)
+
+    monkeypatch.setattr(projection_mod, "_project_iso", fake_project)
+    monkeypatch.setattr(projection_mod, "_iso_bbox", fake_bbox)
+
+    drawing, analysis = _built_with_analysis(Box(40, 30, 8), title="T", number="N")
+    base = fake_bbox(drawing)
+    obstacle = (centre - 5.0, 115.0, centre + 5.0, 118.0)
+    assert not _overlap(base, obstacle), "precondition: the obstacle is not clear at f=1"
+
+    # The precondition that makes this a test of measurement: a page-centre model says the
+    # whole corridor is clear, so a predictive search would return `hi` unchanged.
+    predicted_top_at_hi = centre + half_at_one * 1.3
+    assert predicted_top_at_hi < obstacle[1], (
+        f"the linear model already hits the obstacle ({predicted_top_at_hi} >= {obstacle[1]}), "
+        "so this fixture cannot tell measurement from prediction"
+    )
+
+    factor = _largest_clear_factor(drawing, analysis, 1.3, [obstacle], base)
+    assert 1.10 < factor < 1.15, (
+        f"expected the search to stop near the true onset 1.1428, got {factor} — 1.3 means it "
+        "predicted rather than measured"
+    )
+    state["factor"] = factor
+    assert not _overlap(fake_bbox(drawing), obstacle), (
+        f"the returned factor {factor} does not actually clear the obstacle"
+    )
+
+
+def test_the_returned_factor_clears_the_obstacle_on_a_real_projection():
+    """The same contract end-to-end, with no dependence on how much a part drifts.
+
+    Whatever the platform makes of the projection, the factor the search returns must leave the
+    REAL re-projected bbox clear of the obstacle. That is true with or without drift, so unlike
+    the synthetic test above it carries no precondition that can go platform-specific.
     """
     from draftwright._core import _iso_bbox as core_iso_bbox
     from draftwright.projection import _project_iso
@@ -83,32 +138,18 @@ def test_the_clear_factor_search_measures_the_real_projection(monkeypatch):
     drawing, analysis = _built_with_analysis(Cylinder(20, 60), title="T", number="N")
     _project_iso(drawing, analysis, analysis.SCALE)
     base = core_iso_bbox(drawing)
-    centre_y = (base[1] + base[3]) / 2
-
-    # The precondition: this part really does drift off the linear model.
     _project_iso(drawing, analysis, analysis.SCALE * 1.3)
     grown = core_iso_bbox(drawing)
-    predicted_top = centre_y + 1.3 * (base[3] - centre_y)
-    assert abs(grown[3] - predicted_top) > 1.0, (
-        f"the fixture stopped drifting (measured top {grown[3]:.2f} vs predicted "
-        f"{predicted_top:.2f}) — a linear cap would now be correct and this asserts nothing"
-    )
+    assert grown[3] > base[3], "precondition: this part's iso does not grow upward at all"
 
-    # An obstacle in the growth corridor, placed against the MEASURED trajectory.
     obstacle = (base[0], grown[3] - 6.0, base[2], grown[3] - 2.0)
+    _project_iso(drawing, analysis, analysis.SCALE)  # the search's documented entry state
     factor = _largest_clear_factor(drawing, analysis, 1.3, [obstacle], base)
-    assert 1.0 < factor < 1.3, f"expected a bounded factor, got {factor}"
 
     _project_iso(drawing, analysis, analysis.SCALE * factor)
-    actual = core_iso_bbox(drawing)
-    assert not _overlap(actual, obstacle), (
-        f"at the returned factor {factor:.4f} the REAL bbox {actual} still hits {obstacle}"
-    )
-    # And a linear cap would have overshot — the defect this replaces, stated as a number.
-    linear = centre_y + factor * (base[3] - centre_y)
-    assert actual[3] > linear, (
-        f"no drift at the chosen factor ({actual[3]:.2f} vs linear {linear:.2f}), so this "
-        "test no longer distinguishes measurement from prediction"
+    assert not _overlap(core_iso_bbox(drawing), obstacle), (
+        f"at the returned factor {factor:.4f} the real bbox {core_iso_bbox(drawing)} still "
+        f"hits {obstacle}"
     )
 
 

@@ -378,19 +378,22 @@ def _largest_clear_factor(dwg, a, hi, obstacles, base_box) -> float:
     about the page centre. That is false. The projected bbox is affine in *f* but carries a
     translation term as well as the scale, so the model drifts linearly with the factor:
 
-        Cylinder(20, 60)          f=1.2  +4.899 mm   f=1.3  +7.348 mm   (top edge)
+        Cylinder(20, 60)          f=1.2  +4.899 mm   f=1.3  +7.348 mm   (top edge, macOS)
         Box(40, 30, 8)            f=1.2  +0.490 mm   f=1.3  +0.735 mm
         nist_ctc_01_asme1_ap203   f=1.2  -0.816 mm   f=1.3  -1.225 mm
 
     against a clearance margin worth well under a millimetre. The prediction's "capped" iso
     grew straight through the obstacle it was capped by, worst exactly where growth is largest.
 
-    The size of the drift tracks how far the part sits from the origin it is scaled about, and
-    an authored `build123d` primitive — centred by construction, so carrying a non-identity
-    Location — drifts hardest. But it is NOT a property only authored parts have: the second
-    version of this docstring claimed "STEP-imported solids arrive with identity Location and
-    ARE linear", and CTC-01 above has an identity Location and drifts 1.2 mm. A false
-    explanation for why the first defect escaped, written into its fix (#1240 review r2, F3).
+    The drift tracks the Location the engine gives `a.part` — the offset between the origin the
+    part is scaled about and the point the view is centred on. Two attempts to say more than
+    that were wrong and are worth recording, because both were written INTO a fix for the
+    previous one: "scales the part about the WORLD ORIGIN" (wrong mechanism), and
+    "STEP-imported solids arrive with identity Location and ARE linear" — CTC-01 above has an
+    identity input Location and drifts 1.2 mm (#1240 review r2, F3). The measured amount is
+    also platform-dependent: `Cylinder(20, 60)` drifts 7.35 mm on macOS and exactly zero on
+    Linux, which is why the guard for this is driven by a synthetic projection rather than by
+    any real part's incidental placement.
 
     Bisection on the real projection has no model to be wrong about. `lo` is only ever assigned
     a factor measured clear, so the result is always genuinely clear — but it is not
