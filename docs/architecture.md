@@ -433,9 +433,14 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
     dimension here passes a label, so a forwarded `tolerance=` renders nothing while
     type-checking and reading back correctly from `Dimension.label`. (b) An approved
     dimension that no annotation claims must be reported: a starved overall extent and a
-    rung below the legibility floor both used to vanish with the lint clean. Whether
-    either should instead be *placed* is an open ADR 0014 question; reporting is not
-    contingent on answering it. Guarded by
+    rung below the legibility floor both used to vanish with the lint clean. The report
+    carries the measurement, must not gate the build (reporting through
+    `placement_unsatisfiable` made `build_drawing(scale=…)` raise on parts that had always
+    built), and is retracted if a later pass draws the measurement after all. Whether
+    either should instead be *placed* is an open ADR 0014 question (#1236); reporting is
+    not contingent on answering it. The converse is asserted over `plan.groups` and
+    `plan.ladders` only — a contingency is deliberately undrawn (Amdt 5) and a location
+    carries no tolerance. Guarded by
     `tests/test_issue_1215_no_approved_tolerance_is_dropped.py`, which sweeps every
     parameter of every feature through both `decorations=` key shapes.
   **Not** shipped: the emitter dimension-mirror (phase 4). `emit_sheet_script` refuses a

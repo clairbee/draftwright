@@ -23,6 +23,7 @@ from build123d import Box, Cone, Cylinder, Pos
 
 from draftwright.builder import build_drawing
 from draftwright.compose import _est_planned_bore_callout_width
+from draftwright.model.callout import hole_callout_spec
 from draftwright.model.planner import plan_dimensions
 
 _TOL = 0.05
@@ -110,29 +111,57 @@ def test_the_reservation_is_never_narrower_than_the_ink(name, part_fn, kinds):
     )
 
 
-def test_the_bare_and_toleranced_estimates_differ():
-    """The mutation guard for the test above.
+def test_a_recess_tolerance_alone_widens_the_reservation():
+    """The control for `_term`, which is the line that was wrong.
 
-    If the estimator ignored tolerances entirely, every assertion above would still pass — it
-    would just be comparing two bare widths, because a suppressed tolerance narrows the ink as
-    much as it narrows the estimate. This asserts the estimate MOVES when a tolerance is
-    authored, which is what makes the comparison load-bearing.
+    Its first version toleranced every `diameter`, which includes the BORE — and the bore's
+    suffix is applied on its own line (`_est_planned_bore_callout_width`, the `token_w.append`
+    above `_term`), so the estimate moved whether or not `_term` read anything. Measured:
+    making `_term` bare left that control PASSING and only the main assertions failing, so the
+    "control" guarded nothing it claimed to (#1216 review r9, F9).
+
+    Toleranced here through the ROLE key, on the counterbore's diameter alone, so the bore is
+    bare and any movement must come from `_term`.
     """
     base = build_drawing(_recessed_plate(), title="T", number="N")
     model = base.model()
+    recess = {
+        (feature, param.kind, param.role): _TOL
+        for feature in model.features
+        if feature.kind == "hole"
+        for param in feature.parameters()
+        if param.role in {"counterbore", "countersink"}
+    }
+    assert recess, "precondition: this part has no recess parameter to tolerance"
+
     bare = build_drawing(_recessed_plate(), model=model, title="T", number="N")
     toleranced = build_drawing(
-        _recessed_plate(),
-        model=model,
-        decorations=_decorations(model, kinds=("diameter",)),
-        title="T",
-        number="N",
+        _recessed_plate(), model=model, decorations=recess, title="T", number="N"
     )
+    # The bore itself must stay bare, or this is the old control again. Read off the spec the
+    # estimator and the renderer both consume, which is where `tolerance` (the bore's, applied
+    # on its own line) and the per-term `*_tol` keys are separated.
+    specs = [
+        hole_callout_spec(group)
+        for group in plan_dimensions(toleranced.model())
+        if hole_callout_spec(group) is not None
+    ]
+    assert specs, "precondition: no hole callout spec to measure"
+    assert all(spec.get("tolerance") is None for spec in specs), (
+        "precondition: the bore is toleranced too, so `_term` is not isolated: "
+        f"{[spec.get('tolerance') for spec in specs]}"
+    )
+    assert any(
+        spec.get(key) is not None
+        for spec in specs
+        for key in ("cbore_dia_tol", "cbore_depth_tol", "csink_dia_tol", "csink_angle_tol")
+    ), "precondition: no recess term carries a tolerance, so there is nothing for `_term` to read"
+
     bare_estimate = _est_planned_bore_callout_width(plan_dimensions(bare.model()), bare.draft)
     tol_estimate = _est_planned_bore_callout_width(
         plan_dimensions(toleranced.model()), toleranced.draft
     )
     assert tol_estimate > bare_estimate, (
-        f"an authored tolerance widened no reservation ({bare_estimate:.2f} -> "
-        f"{tol_estimate:.2f} mm), so the estimator is not reading tolerances at all"
+        f"a recess tolerance widened no reservation ({bare_estimate:.2f} -> "
+        f"{tol_estimate:.2f} mm), so `_term` is not reading the per-term tolerances"
     )

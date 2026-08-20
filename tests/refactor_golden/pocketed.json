@@ -211,7 +211,7 @@
     [
       "info",
       "step_dim_withheld",
-      "1 approved step height(s) span less than 12 mm on the page from the part base and are not dimensioned at this scale"
+      "1 approved step height(s) span less than 12.4 mm on the page from the ladder's datum and are not dimensioned at this scale"
     ]
   ],
   "item_count": 12,

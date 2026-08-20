@@ -711,12 +711,48 @@ def _auto_annotate(dwg, a: Analysis, *, detail_view: bool = False):
             "projection_symbol": _s_projection_symbol,
         }
     )
+    _retract_resolved_withholdings(dwg, ctx)
     if ctx.trace is not None:  # snapshot the run's escalations into the trace (#736)
         ctx.trace.record_escalations(ctx.escalations)
     # The escalations live only on this per-run ctx (#639), discarded when _auto_annotate
     # returns — so nothing carries stale drops into a later deferred edit (#440), and there is
     # no drawing-level list to clear.
     return _runtime_plan.diagnostics
+
+
+#: Codes that say "the compiler approved this measurement and it is not on the sheet". They are
+#: recorded by the pass that could not place the mark, which is the only place that knows WHY —
+#: which strip was full and who filled it. It is not the place that knows whether some LATER
+#: pass drew the measurement anyway.
+_WITHHOLDING_CODES = ("step_dim_withheld", "overall_dim_withheld")
+
+
+def _retract_resolved_withholdings(dwg, ctx) -> None:
+    """Withdraw a withholding whose measurement reached the sheet after all.
+
+    `render_height_ladder` runs long before the detail view exists, so a rung it could not fit
+    in the front-right strip may still be dimensioned in an enlarged detail. Reported at record
+    time and never revisited, `step_dim_withheld` therefore fired on `_crowded_staircase` — a
+    part whose five approved rungs are ALL claimed, by `dim_detail_a_step0..2` and
+    `dim_step_0..1` — and said they "are not dimensioned at this scale", which was false
+    (#1216 review r9, F5).
+
+    The same shape as the `callout_dropped` and `location_ref_dropped` retractions above, and
+    the same rule `solve_corridor` applies to a deduped loser: a drop is only a drop if the
+    measurement is still absent when the run finishes. Fails closed — an issue carrying no
+    measurement, or any of whose measurements is still unclaimed, stands.
+    """
+    claimed: set = set()
+    for name in dwg.registry.names():
+        claimed |= set(dwg.registry.measurement_of(name) or ())
+    for code in _WITHHOLDING_CODES:
+        ctx.drop_issues_where(
+            code,
+            lambda issue: (
+                bool(issue.measurement_ids)
+                and all(mid in claimed for mid in issue.measurement_ids)
+            ),
+        )
 
 
 def _maybe_tabulate_holes(dwg, a: Analysis, *, ctx, plan=None):
@@ -887,9 +923,16 @@ def _maybe_tabulate_holes_impl(dwg, a: Analysis, *, ctx, plan=None):
                 hole.feature, compiled_dimensions_by_feature.get(hole.feature, ())
             )
         }
+        # No `_tol_suffix` here, deliberately. A location cannot be toleranced: `location` is
+        # not among any feature's `parameters()`, so there is no key to author one against, and
+        # `_compile_locations` / `_compile_off_axis_hole_locations` assign no tolerance.
+        # Measured across the guard corpus, decorating every parameter of every feature through
+        # both key shapes: 204 compiled locations, 0 with a tolerance. The first cut of this
+        # composed the suffix here anyway — a reader with no writer, which is precisely the
+        # dead-code defect this PR filed against #1234's `depth_tol` (#1216 review r9, F3).
         approved_locations = {
             (resolve_feature(location.ref), tuple(location.span[1]), location.discriminator): (
-                f"{location.value_text}{_tol_suffix(location.tolerance, dwg.draft)}"
+                location.value_text
             )
             for location in compiled.locations
             if location.span is not None

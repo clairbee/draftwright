@@ -1364,13 +1364,37 @@ renders separately or is discarded. Only glyph counts and exported paths disting
 
 **2. The annotation is not drawn at all.** A mandatory overall extent starved out of a full
 corridor; a step rung the legibility gate discards. Both were silent: no annotation, no build
-issue, no lint, no score change. A drawing missing a dimension the author explicitly toleranced
-scored identically to one carrying it.
+issue, no lint. A drawing missing a dimension the author explicitly toleranced was
+indistinguishable, to every automated reader, from one carrying it.
 
 This amendment does **not** rule that either must be drawn — whether a feature leader may
 starve a mandatory extent, and whether a too-short rung should escalate to a detail view, are
-ADR 0014 placement questions and are open. It rules that the absence must be reported. Silence
-is not a policy, and it prevents the policy question from even being asked.
+ADR 0014 placement questions and are open (#1236). It rules that the absence must be **reported,
+and reported against the measurement it is about**. Silence is not a policy, and it prevents the
+policy question from even being asked.
+
+Three constraints keep the report from being a worse cure than the disease:
+
+- **It must not gate the build.** The first cut reported through `placement_unsatisfiable`,
+  which `builder._is_required_scale_drop` treats as a required scale drop — so an omission that
+  had existed for as long as the code did began raising `ScaleIncompatibilityError` from
+  `build_drawing(part, scale=…)` under the default policy, after rebuilding the whole ISO ladder
+  to no effect. A drawing that no longer builds is not an improvement on a drawing missing a
+  dimension. `overall_dim_withheld` and `step_dim_withheld` report without gating.
+- **It must carry the measurement.** An unattributed issue cannot be joined to what is missing,
+  so any check asking "was this absence reported" can be satisfied by an unrelated issue.
+- **It must be retracted if a later pass draws the measurement after all.** The height ladder
+  runs long before the detail view exists; reported-and-never-revisited, its withholding fired
+  on a part whose rungs were all dimensioned in the detail. `_retract_resolved_withholdings`
+  applies the rule `solve_corridor` already applies to a deduped loser.
+
+**Scope, stated because the guard's is narrower than "everything the plan approves".** The
+converse is asserted over `plan.groups` and `plan.ladders`. It is NOT asserted over
+`plan.contingencies` — Amendment 5 makes a contingency an approved alternative that is
+*deliberately* undrawn unless its primary places nothing, so "approved and unclaimed" is its
+normal state — nor over `plan.locations`, which carry no tolerance to drop (there is no
+location parameter to author one against). Both are gaps in coverage, not exemptions from the
+rule.
 
 ### Why a rule rather than more review rounds
 

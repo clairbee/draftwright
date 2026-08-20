@@ -25,10 +25,17 @@ had been looked at (#1216 review r9):
 
 1. every annotation carries one occurrence of the suffix per approved id it claims — counted,
    since a compound callout claims several and one ± satisfied a substring test for all of them;
-2. every approved measurement is claimed by SOME annotation, or its absence is reported. Two
-   were neither: a mandatory overall extent starved out of a full strip by a leader, and a step
-   rung the legibility gate discarded — each left the drawing short a dimension with the lint
-   perfectly clean.
+2. every approved measurement is claimed by SOME annotation, or its absence is reported
+   **against that measurement**. Two were neither: a mandatory overall extent starved out of a
+   full strip by a leader, and a step rung the legibility gate discarded — each left the drawing
+   short a dimension with the lint perfectly clean.
+
+Scope of (2), because it is narrower than "everything the plan approves": `plan.groups` and
+`plan.ladders`. Not `plan.contingencies`, whose whole design (ADR 0016 Amdt 5) is to be approved
+and deliberately undrawn unless the primary representation places nothing; and not
+`plan.locations`, which carry no tolerance to drop — `location` is not among any feature's
+`parameters()`, so there is no key to author one against (measured: 204 compiled locations
+across this corpus, 0 toleranced).
 """
 
 from __future__ import annotations
@@ -195,10 +202,15 @@ _PARTS = {
 #: apart from carrying it once (#1216 review r9).
 _KEY_MODES = ("role", "kind")
 
-#: Parameters whose mark deliberately states no tolerance, with the reason. A collapsed
+#: Annotations whose mark deliberately states no tolerance, with the reason. A collapsed
 #: representative is the case: `N× rise` stands for levels that merely fall within 10% of each
-#: other, so a ± would claim the author's tolerance of values that differ. (A pattern's `N× pitch`
-#: is NOT here — its gaps are identical by construction, so the ± applies to each one.)
+#: other, so a ± would claim the author's tolerance of values that differ.
+#:
+#: A pattern's `N× pitch` is NOT excluded, but not for the reason this comment used to give —
+#: "its gaps are identical by construction" is false, and shipping it is what put `3× 20 ±0.1`
+#: over a 20.3 mm gap (the recogniser admits 2% jitter). `_pitch_text` decides per pattern, at
+#: the drawn precision, and records `pattern_pitch_tolerance_withheld` when it cannot state it —
+#: so a uniform pattern renders the suffix and this sweep is right to require it.
 _DELIBERATELY_BARE = {"dim_step_typ", "m_steplen_typ"}
 
 
@@ -249,9 +261,13 @@ def _missing(text: str, approved) -> list[str]:
     claim that reads true and is not: suppressing `csink_dia_tol` in `callout_from_spec` makes
     `hc_plan0` print `⌀6 ±0.1 THRU ⌵ ⌀14 × 90°` while still claiming both the bore and the
     countersink, and `counterbored_plate-kind` PASSES on the substring predicate and FAILS on
-    this one. The isolation matters: a coarser mutation that suppressed the counterbore term as
-    well is caught by both, because the second callout then loses its only suffix — so the
-    differential exists but only for a single-term drop (#1216 review r9).
+    this one. Two honest qualifications: the isolation matters — a coarser mutation that
+    suppresses the counterbore term as well is caught by both, because the second callout then
+    loses its only suffix — and even for the isolated drop the FILE fails either way, because
+    the `-role` parametrisation tolerances the countersink alone and its label then carries no
+    suffix at all. So this predicate is strictly stronger and provably catches a case the
+    substring one does not; it is not the difference between a green suite and a red one
+    (#1216 review r9).
 
     The plan holds the tolerance, so the expected text is computable exactly rather than
     guessed — which is also the ADR 0016 Amdt 1 shape: compare to the compiler, not to a
@@ -261,18 +277,21 @@ def _missing(text: str, approved) -> list[str]:
     return [f"{n}x{sfx!r}" for sfx, n in sorted(want.items()) if text.count(sfx) < n]
 
 
-#: A build issue whose code ends any of these ways is the engine SAYING a measurement did not
-#: reach the sheet — `step_dim_dropped`, `step_dim_withheld`, `placement_unsatisfiable`,
-#: `axial_length_missing`. Matched by SUFFIX rather than by an enumerated vocabulary, for the
-#: reason `linting/quality.py` gives for the same choice: a list has to be remembered, and a
-#: new omission code should count on the day it is written rather than on the day someone
-#: notices. A code that reports an absence some other way will read as silence here — which
-#: fails safe: the guard's complaint is "nothing said anything", and the fix is to say it.
-_REPORTED_ABSENCE = ("_dropped", "_withheld", "_unsatisfiable", "_missing")
+def _absence_reported(drawing) -> set:
+    """The measurements the build SAID it did not place.
 
-
-def _absence_reported(drawing) -> list[str]:
-    return [i.code for i in drawing.registry.issues if i.code.endswith(_REPORTED_ABSENCE)]
+    Joined by `measurement_ids`, not by code. The first cut of this asked only whether the
+    build recorded any issue whose code ended `_dropped` / `_withheld` / `_unsatisfiable`,
+    which fails OPEN in the direction that matters: substituting an unrelated real code —
+    `balloon_dropped`, which the orchestrator emits on exactly the dense sheets where a
+    corridor starves — for the step-height report left `step_height.length` approved, drawn by
+    nothing, and the guard green. Its docstring claimed the suffix match "fails safe"; it does
+    not, and asserting that a specific measurement was reported is what does (#1216 review r9).
+    """
+    reported: set = set()
+    for issue in drawing.registry.issues:
+        reported |= set(getattr(issue, "measurement_ids", ()) or ())
+    return reported
 
 
 def _sweep(part_name, feature, param, mode):
@@ -316,10 +335,13 @@ def _sweep(part_name, feature, param, mode):
     # The assertion is "not silently", not "always drawn": whether a leader may starve an
     # overall extent, and whether a rung too short to dimension should escalate, are placement
     # policy (ADR 0014) and are not settled here. Reporting is not contingent on settling them.
-    unreported = []
-    if any(m not in claimed_anywhere for m in approved) and not _absence_reported(drawing):
-        missing = sorted(str(m.parameter) for m in approved if m not in claimed_anywhere)
-        unreported.append(f"{where}: {missing} approved, drawn by nothing, reported by nothing")
+    reported = _absence_reported(drawing)
+    silent = sorted(
+        str(m.parameter) for m in approved if m not in claimed_anywhere and m not in reported
+    )
+    unreported = (
+        [f"{where}: {silent} approved, drawn by nothing, reported by nothing"] if silent else []
+    )
     return dropped, unreported
 
 
@@ -534,9 +556,80 @@ def test_a_starved_overall_extent_is_reported():
         "precondition: this part now places its overall width, so the fixture no longer "
         "reaches the starved-strip path"
     )
-    reported = [i for i in drawing.lint() if i.code == "placement_unsatisfiable"]
+    reported = [i for i in drawing.lint() if i.code == "overall_dim_withheld"]
     assert any("width" in str(i.message) for i in reported), (
-        f"the overall width never reached the sheet and nothing said so: {[i.code for i in reported]}"
+        "the overall width never reached the sheet and nothing said so: "
+        f"{[(i.code, i.severity) for i in drawing.lint()]}"
     )
-    # And it names what filled the strip, which is the whole point of reporting it.
+    # It names what filled the strip, which is the whole point of reporting it,
     assert any("occupied by" in str(i.message) for i in reported)
+    # and it carries the measurement, so a guard can ask about THIS extent rather than
+    # accepting any absence-shaped code in the build (#1216 review r9).
+    assert any(getattr(i, "measurement_ids", ()) for i in reported)
+    # NOT `placement_unsatisfiable`: that code is a required scale drop, and reporting through
+    # it made `build_drawing(scale=...)` raise on parts that had always built. Asserted here so
+    # the code cannot drift back.
+    assert not [i for i in drawing.lint() if i.code == "placement_unsatisfiable"]
+    build_drawing(_starved_extent_plate(), scale=1.0, title="T", number="N")
+
+
+def _blind_plate_for_table():
+    """Blind holes, so the table's DEPTH column carries a value rather than `THRU`."""
+    part = Box(90, 60, 14)
+    for x in (-25, 25):
+        part -= Pos(x, 0, 6) * Cylinder(5, 4)
+    return part
+
+
+def test_the_hole_table_depth_column_prints_the_authored_tolerance():
+    """The DEPTH cell, which the diameter tests do not reach.
+
+    Both table tests above tolerance a bore diameter on a plate of THROUGH holes, so the depth
+    column reads `THRU` and its own `_cell` call is never exercised: reverting it to `_fmt`
+    left the full fast tier green (#1216 review r9, F3b). `HoleFeature.parameters()` emits the
+    depth role only for a blind hole — the same corpus gap that shipped `depth_tol` as a reader
+    with no writer.
+    """
+    drawing, approved = _toleranced_bore(_blind_plate_for_table, role="bore", kind="depth")
+    assert drawing.add_hole_table("plan", balloons=False) is not None
+    text = _table_text(drawing, "hole_table_plan")
+    claimed = drawing.registry.measurement_of("hole_table_plan")
+    depth_ids = [m for m in claimed if m in approved and str(m.parameter).endswith("depth")]
+    assert depth_ids, (
+        f"precondition: the table claims no bore depth, so nothing here reaches the DEPTH "
+        f"cell: {[str(m.parameter) for m in claimed]}"
+    )
+    assert "THRU" not in text, f"precondition: these holes are not blind: {text!r}"
+    owed = _missing(text, [approved[m] for m in depth_ids])
+    assert not owed, f"hole_table_plan={text!r} owes {owed}"
+
+
+def test_a_withholding_is_retracted_when_a_later_pass_draws_the_measurement():
+    """A drop is only a drop if the measurement is still absent when the run finishes.
+
+    `render_height_ladder` runs long before the detail view exists, so a rung it could not fit
+    in the front-right strip may still be dimensioned in an enlarged detail. Recorded and never
+    revisited, `step_dim_withheld` fired on `_crowded_staircase` — whose five approved rungs are
+    ALL claimed — and said they "are not dimensioned at this scale" (#1216 review r9, F5).
+
+    Both halves are asserted here: the part that recovers reports nothing, and the part that
+    does not still reports. Without the second, deleting the record entirely would pass.
+    """
+    recovered = build_drawing(_PARTS["crowded_staircase"](), title="T", number="N")
+    claimed: set = set()
+    for name in recovered.registry.names():
+        claimed |= set(recovered.registry.measurement_of(name) or ())
+    ladder = compile_dimensions(recovered.model()).ladder("step_height")
+    assert ladder is not None and ladder.rungs, "precondition: this part has no step rungs"
+    assert all(rung.id in claimed for rung in ladder.rungs), (
+        "precondition: not every rung is drawn, so a standing withholding would be CORRECT "
+        "here and this asserts nothing"
+    )
+    assert not [i for i in recovered.lint() if i.code == "step_dim_withheld"], (
+        "every approved rung is on the sheet and the build still says one was withheld"
+    )
+
+    unrecovered = build_drawing(_PARTS["blind_holes"](), title="T", number="N")
+    assert [i for i in unrecovered.lint() if i.code == "step_dim_withheld"], (
+        "the blind hole's floor is approved and drawn by nothing, and nothing said so"
+    )

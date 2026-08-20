@@ -54,6 +54,11 @@ _LEGIBILITY_CODES = frozenset(
         "label_centerline_overlap",
         "leader_crosses_silhouette",
         "leader_line_through_text",
+        # The overall extents' own placement failure. Separate from `placement_unsatisfiable`
+        # because that code is a required *scale* drop and reporting through it refused to
+        # build drawings that previously built (#1216 review r9); the sheet is equally less
+        # readable either way, so it scores the same.
+        "overall_dim_withheld",
         "placement_unsatisfiable",
         "view_annotation_inside_extents",
         "view_annotation_overlap",

@@ -3277,7 +3277,7 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
     n = 0
 
     def _queue(name, strip, view, tier, distance, build, footprint=None, measurement=None):
-        def _drop(nm, _view=view, _strip=strip):
+        def _drop(nm, _view=view, _strip=strip, _mid=measurement):
             # An overall extent is the one dimension every drawing must carry, and until
             # #1216 review r9 its drop was the only one in the engine that reported NOTHING:
             # `on_drop` was `lambda _nm: None`, so a starved strip removed the width from the
@@ -3285,19 +3285,31 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             # 80x80 plate with a hexagonal boss, where the A/F callout's leader spans the
             # whole plan-below corridor: `m_env_width` is force-kept and mandatory and still
             # solves to `strip_full`, leaving the part's width undimensioned and unremarked.
-            # The height ladder has reported its own drops this way since #736; this is the
-            # same code, not a new mechanism. Whether a leader should be allowed to starve a
-            # mandatory extent at all is a placement-policy question (ADR 0014) and is filed
-            # separately — reporting it is not contingent on deciding it.
+            # Live on three CTC fixtures; the placement fix is #1236.
+            #
+            # NOT `placement_unsatisfiable`, which is what the height ladder records and what
+            # this reported in its first cut. That code is a **required scale drop**
+            # (`builder._is_required_scale_drop`), so reporting through it did not merely make
+            # the omission visible — it made `build_drawing(part, scale=...)` raise
+            # `ScaleIncompatibilityError` on parts that had built for as long as the defect
+            # had existed, under the DEFAULT `scale_policy="fallback"`, after rebuilding the
+            # whole ISO ladder to no effect (the starving leader scales with the view). A
+            # drawing that no longer builds is worse than one that quietly lacks a dimension,
+            # and this PR's whole claim is that it reports without deciding placement. Measured
+            # on `_starved_extent_plate`: strict and fallback both raised at `error`
+            # /`placement_unsatisfiable`; neither raises here (#1216 review r9, F1).
+            #
+            # `measurement=` so the report is joined to the measurement it is about, rather
+            # than being an unattributed issue that any absence-shaped code could stand in for.
             msg = full_strip_message(
-                f"overall {'width' if nm.endswith('width') else 'depth'} dimension dropped "
+                f"overall {'width' if nm.endswith('width') else 'depth'} dimension not placed "
                 f"({_view}-view below strip full)",
                 dwg,
                 _strip,
                 _view,
                 "y",
             )
-            ctx.record_issue("error", "placement_unsatisfiable", msg)
+            ctx.record_issue("warning", "overall_dim_withheld", msg, measurement=_mid)
 
         register_corridor(
             ctx,
@@ -4088,12 +4100,19 @@ def render_height_ladder(dwg, plan, frame, *, ctx, detail_view: bool = False) ->
             # detail-view escalation (as the too-close case gets) or a compiler that never
             # approves a rung this short is a policy decision, and it is not made here.
             # Saying so is not contingent on making it.
+            short_set = set(short_z)
+            withheld = [rung for rung in rungs if rung.span[1][2] in short_set]
             ctx.record_issue(
                 "info",
                 "step_dim_withheld",
                 f"{len(short_z)} approved step height(s) span less than "
-                f"{_MIN_STEP_DIM_MM:.0f} mm on the page from the part base and are not "
+                f"{_MIN_STEP_DIM_MM:.3g} mm on the page from the ladder's datum and are not "
                 "dimensioned at this scale",
+                # Joined to the measurements it is about. Without this the report is an
+                # unattributed issue, and a guard asking "was this absence reported" can be
+                # satisfied by any other absence-shaped code in the same build — which is
+                # exactly what the first cut of that guard did (#1216 review r9, F2).
+                measurement=[rung.id for rung in withheld if rung.id is not None],
             )
         if n_close:
             # When detail recovery is enabled the enlarged view owns the omitted rungs.

@@ -1413,7 +1413,7 @@ def _add_grid_pitch_dims(
     _axis_dim(u2, l2, 1)
 
 
-def _pitch_text(pitch, members, draft, ctx=None, name=None) -> str:
+def _pitch_text(pitch, members, draft, ctx=None) -> str:
     """The collapsed pitch label, with its authored tolerance only when that is TRUE.
 
     An `N× v` label states one value for every gap in the array. A ± on it therefore claims

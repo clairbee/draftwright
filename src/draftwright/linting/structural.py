@@ -241,7 +241,6 @@ def lint_drawing(
     ann_box_cache: dict | None = None,
     view_material_fields: dict | None = None,
     view_names: list | None = None,
-    check_view_placement: bool = True,
     _aggregation: _IssueAggregation | None = None,
 ) -> list[LintIssue]:
     """Structural checks on a composed annotation list, duck-typed.
@@ -322,14 +321,6 @@ def lint_drawing(
             that order would silently bind a cache dict here — degrading the name, then
             raising ``KeyError`` once the cache was warm and its ``id()`` keys were
             indexed as a name list.
-
-        check_view_placement: whether to run the checks that compare views to EACH OTHER
-            and to the page (``view_overlap``, ``view_out_of_bounds``). They depend on no
-            annotation, so a caller that lints the same drawing in several passes — as
-            :meth:`draftwright.Drawing.lint` does, one per annotation scale group — must
-            ask for them exactly once or their findings are counted once per pass (#1204).
-            The annotation-vs-view checks always run, because each pass carries different
-            annotations.
 
     Returns:
         list[LintIssue].
@@ -472,7 +463,6 @@ def lint_drawing(
             items,
             issues,
             view_names=view_names,
-            check_view_placement=check_view_placement,
             page_bbox=page_bbox,
             edge_cache=view_edge_cache,
             box_cache=box_cache,
@@ -588,7 +578,6 @@ def _lint_view_shapes(
     issues,
     *,
     view_names=None,
-    check_view_placement=True,
     page_bbox=None,
     edge_cache=None,
     box_cache=None,
@@ -738,17 +727,15 @@ def _lint_view_shapes(
                     )
                 )
 
-    # The remaining checks compare views against EACH OTHER and against the page, so they
-    # say nothing about annotations and give the same answer however the annotations are
-    # grouped. `Drawing._lint` splits annotations by scale and calls this once per group,
-    # which emitted each of their findings once PER GROUP (#1204).
+    # The remaining checks compare views against EACH OTHER and against the page, so they say
+    # nothing about annotations and give the same answer however the annotations are grouped.
     #
-    # The annotation-vs-view checks above must still run for every group, because each group
-    # holds DIFFERENT annotations. A first cut of #1204 nulled `view_shapes` for later
-    # groups instead and lost their `view_annotation_inside_extents` findings — trading a
-    # double-count for a missed defect.
-    if not check_view_placement:
-        return
+    # #1204 suppressed them for every group after the first, because `Drawing._lint` split the
+    # annotations by scale and called this once per group, emitting each view-level finding
+    # once PER GROUP. #1216 removed the split — `_lint_dim` reads each annotation's own
+    # `_dw_scale`, so there is one call — which removes the double-count at its source and
+    # leaves nothing for the suppression to do. The `check_view_placement` parameter went with
+    # it; a flag no caller sets is a branch no test can reach (#1216 review r9, F6).
 
     # #160 — view shape vs view shape bounding box overlaps
     for i, (aname, abb, _) in enumerate(named_views):
@@ -982,7 +969,6 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
         # path length is the *scaled* length; the label carries the *real* value.
         # Divide measured by the scale factor before comparing so a 37.5 mm
         # measured segment with label "7.5" at 5:1 is accepted, not flagged.
-        # drawing_scale is guaranteed positive by lint_drawing()'s validation.
         #
         # PER ANNOTATION. An enlarged detail view (#42) tags its dims with `_dw_scale`, and the
         # caller used to pre-split the item list by that tag and call `lint_drawing` once per
@@ -996,7 +982,12 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
         # `drawing_scale` remains the sheet default for the untagged majority, and stays the
         # right value for the page-level `world_ext` check above, which is about the sheet and
         # not about any one annotation.
-        effective_measured = measured / getattr(item, "_dw_scale", drawing_scale)
+        # `drawing_scale` is validated positive by `lint_drawing`; a per-annotation `_dw_scale`
+        # is not on that path, so it is guarded here rather than assumed.
+        item_scale = getattr(item, "_dw_scale", drawing_scale)
+        if not item_scale or item_scale <= 0:
+            item_scale = drawing_scale
+        effective_measured = measured / item_scale
         if effective_measured > 1e-6:
             ratio = abs(label_val - effective_measured) / effective_measured
             if ratio > 0.005:
@@ -1006,9 +997,14 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
                         message=(
                             f"Dim '{label}': label value {label_val:.3f} differs from "
                             f"measured path length {measured:.3f}"
+                            # The divisor that was ACTUALLY used, and shown whenever one was
+                            # applied. Printing the sheet scale here said `÷5.0 = 15.000` for a
+                            # 45 mm measurement divided by an item scale of 3.0, and omitted
+                            # the clause entirely on a 1:1 sheet — so the percentage could not
+                            # be derived from any number in the message (#1216 review r9, F4).
                             + (
-                                f" (÷{drawing_scale} = {effective_measured:.3f})"
-                                if drawing_scale != 1.0
+                                f" (÷{item_scale} = {effective_measured:.3f})"
+                                if item_scale != 1.0
                                 else ""
                             )
                             + f" by {ratio * 100:.1f}% "
