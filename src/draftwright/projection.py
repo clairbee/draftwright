@@ -358,7 +358,33 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     )
 
 
-def _fit_iso_view(dwg, a: Analysis):
+def _iso_grow_cap(bb, cx, cy, obstacles) -> float:
+    """The largest scale factor about ``(cx, cy)`` at which *bb* still avoids every obstacle.
+
+    Pure interval arithmetic, no occupancy knowledge — the obstacle boxes are the CALLER's
+    statement of what is already on the sheet, because this module sits below the occupancy
+    model and every hand-rolled obstacle set it has owned was wrong (#1197). Scaling about the
+    centre is monotone per axis, so overlap with a box begins at ``max(fx, fy)`` — the factor
+    at which BOTH axes first overlap — and the admissible cap is the minimum of that over the
+    obstacles. A box already straddling the centre on both axes returns 0.0 (no growth);
+    no obstacles returns ``inf`` (#1240).
+    """
+
+    def _onset(lo, hi, c, olo, ohi) -> float:
+        # The factor at which [c + f*(lo-c), c + f*(hi-c)] begins to overlap [olo, ohi].
+        if ohi <= c:
+            return (c - ohi) / (c - lo) if lo < c else math.inf
+        if olo >= c:
+            return (olo - c) / (hi - c) if hi > c else math.inf
+        return 0.0  # the obstacle straddles the centre on this axis
+
+    cap = math.inf
+    for ox0, oy0, ox1, oy1 in obstacles:
+        cap = min(cap, max(_onset(bb[0], bb[2], cx, ox0, ox1), _onset(bb[1], bb[3], cy, oy0, oy1)))
+    return cap
+
+
+def _fit_iso_view(dwg, a: Analysis, obstacles=()):
     """Scale the iso view to fill its page zone; return its bbox when the result is
     NOT to sheet scale and therefore needs an NTS caption, else ``None``.
 
@@ -415,15 +441,28 @@ def _fit_iso_view(dwg, a: Analysis):
         # already-fitting orientation view at its current scale.
         return
     if needed >= 1.0:
-        # Iso fits; grow to 90 % of zone — leaves comfortable breathing room.
-        margin_pct = 0.90
-    else:
-        # Iso overflows; shrink to just fit with 2 % safety margin.
-        margin_pct = 0.98
-    factor = math.floor(needed * margin_pct * 10000) / 10000
-    if needed >= 1.0:
+        # Iso fits; grow to 90 % of zone — leaves comfortable breathing room — capped by the
+        # caller's obstacle boxes (#1240): the zone is the largest view-free rectangle, and
+        # annotations are free to live in it — the above strips run into it — so growing to
+        # the zone edge could grow ONTO a placed annotation, invisibly to both sides
+        # (annotations avoid the iso at its pre-fit size; the fit never saw annotations).
+        #
+        # The two margins guard DIFFERENT edges and must not compound: 0.90 is breathing room
+        # from the zone boundary, 0.98 (the shrink branch's own figure) is clearance off an
+        # obstacle's edge. The first cut multiplied the obstacle cap by both — an effective
+        # 0.88 — which turned any obstacle in the middle of the growth corridor into a veto:
+        # the capped factor fell under the 5 % no-op threshold and the iso stayed at sheet
+        # scale instead of growing up to the box.
+        grow = needed * 0.90
+        cap = _iso_grow_cap(bb, a.ISO_X, a.ISO_Y, obstacles)
+        if cap < math.inf:
+            grow = min(grow, cap * 0.98)
+        factor = math.floor(grow * 10000) / 10000
         factor = max(factor, 1.0)  # grow branch must never shrink
         factor = min(factor, _ISO_MAX_GROW)  # never dwarf the dimensioned views
+    else:
+        # Iso overflows; shrink to just fit with 2 % safety margin.
+        factor = math.floor(needed * 0.98 * 10000) / 10000
     if abs(factor - 1.0) < 0.05:
         return  # within 5 % of sheet scale — no rescale, no NTS label
     _project_iso(dwg, a, a.SCALE * factor)

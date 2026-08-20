@@ -43,7 +43,7 @@ from draftwright._core import (
 )
 from draftwright._warnings import ScaleCompletenessWarning
 from draftwright.analysis import Analysis, _analyse
-from draftwright.annotations._common import SolveTrace, place_iso_nts_note
+from draftwright.annotations._common import SolveTrace, place_iso_nts_note, strip_obstacles
 from draftwright.annotations.gears import render_gear_tables
 from draftwright.annotations.orchestrator import (
     _auto_annotate,
@@ -460,11 +460,16 @@ def _assemble(
         _fv_ol = a.fv_zones.right.outer_limit
         _pv_ol = a.pv_zones.right.outer_limit
         _sv_ol = a.sv_zones.right.outer_limit
+        _pv_a_ol = a.pv_zones.above.outer_limit
+        _sv_a_ol = a.sv_zones.above.outer_limit
         # The orchestrator RETURNS the omission ledger rather than writing a drawing private,
         # so `annotations/` stays off the state bus (#639/#830). Filled at the single site
         # below, not here — see there (#996 / ADR 0005 §2).
         _diagnostics = _auto_annotate(dwg, a, detail_view=detail_view)
-        _nts_bb = _fit_iso_view(dwg, a)
+        # The placed annotations are the fit's obstacles (#1240): the grow branch may not
+        # invade ink that placed legally against the pre-fit iso. Computed HERE because the
+        # fit sits below the occupancy model and must not own an obstacle set (#1197).
+        _nts_bb = _fit_iso_view(dwg, a, obstacles=strip_obstacles(dwg))
         _ix0, _iy0, _, _iy1 = _iso_bbox(dwg)
         _final_iso_x_lim = _ix0 - 4
         a.fv_zones.right.outer_limit = min(_fv_ol, _final_iso_x_lim)
@@ -475,12 +480,28 @@ def _assemble(
             a.sv_zones.right.outer_limit = min(_sv_ol, _final_iso_x_lim)
         else:
             a.sv_zones.right.outer_limit = _sv_ol
+        # Mirror for the ABOVE strips (#1240): restore, then re-cap below the FINAL iso only
+        # where the fitted iso horizontally overlaps that view — the transposition of the
+        # right-strip re-cap above, for the same customer (deferred edits place through these
+        # strips after the build).
+        _ix1 = _iso_bbox(dwg)[2]
+        _iso_y_lim = _iy0 - 4
+        for _strip, _ol, _x0, _x1 in (
+            (a.pv_zones.above, _pv_a_ol, a.PV_X - a.fv_hw, a.PV_X + a.fv_hw),
+            (a.sv_zones.above, _sv_a_ol, a.SV_X - a.sv_hw, a.SV_X + a.sv_hw),
+        ):
+            # Same anchor guard as the initial clamp: an iso x-overlapping the view from
+            # BELOW must not push the limit beneath the anchor and kill the strip.
+            if _x0 < _ix1 and _ix0 < _x1 and _iso_y_lim > _strip.anchor:
+                _strip.outer_limit = min(_ol, _iso_y_lim)
+            else:
+                _strip.outer_limit = _ol
     else:
         # Fit + label the iso as the auto path does (annotate defaults True): the NTS
         # note is sheet furniture — like the title block below — that states the iso is
         # not to scale. Suppressing it here silently diverged the emitted-script drawing
         # (auto_dims=False) from the direct CLI, which always labels it (script↔CLI parity).
-        _nts_bb = _fit_iso_view(dwg, a)
+        _nts_bb = _fit_iso_view(dwg, a, obstacles=strip_obstacles(dwg))
         _add_title_block(dwg, a)
         if a.frame:  # sheet border (#767) — auto path adds it via the orchestrator
             _add_sheet_frame(dwg, a)

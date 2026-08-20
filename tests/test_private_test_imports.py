@@ -42,6 +42,12 @@ _ALLOW: frozenset[tuple[str, str]] = frozenset(
         # (#733): the sequence pin test exists precisely to guard it, so its white-box
         # read is the point, not a coupling smell.
         ("orchestrator", "_PASS_SEQUENCE"),
+        # #1240: the iso/above-strip clamp has NO natural fixture — compose plus page/scale
+        # selection keeps the iso x-separated from populated above strips on every real
+        # layout tried (two independent sweeps) — so the guard test plants a fake iso bbox
+        # by patching the orchestrator's binding. White-box by necessity, documented in
+        # tests/test_issue_1240_iso_above_strip_visibility.py's module docstring.
+        ("orchestrator", "_iso_bbox"),
         # Pure label/format helpers — legitimate unit tests (formatting logic, not coupling).
         ("from_model", "_chamfer_label"),
         ("from_model", "_fillet_label"),
