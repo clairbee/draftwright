@@ -983,7 +983,20 @@ def _lint_dim(item, part_bbox, issues, drawing_scale: float = 1.0, box_cache=Non
         # Divide measured by the scale factor before comparing so a 37.5 mm
         # measured segment with label "7.5" at 5:1 is accepted, not flagged.
         # drawing_scale is guaranteed positive by lint_drawing()'s validation.
-        effective_measured = measured / drawing_scale
+        #
+        # PER ANNOTATION. An enlarged detail view (#42) tags its dims with `_dw_scale`, and the
+        # caller used to pre-split the item list by that tag and call `lint_drawing` once per
+        # group so this comparison saw the right scale. That split is what made the PAIRWISE
+        # checks blind across groups: two annotations in different groups were never compared,
+        # and a detail view's dims and its own caption are ALWAYS in different groups while
+        # being spatially adjacent by construction — the pair most likely to collide was the
+        # one pair never checked (#1216).
+        #
+        # Reading the tag here instead lets `lint_drawing` run once over every annotation.
+        # `drawing_scale` remains the sheet default for the untagged majority, and stays the
+        # right value for the page-level `world_ext` check above, which is about the sheet and
+        # not about any one annotation.
+        effective_measured = measured / getattr(item, "_dw_scale", drawing_scale)
         if effective_measured > 1e-6:
             ratio = abs(label_val - effective_measured) / effective_measured
             if ratio > 0.005:

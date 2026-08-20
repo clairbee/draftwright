@@ -3045,62 +3045,34 @@ class Drawing:
         live = {id(i) for i in self.items} | {id(v) for v in view_shapes}
         for stale in [k for k in self._ann_box_cache if k not in live]:
             del self._ann_box_cache[stale]
-        # Most annotations are at sheet scale, but a non-sheet-scale view (the
-        # enlarged detail view, #42) tags its dims with `_dw_scale`. Lint each
-        # scale group with its own drawing_scale so label-vs-measured is correct
-        # per view. The common single-scale case is byte-identical to before.
-        by_scale: dict = {}
-        for ann in self.items:
-            by_scale.setdefault(getattr(ann, "_dw_scale", self.scale), []).append(ann)
-        if len(by_scale) <= 1:
-            issues = lint_drawing(
-                self.items,
-                page_bbox=page_bbox,
-                drawing_scale=self.scale,
-                view_shapes=view_shapes,
-                view_names=view_names,
-                view_edge_cache=self._view_edge_cache,
-                ann_box_cache=self._ann_box_cache,
-                view_material_fields=self.material_fields(),
-                _aggregation=aggregation,
-            )
-        else:
-            # The scale split exists so `label_vs_measured` compares each annotation
-            # against ITS OWN scale — an enlarged detail view (#42) carries `_dw_scale`.
-            # `view_overlap` and `view_out_of_bounds` compare views to EACH OTHER and to
-            # the page, so they do not depend on the annotations at all and passing the
-            # views to every group emitted their findings once PER GROUP — 1 -> 2 purely
-            # from tagging one annotation with a second scale (#1204). (Measured on
-            # `Box(50,50,50)` at A1, which reproduces on macOS and NOT on Linux, where that
-            # drawing emits no view findings at all; the tests use a fixture that forces
-            # them rather than relying on a layout.)
-            #
-            # That made `lint_summary()["by_code"]`, the error/warning counts and the
-            # quality score a function of how annotations happen to be GROUPED rather than
-            # of the drawing — the same class of defect as #1196, where lint text depended
-            # on memory addresses.
-            #
-            # So only the view-vs-view and view-vs-page checks are restricted to the
-            # first group; the annotation-vs-view ones still run for every group, because
-            # each group holds DIFFERENT annotations. A first cut nulled `view_shapes` for
-            # later groups instead and lost their `view_annotation_inside_extents`
-            # findings — 2 became 1 on the same fixture, trading a double-count for a
-            # missed defect.
-            issues = []
-            for index, (_scale, _anns) in enumerate(by_scale.items()):
-                first = index == 0
-                issues += lint_drawing(
-                    _anns,
-                    page_bbox=page_bbox,
-                    drawing_scale=_scale,
-                    view_shapes=view_shapes,
-                    view_names=view_names,
-                    check_view_placement=first,
-                    view_edge_cache=self._view_edge_cache,
-                    ann_box_cache=self._ann_box_cache,
-                    view_material_fields=self.material_fields(),
-                    _aggregation=aggregation,
-                )
+        # ONE call over every annotation. Most annotations are at sheet scale; a non-sheet-scale
+        # view (the enlarged detail view, #42) tags its dims with `_dw_scale`, and
+        # `_lint_dim` reads that tag per item so `label_vs_measured` still compares each
+        # annotation against ITS OWN scale.
+        #
+        # This used to pre-split the items by scale and call `lint_drawing` once per group. The
+        # split made the PAIRWISE checks — `annotation_overlap`, `label_centerline_overlap`,
+        # `leader_line_through_text` — blind across groups, because each call only ever saw one
+        # group's items. A detail view's dimensions and its own caption are always in different
+        # groups AND spatially adjacent by construction, so the pair most likely to collide was
+        # the one pair never compared (#1216).
+        #
+        # Collapsing it also retires #1204's first-group restriction: `view_overlap` and
+        # `view_out_of_bounds` compare views to each other and to the page, so passing the views
+        # to every group emitted their findings once PER GROUP and made `by_code`, the
+        # error/warning counts and the quality score a function of how annotations happened to be
+        # grouped. With a single call there are no groups to double-count.
+        issues = lint_drawing(
+            self.items,
+            page_bbox=page_bbox,
+            drawing_scale=self.scale,
+            view_shapes=view_shapes,
+            view_names=view_names,
+            view_edge_cache=self._view_edge_cache,
+            ann_box_cache=self._ann_box_cache,
+            view_material_fields=self.material_fields(),
+            _aggregation=aggregation,
+        )
         if self.part is not None and physical:
             # Reuse the single feature inventory from the build (#244) when present,
             # so lint does not re-detect holes/patterns/turned-steps; fall back to
