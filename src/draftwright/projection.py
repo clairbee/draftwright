@@ -34,6 +34,7 @@ from draftwright._core import (
 )
 from draftwright._geometry import (
     MaterialField,
+    _boxes_overlap,
     material_field,
 )
 
@@ -358,30 +359,55 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     )
 
 
-def _iso_grow_cap(bb, cx, cy, obstacles) -> float:
-    """The largest scale factor about ``(cx, cy)`` at which *bb* still avoids every obstacle.
+#: Bisection steps for :func:`_largest_clear_factor`. Each step is one re-projection plus a
+#: bbox read — measured at 0.3-0.5 ms on the parts in this suite — so eight steps resolve the
+#: factor to ~0.4 % of the growth corridor for a few milliseconds on the one path that grows.
+_ISO_CLEAR_STEPS = 8
 
-    Pure interval arithmetic, no occupancy knowledge — the obstacle boxes are the CALLER's
-    statement of what is already on the sheet, because this module sits below the occupancy
-    model and every hand-rolled obstacle set it has owned was wrong (#1197). Scaling about the
-    centre is monotone per axis, so overlap with a box begins at ``max(fx, fy)`` — the factor
-    at which BOTH axes first overlap — and the admissible cap is the minimum of that over the
-    obstacles. A box already straddling the centre on both axes returns 0.0 (no growth);
-    no obstacles returns ``inf`` (#1240).
+
+def _largest_clear_factor(dwg, a, hi, obstacles) -> float:
+    """The largest factor in ``[1, hi]`` whose RE-PROJECTED iso clears every obstacle.
+
+    **Measured, not predicted** — ADR 0014 Amendment 3, and this function is the second time
+    that amendment has been learned the hard way. Its first version computed the answer from a
+    linear model: re-projection at factor *f* maps each bbox edge *e* to ``c + f*(e-c)`` about
+    the page centre. That is false. `_project_iso` scales the part about the WORLD ORIGIN, so a
+    solid carrying a non-identity Location — every authored `build123d` part, since the
+    primitives are centred by construction — has its projected bbox TRANSLATE as it scales:
+
+        Cylinder(20, 60) at f=1.3, y edges predicted [86.15, 179.85], measured [93.49, 187.20]
+
+    a 7.3 mm drift against a 0.98 clearance margin worth 0.75 mm. The prediction's "capped"
+    iso grew straight through the obstacle it was capped by, worst exactly where growth is
+    largest. STEP-imported solids arrive with identity Location and ARE linear, which is why
+    all ten CTC fixtures agreed with the model and the defect survived two hunts (#1240 review
+    F1).
+
+    Bisection on the real projection has no model to be wrong about. The drawing is left
+    projected at an arbitrary probe scale; the caller re-projects at the returned factor.
     """
+    if not obstacles or hi <= 1.0:
+        return float(hi)
 
-    def _onset(lo, hi, c, olo, ohi) -> float:
-        # The factor at which [c + f*(lo-c), c + f*(hi-c)] begins to overlap [olo, ohi].
-        if ohi <= c:
-            return (c - ohi) / (c - lo) if lo < c else math.inf
-        if olo >= c:
-            return (olo - c) / (hi - c) if hi > c else math.inf
-        return 0.0  # the obstacle straddles the centre on this axis
+    def clear(factor) -> bool:
+        _project_iso(dwg, a, a.SCALE * factor)
+        box = _iso_bbox(dwg)
+        return not any(_boxes_overlap(box, obstacle) for obstacle in obstacles)
 
-    cap = math.inf
-    for ox0, oy0, ox1, oy1 in obstacles:
-        cap = min(cap, max(_onset(bb[0], bb[2], cx, ox0, ox1), _onset(bb[1], bb[3], cy, oy0, oy1)))
-    return cap
+    if clear(hi):
+        return float(hi)
+    if not clear(1.0):
+        # Already overlapping at sheet scale: growth is not what put it there and shrinking is
+        # not this branch's job. Report no growth and leave the conflict to lint.
+        return 1.0
+    lo = 1.0
+    for _ in range(_ISO_CLEAR_STEPS):
+        mid = (lo + hi) / 2
+        if clear(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
 
 
 def _fit_iso_view(dwg, a: Analysis, obstacles=()):
@@ -453,15 +479,23 @@ def _fit_iso_view(dwg, a: Analysis, obstacles=()):
         # 0.88 — which turned any obstacle in the middle of the growth corridor into a veto:
         # the capped factor fell under the 5 % no-op threshold and the iso stayed at sheet
         # scale instead of growing up to the box.
-        grow = needed * 0.90
-        cap = _iso_grow_cap(bb, a.ISO_X, a.ISO_Y, obstacles)
-        if cap < math.inf:
-            grow = min(grow, cap * 0.98)
-        factor = math.floor(grow * 10000) / 10000
+        factor = math.floor(needed * 0.90 * 10000) / 10000
         factor = max(factor, 1.0)  # grow branch must never shrink
         factor = min(factor, _ISO_MAX_GROW)  # never dwarf the dimensioned views
+        if obstacles and factor > 1.0:
+            factor = _largest_clear_factor(dwg, a, factor, obstacles)
+            _project_iso(dwg, a, a.SCALE)  # undo the probes; the tail re-projects if it grows
+            factor = math.floor(factor * 10000) / 10000
     else:
         # Iso overflows; shrink to just fit with 2 % safety margin.
+        #
+        # NOT obstacle-checked, and deliberately not justified by "shrinking about the centre
+        # cannot create an overlap absent at 1.0" — the first version of this said that, and it
+        # rests on the same false linear model `_largest_clear_factor` exists to replace: the
+        # shrink translates too (a tall cylinder's bbox measured 3.5 mm below prediction at
+        # f=0.905). The real reason is that this branch has no choice: the iso OVERFLOWS its
+        # page region, so it must shrink whatever else is nearby, and a resulting collision is
+        # reported by `view_annotation_overlap` rather than prevented here (#1240 review F3).
         factor = math.floor(needed * 0.98 * 10000) / 10000
     if abs(factor - 1.0) < 0.05:
         return  # within 5 % of sheet scale — no rescale, no NTS label

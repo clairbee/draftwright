@@ -460,8 +460,6 @@ def _assemble(
         _fv_ol = a.fv_zones.right.outer_limit
         _pv_ol = a.pv_zones.right.outer_limit
         _sv_ol = a.sv_zones.right.outer_limit
-        _pv_a_ol = a.pv_zones.above.outer_limit
-        _sv_a_ol = a.sv_zones.above.outer_limit
         # The orchestrator RETURNS the omission ledger rather than writing a drawing private,
         # so `annotations/` stays off the state bus (#639/#830). Filled at the single site
         # below, not here — see there (#996 / ADR 0005 §2).
@@ -486,16 +484,19 @@ def _assemble(
         # strips after the build).
         _ix1 = _iso_bbox(dwg)[2]
         _iso_y_lim = _iy0 - 4
-        for _strip, _ol, _x0, _x1 in (
-            (a.pv_zones.above, _pv_a_ol, a.PV_X - a.fv_hw, a.PV_X + a.fv_hw),
-            (a.sv_zones.above, _sv_a_ol, a.SV_X - a.sv_hw, a.SV_X + a.sv_hw),
+        for _strip, _x0, _x1 in (
+            (a.pv_zones.above, a.PV_X - a.fv_hw, a.PV_X + a.fv_hw),
+            (a.sv_zones.above, a.SV_X - a.sv_hw, a.SV_X + a.sv_hw),
         ):
-            # Same anchor guard as the initial clamp: an iso x-overlapping the view from
-            # BELOW must not push the limit beneath the anchor and kill the strip.
+            # TIGHTEN ONLY — no restore-from-snapshot, unlike the right strips above. Their
+            # snapshot exists to give back space `_auto_annotate` took against a transient,
+            # possibly-overflowing iso; the above strips have no such pre-existing
+            # over-tightening to undo, and restoring would DISCARD the `m_locy` approach-buffer
+            # clamp (`from_model`), which is a different constraint that must survive
+            # (#1240 review F4). Same anchor guard as the initial clamp: an iso x-overlapping
+            # the view from BELOW must not push the limit beneath the anchor and kill the strip.
             if _x0 < _ix1 and _ix0 < _x1 and _iso_y_lim > _strip.anchor:
-                _strip.outer_limit = min(_ol, _iso_y_lim)
-            else:
-                _strip.outer_limit = _ol
+                _strip.outer_limit = min(_strip.outer_limit, _iso_y_lim)
     else:
         # Fit + label the iso as the auto path does (annotate defaults True): the NTS
         # note is sheet furniture — like the title block below — that states the iso is

@@ -18,17 +18,41 @@ apart from a sweep that tests nothing.
 
 from __future__ import annotations
 
-import math
-
+import pytest
 from build123d import Box, Cylinder, Pos
 
 from draftwright._core import _iso_bbox
 from draftwright.builder import build_drawing
-from draftwright.projection import _iso_grow_cap
+from draftwright.projection import _largest_clear_factor
 
 
 def _overlap(a, b) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _built_with_analysis(part, **kwargs):
+    """A built drawing and its `Analysis`, captured at the fit seam.
+
+    NOT `drawing._analysis`: `test_private_test_attr_reads` ratchets test-side reads of
+    `Drawing` privates strictly downward, and adding three would have grown the ceiling.
+    `_fit_iso_view` is handed the Analysis by the builder anyway, so a spy there gets the same
+    object without reaching through the drawing.
+    """
+    from draftwright import builder as builder_mod
+
+    captured: dict = {}
+    real = builder_mod._fit_iso_view
+
+    def spy(dwg, analysis, obstacles=()):
+        captured["analysis"] = analysis
+        return real(dwg, analysis, obstacles=obstacles)
+
+    builder_mod._fit_iso_view = spy
+    try:
+        drawing = build_drawing(part, **kwargs)
+    finally:
+        builder_mod._fit_iso_view = real
+    return drawing, captured["analysis"]
 
 
 def _plate_with_locations():
@@ -39,25 +63,60 @@ def _plate_with_locations():
     return part
 
 
-def test_the_grow_cap_geometry():
-    """`_iso_grow_cap` — pure interval arithmetic, hand-checked.
+def test_the_clear_factor_search_measures_the_real_projection(monkeypatch):
+    """`_largest_clear_factor` must not believe a linear model of re-projection.
 
-    bb (90,90)-(110,110) about centre (100,100): each edge is 10 from the centre.
+    Its first version predicted the grown bbox as a scale about the page centre. `_project_iso`
+    scales the part about the WORLD ORIGIN, so a solid with a non-identity Location — every
+    authored `build123d` primitive — translates as it grows, and the prediction is wrong by
+    millimetres exactly where growth is largest (#1240 review F1):
+
+        Cylinder(20, 60) at f=1.3 — predicted y [86.15, 179.85], measured [93.49, 187.20]
+
+    So this asserts the property a model cannot give: at the returned factor, the ACTUAL
+    re-projected bbox clears the obstacle — checked here on the drifting part, with the
+    drift itself asserted so the test fails if the fixture stops exercising it.
     """
-    bb = (90.0, 90.0, 110.0, 110.0)
-    # No obstacles: unbounded.
-    assert _iso_grow_cap(bb, 100, 100, []) == math.inf
-    # A box whose left edge is 30 right of centre: x-onset at f=3; y straddles → onset 0.
-    assert _iso_grow_cap(bb, 100, 100, [(130, 90, 140, 110)]) == 3.0
-    # Same box, but y-separated too (above by 20 → y-onset f=2): overlap needs BOTH, so the
-    # cap is max(3, 2) = 3 — the later axis governs.
-    assert _iso_grow_cap(bb, 100, 100, [(130, 120, 140, 130)]) == 3.0
-    # A box straddling the centre on both axes: no growth at all.
-    assert _iso_grow_cap(bb, 100, 100, [(95, 95, 105, 105)]) == 0.0
-    # Below the centre: y-onset (100-80)/(100-90) = 2; x straddles → cap 2.
-    assert _iso_grow_cap(bb, 100, 100, [(90, 70, 110, 80)]) == 2.0
-    # Several obstacles: the nearest governs.
-    assert _iso_grow_cap(bb, 100, 100, [(130, 90, 140, 110), (90, 70, 110, 80)]) == 2.0
+    from draftwright._core import _iso_bbox as core_iso_bbox
+    from draftwright.projection import _project_iso
+
+    drawing, analysis = _built_with_analysis(Cylinder(20, 60), title="T", number="N")
+    _project_iso(drawing, analysis, analysis.SCALE)
+    base = core_iso_bbox(drawing)
+    centre_y = (base[1] + base[3]) / 2
+
+    # The precondition: this part really does drift off the linear model.
+    _project_iso(drawing, analysis, analysis.SCALE * 1.3)
+    grown = core_iso_bbox(drawing)
+    predicted_top = centre_y + 1.3 * (base[3] - centre_y)
+    assert abs(grown[3] - predicted_top) > 1.0, (
+        f"the fixture stopped drifting (measured top {grown[3]:.2f} vs predicted "
+        f"{predicted_top:.2f}) — a linear cap would now be correct and this asserts nothing"
+    )
+
+    # An obstacle in the growth corridor, placed against the MEASURED trajectory.
+    obstacle = (base[0], grown[3] - 6.0, base[2], grown[3] - 2.0)
+    factor = _largest_clear_factor(drawing, analysis, 1.3, [obstacle])
+    assert 1.0 < factor < 1.3, f"expected a bounded factor, got {factor}"
+
+    _project_iso(drawing, analysis, analysis.SCALE * factor)
+    actual = core_iso_bbox(drawing)
+    assert not _overlap(actual, obstacle), (
+        f"at the returned factor {factor:.4f} the REAL bbox {actual} still hits {obstacle}"
+    )
+    # And a linear cap would have overshot — the defect this replaces, stated as a number.
+    linear = centre_y + factor * (base[3] - centre_y)
+    assert actual[3] > linear, (
+        f"no drift at the chosen factor ({actual[3]:.2f} vs linear {linear:.2f}), so this "
+        "test no longer distinguishes measurement from prediction"
+    )
+
+
+def test_the_clear_factor_search_degenerate_inputs():
+    """No obstacles and a non-growing ceiling are returned untouched, without projecting."""
+    drawing, analysis = _built_with_analysis(Box(40, 30, 8), title="T", number="N")
+    assert _largest_clear_factor(drawing, analysis, 1.3, []) == 1.3
+    assert _largest_clear_factor(drawing, analysis, 1.0, [(0.0, 0.0, 1e4, 1e4)]) == 1.0
 
 
 def test_iso_growth_is_capped_by_a_planted_annotation_box(monkeypatch):
@@ -184,4 +243,76 @@ def test_the_above_strip_is_clamped_below_an_overlapping_iso(monkeypatch):
     assert boxes_in(clamped, band), (
         "nothing placed in the above strip at all — the clamp killed the strip rather than "
         "bounding it, or the fixture stopped using it"
+    )
+
+
+@pytest.mark.slow  # CTC fixture build (#153)
+def test_the_iso_no_longer_grows_over_ctc_01s_pocket_position_dim():
+    """The one NATURAL case in the corpus, found only by the #1240 review.
+
+    Both hunts for a reproducing fixture reported none, and the PR said so — but they searched
+    for *strip* collisions and this is the other direction: on `main`, CTC-01 AP203's iso grows
+    over `m_pocket0_pos_long`'s witness lines. It escaped every sweep because
+    `view_annotation_overlap` compares projected EDGES, not bboxes, so the drawing linted clean
+    while the boxes genuinely overlapped (#1240 review F2).
+
+    Asserted against the whole fixture rather than that one name: any annotation ink inside the
+    final iso bbox is the defect, whichever annotation it belongs to.
+    """
+    from draftwright._geometry import _boxes_overlap
+    from draftwright.annotations._common import annotation_obstacle_boxes
+
+    drawing = build_drawing("tests/fixtures/nist_ctc_01_asme1_ap203.stp")
+    assert "iso" in drawing.views, "precondition: the fixture has no iso view"
+    iso = _iso_bbox(drawing)
+    intruders = sorted(
+        {
+            name
+            for name, obj in drawing.iter_annotations()
+            if not getattr(obj, "is_sheet_frame", False)
+            and not getattr(obj, "is_zone_grid", False)
+            for box in annotation_obstacle_boxes(drawing, obj)
+            if _boxes_overlap(box, iso)
+        }
+    )
+    assert not intruders, f"the iso grew over placed annotation ink: {intruders}"
+
+
+def test_the_post_fit_recap_only_ever_tightens(monkeypatch):
+    """The builder's re-cap must not hand back space another pass took.
+
+    It mirrors the right-strip re-cap, which restores from a pre-`_auto_annotate` snapshot to
+    give back space taken against a transient iso. Transposed literally, that would DISCARD the
+    `m_locy` approach-buffer clamp, which is a different constraint (#1240 review F4). The
+    above-strip re-cap therefore tightens only.
+
+    The re-cap branch is guarded on the iso x-overlapping the view, which no natural layout
+    does — the first version of this test asserted tightening on a fixture where the branch
+    never ran, and a mutation replacing `min(current, limit)` with `limit` PASSED. The iso bbox
+    is planted at the builder's own binding so the branch executes.
+    """
+    from draftwright import builder as builder_mod
+
+    part = _plate_with_locations()
+    baseline = build_drawing(part, title="T", number="N")
+    pv = baseline.view_bounds("plan")
+    # An iso spanning the plan's x-range, well above it: the re-cap branch's guards both pass.
+    fake = (pv[0] + 5, pv[3] + 40, pv[2] - 5, pv[3] + 90)
+    planted = pv[3] + 20.0  # tighter than the fake iso's limit (fake[1] - 4)
+    assert planted < fake[1] - 4, "precondition: the planted limit is not the tighter one"
+
+    monkeypatch.setattr(builder_mod, "_iso_bbox", lambda dwg: fake)
+    real_annotate = builder_mod._auto_annotate
+
+    def clamp_after(dwg, a, **kwargs):
+        result = real_annotate(dwg, a, **kwargs)
+        a.pv_zones.above.outer_limit = min(a.pv_zones.above.outer_limit, planted)
+        return result
+
+    monkeypatch.setattr(builder_mod, "_auto_annotate", clamp_after)
+    _drawing, analysis = _built_with_analysis(part, title="T", number="N")
+    final = analysis.pv_zones.above.outer_limit
+    assert final <= planted, (
+        f"the re-cap loosened a limit set during annotation: {final} > {planted} — it is "
+        "restoring from the snapshot instead of tightening"
     )
