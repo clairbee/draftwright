@@ -17,29 +17,44 @@ that reorders floating-point sums shifts a value ~1 ULP with no real placement c
 byte digest false-fails on; 0.1 mm catches the ~mm drift a wrong projector/sign/order causes
 while surviving that noise.
 
-Originally a throwaway gate for #638 + #639; retained as the deviation gate for the #602
-performance work — perf refactors (placement-footprint separation, caching) are exactly the
-behaviour-preserving class this corpus polices, so it stays until that epic concludes.  #740
-intentionally changed only the groove/pocket Leader bboxes to the shorter choices made by the
-within-pass maximum-cardinality/minimum-length assignment; those two explicit re-baselines
-retain the same annotations and build-issue sets.
+## What this corpus asserts, and why it changed (#1130)
 
-#1130 re-baselined `chamfered`, `filleted` and `prismatic_ladder` for the same reason: ADR
-0018 §5 makes the sheet ARRANGEMENT part of the layout choice, and these three now compose
-under `stacked-iso` — the isometric sharing the title block's column — which fits them on A4
-at the SAME scale instead of A3. Checked against the standard this corpus polices: all three
-retain the identical annotation set, the identical labels and the identical build-issue set,
-and lint clean on the smaller sheet. Only the page and the coordinates move. A part that
-would have lost anything on the smaller sheet is rejected by the requirement gate before it
-gets here (`test_adr0018_arrangement_gate`), which is why `centered_rebate` and
-`scattered_plate` are untouched below.
+It was a byte-exact deviation gate: `signature == recorded signature`, failing with "this is
+a real regression, NOT to be re-blessed away". It said, in its own header, that it was
+retained "until that epic concludes" — naming #602, #638 and #639. All three closed
+2026-07-17, and #740 on 2026-08-15. The condition expired and the gate was carried on
+unexamined into ADR 0018, whose entire purpose is to change the coordinates it pinned.
 
-Re-bless intentionally (there should be NO unaccounted change during these refactors):
+That is the wrong instrument pointed the wrong way. A standing byte-exact assertion on a
+layout the engine is being taught to IMPROVE fails every improvement — each arriving framed
+as a regression needing a defence — and passes everything that improves nothing. It biases
+the work toward changes that change nothing, which is measurably what happened.
+
+So the standing contract is now what this corpus was always really for — what a drawing must
+not LOSE (see `_regressions`):
+
+- no annotation vanishes, and a retained one keeps its label (ADR 0016 Amdt 6);
+- no build issue gets worse;
+- the sheet never grows — a ratchet against the baseline, so footprint may shrink freely and
+  may never creep back.
+
+A smaller sheet that loses nothing now PASSES, silently and correctly. A lost dimension, a
+new drop, or a bigger sheet still fails. That is the regression class that matters: it is
+what caught `centered_rebate` and `scattered_plate` losing dimensions when the ADR 0018
+arrangement gate was being built.
+
+Byte-exact is not gone, it is opt-in — run it deliberately for a change that CLAIMS to alter
+nothing, which is exactly the refactor case the gate was created for:
+
+    DRAFTWRIGHT_GOLDEN_EXACT=1 uv run pytest tests/test_refactor_golden.py
+
+Re-bless the recorded baseline (advances the footprint ratchet — do it deliberately):
     DRAFTWRIGHT_UPDATE_GOLDEN=1 uv run pytest tests/test_refactor_golden.py
 """
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 from pathlib import Path
@@ -242,11 +257,54 @@ def _signature(dwg) -> dict:
     # Lists, not tuples: JSON has no tuple type, so tuples would fail the round-trip compare.
     issues = sorted([i.severity, i.code, i.message] for i in dwg.registry.issues)
     return {
+        # The selected sheet — the footprint half of the contract below. Positions are still
+        # recorded (they are what EXACT mode compares) but are no longer asserted by default.
+        "page": [dwg.page_w, dwg.page_h],
         "views": views,
         "annotations": annotations,
         "item_count": len(dwg.items),
         "build_issues": issues,
     }
+
+
+def _regressions(expected: dict, sig: dict) -> list[str]:
+    """What this corpus now polices: nothing lost, nothing worse, nothing bigger.
+
+    Three checks, each naming a class of real defect rather than a coordinate:
+
+    1. **No annotation vanishes, and a retained one keeps its label.** The direct expression
+       of ADR 0016 Amdt 6 — a dimension the plan approved must not silently disappear.
+       Additions are NOT flagged: more of the part being dimensioned is the goal.
+    2. **No new build issue.** The drop/escalation logic is load-bearing, and a snapshot that
+       missed a change to it would miss the thing most worth catching.
+    3. **The sheet does not grow.** A ratchet against the recorded baseline rather than a
+       pin: the footprint may shrink freely and forever, and may never creep back.
+    """
+    problems: list[str] = []
+
+    old_ann = {a["name"]: a for a in expected["annotations"]}
+    new_ann = {a["name"]: a for a in sig["annotations"]}
+    for name in sorted(set(old_ann) - set(new_ann)):
+        problems.append(f"annotation LOST: {name} (label {old_ann[name]['label']!r})")
+    for name in sorted(set(old_ann) & set(new_ann)):
+        was, now = old_ann[name]["label"], new_ann[name]["label"]
+        if was != now:
+            problems.append(f"label CHANGED on {name}: {was!r} -> {now!r}")
+
+    old_codes = collections.Counter(code for _sev, code, _msg in expected["build_issues"])
+    new_codes = collections.Counter(code for _sev, code, _msg in sig["build_issues"])
+    for code in sorted(new_codes):
+        if new_codes[code] > old_codes.get(code, 0):
+            problems.append(
+                f"build issue WORSE: {code} x{new_codes[code]} (was x{old_codes.get(code, 0)})"
+            )
+
+    was_page, now_page = expected.get("page"), sig.get("page")
+    if was_page and now_page and (now_page[0] * now_page[1]) > (was_page[0] * was_page[1]) + 1.0:
+        problems.append(
+            f"sheet GREW: {now_page[0]:.0f}x{now_page[1]:.0f} was {was_page[0]:.0f}x{was_page[1]:.0f}"
+        )
+    return problems
 
 
 @pytest.mark.parametrize("name", list(CORPUS))
@@ -265,7 +323,102 @@ def test_refactor_golden(name):
         f"DRAFTWRIGHT_UPDATE_GOLDEN=1 uv run pytest tests/test_refactor_golden.py"
     )
     expected = json.loads(golden.read_text(encoding="utf-8"))
-    assert sig == expected, (
-        f"placement/issue drift for {name!r}. The #638/#639 refactors must be byte-for-byte "
-        f"behaviour-preserving — this is a real regression, NOT to be re-blessed away."
+
+    if os.environ.get("DRAFTWRIGHT_GOLDEN_EXACT"):
+        # Opt-in byte-exact mode — the original contract, for a change that CLAIMS to alter
+        # nothing. Run it deliberately when refactoring; it is not the standing gate, because
+        # a standing byte-exact gate on a layout the engine is meant to improve fails every
+        # improvement and passes everything that improves nothing.
+        assert sig == expected, (
+            f"placement/issue drift for {name!r} under DRAFTWRIGHT_GOLDEN_EXACT. A change "
+            f"that claims to be behaviour-preserving moved something."
+        )
+        return
+
+    problems = _regressions(expected, sig)
+    assert problems == [], (
+        f"regression for {name!r} — this corpus polices what a drawing must not lose, not "
+        f"where it puts things:\n  " + "\n  ".join(problems)
     )
+
+
+# --- the contract itself, exercised directly -------------------------------------------
+#
+# A gate that cannot fail is worse than no gate, and this one now decides what the whole
+# ADR 0018 epic is allowed to change. Each check is driven from a crafted baseline rather
+# than a built drawing, so a defect in `_regressions` cannot hide behind a part that happens
+# not to exhibit it.
+
+_BASE = {
+    "page": [420.0, 297.0],
+    "annotations": [
+        {"name": "dim_width", "label": "80"},
+        {"name": "dim_height", "label": "20"},
+    ],
+    "build_issues": [["warning", "step_dim_withheld", "..."]],
+}
+
+
+def _sig(**overrides):
+    return {**_BASE, **overrides}
+
+
+class TestTheRegressionContract:
+    def test_an_unchanged_drawing_is_clean(self):
+        # The precondition for every case below meaning anything.
+        assert _regressions(_BASE, _sig()) == []
+
+    def test_a_lost_annotation_fails(self):
+        gone = _sig(annotations=[{"name": "dim_width", "label": "80"}])
+        assert [p for p in _regressions(_BASE, gone) if "LOST" in p]
+
+    def test_a_changed_label_fails(self):
+        relabelled = _sig(
+            annotations=[
+                {"name": "dim_width", "label": "80"},
+                {"name": "dim_height", "label": "20.5"},
+            ]
+        )
+        assert [p for p in _regressions(_BASE, relabelled) if "CHANGED" in p]
+
+    def test_a_new_build_issue_fails(self):
+        worse = _sig(
+            build_issues=[
+                ["warning", "step_dim_withheld", "..."],
+                ["error", "location_ref_dropped", "..."],
+            ]
+        )
+        assert [p for p in _regressions(_BASE, worse) if "WORSE" in p]
+
+    def test_more_of_an_existing_issue_fails(self):
+        # Counted, not merely set-membership: two drops where there was one is a regression.
+        twice = _sig(
+            build_issues=[
+                ["warning", "step_dim_withheld", "..."],
+                ["warning", "step_dim_withheld", "..."],
+            ]
+        )
+        assert [p for p in _regressions(_BASE, twice) if "WORSE" in p]
+
+    def test_a_bigger_sheet_fails(self):
+        assert [p for p in _regressions(_BASE, _sig(page=[594.0, 420.0])) if "GREW" in p]
+
+    def test_a_smaller_sheet_passes(self):
+        # The whole point of the change: an improvement must land without an argument.
+        assert _regressions(_BASE, _sig(page=[297.0, 210.0])) == []
+
+    def test_an_added_annotation_passes(self):
+        # More of the part dimensioned is the goal, not a deviation to be defended.
+        more = _sig(annotations=[*_BASE["annotations"], {"name": "dim_depth", "label": "30"}])
+        assert _regressions(_BASE, more) == []
+
+    def test_a_moved_annotation_passes(self):
+        # Position is what this gate deliberately stopped asserting; `test_layout_cleanliness`
+        # and the layout fuzzers own collision-free/in-bounds, which is the real property.
+        moved = _sig(
+            annotations=[
+                {"name": "dim_width", "label": "80", "geom_bbox": [999, 999, 1000, 1000]},
+                {"name": "dim_height", "label": "20"},
+            ]
+        )
+        assert _regressions(_BASE, moved) == []

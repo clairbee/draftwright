@@ -2542,8 +2542,10 @@ def _place_queue(
     # dense loose-hole inventory eligible for the later transactional table
     # replacement in its established immediate whole-queue solve.  Pattern and
     # dense winners have downstream table/furniture semantics; profiled bores
-    # retain their established cross-view compatibility until #798 owns robust
-    # silhouette-aware routing.  The shared late inventory is therefore for
+    # retain their established cross-view compatibility until robust
+    # silhouette-aware routing lands (#1187 — this deferred to #798, which closed
+    # WITHOUT delivering it; ADR 0018's "Why now" records that ten leaders still cut
+    # the part after #798 and #1188, and #1187 is the live successor).  The shared late inventory is therefore for
     # compatible sparse ordinary-hole callouts only.
     model_features = getattr(getattr(ctx, "part_model", None), "features", ())
     scattered_plan_holes = sum(
