@@ -54,6 +54,7 @@ from draftwright._core import (
 )
 from draftwright.layout import fit_box
 from draftwright.model.callout import hole_callout_spec
+from draftwright.view_plan import principal_placements
 
 _log = logging.getLogger(__name__)
 
@@ -662,11 +663,17 @@ def choose_scale(
 
 
 def _view_geom(a) -> dict:
-    """The three orthographic geometry boxes as ``{view: (cx, cy, hw, hh)}``."""
+    """The orthographic geometry boxes as ``{view: (cx, cy, hw, hh)}``.
+
+    Read off the resolved view plan (ADR 0018) rather than assembled here from `FV_X`/`PV_X`/
+    `SV_X` and the half-extent fields. Same numbers — `resolve_from_analysis` reads the same
+    `Analysis` — but the set of views and their page geometry now has one owner, so a later
+    slice that drops a redundant principal view changes the plan and this follows, instead of
+    this function needing to learn about it separately.
+    """
     return {
-        "front": (a.FV_X, a.FV_Y, a.fv_hw, a.fv_hh),
-        "plan": (a.PV_X, a.PV_Y, a.fv_hw, a.pv_hh),
-        "side": (a.SV_X, a.SV_Y, a.sv_hw, a.fv_hh),
+        name: (place.cx, place.cy, place.hw, place.hh)
+        for name, place in principal_placements(a).items()
     }
 
 

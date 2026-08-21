@@ -75,6 +75,7 @@ from draftwright.projection import (
     _fit_iso_view,
     _project_iso,
 )
+from draftwright.view_plan import resolve_from_analysis
 
 # A view centre must move by more than this (mm) for the measure-and-repack
 # pass to re-assemble.  Below it, the estimate already matched the measured
@@ -448,11 +449,28 @@ def _assemble(
     # loop's intermediate assemblies will pass a cheap stand-in and only the final one the real
     # solid (#1137). Every caller currently takes the default, so nothing has changed yet.
     part_s = (a.part if shape is None else shape).scale(a.SCALE)
-    dwg._add_view(
-        "front", part_s, (cxs, cys - dist, czs), (0, 0, 1), (a.FV_X, a.FV_Y), scaled=True
-    )
-    dwg._add_view("plan", part_s, (cxs, cys, czs + dist), (0, 1, 0), (a.PV_X, a.PV_Y), scaled=True)
-    dwg._add_view("side", part_s, (cxs + dist, cys, czs), (0, 0, 1), (a.SV_X, a.SV_Y), scaled=True)
+
+    # ADR 0018: the views this drawing has, and where they go, come from ONE resolved plan
+    # instead of three hardcoded calls whose cameras, page fields and layout meaning were
+    # spread across this function, `Analysis` and `compose.choose_scale`'s docstring. The plan
+    # still describes exactly the third-angle front/plan/side set the engine has always built —
+    # this slice is representation, not selection — but it is now a value that a later slice can
+    # vary, and the projection convention is stated where the views are named rather than
+    # implied by three camera literals.
+    #
+    # Cameras are attached here because they need the scaled part's centre and the projection
+    # distance, which the plan deliberately knows nothing about: a `ViewSpec` is a request in
+    # MODEL terms, and a camera position in page-scaled coordinates is not one.
+    _CAMERAS = {
+        "front": ((cxs, cys - dist, czs), (0, 0, 1)),
+        "plan": ((cxs, cys, czs + dist), (0, 1, 0)),
+        "side": ((cxs + dist, cys, czs), (0, 0, 1)),
+    }
+    dwg._build.view_plan = view_plan = resolve_from_analysis(a)
+    for spec in view_plan.of_kind("principal"):
+        camera, up = _CAMERAS[spec.name]
+        place = view_plan.placements[spec.name]
+        dwg._add_view(spec.name, part_s, camera, up, (place.cx, place.cy), scaled=True)
     _project_iso(dwg, a, a.SCALE, shape_s=part_s)
 
     _diagnostics = None  # the audit ledger; filled once at the end of this function (#996)
