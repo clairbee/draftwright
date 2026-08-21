@@ -23,6 +23,7 @@ bearing, and each has a test below:
 """
 
 import itertools
+from types import SimpleNamespace
 
 import pytest
 from build123d import Axis, Box, Cylinder, Pos, chamfer
@@ -294,3 +295,89 @@ class TestTheGateFailsClosed:
         assert drawing.arrangement_decision["chosen"] == ARRANGEMENTS[0]
         # And the sheet proves it reached layout: with dimensioning on, this part is on A4.
         assert (drawing.page_w, drawing.page_h) == A3[:2]
+
+
+# --- the gate's comparison, driven directly ---------------------------------------------
+
+
+def _blocker(code, parameter):
+    """One required placement failure, shaped as `_scale_blockers` emits it."""
+    return {
+        "severity": "error",
+        "code": code,
+        "message": f"{code} at some position that differs between layouts",
+        "measurements": ({"feature": "envelope", "parameter": parameter},),
+        "hole_requirements": (),
+        "source_ids": (),
+    }
+
+
+class TestTheGateComparesWhatWasLostNotHowMuch:
+    """Cardinality alone accepts a DIFFERENT loss, which is not "preserve every requirement"."""
+
+    @staticmethod
+    def _decide(alternative_blockers, preferred_blockers):
+        """Drive the real gate, so reverting it to a count comparison fails here.
+
+        An earlier version of these tests recomputed the multiset difference itself and
+        asserted on that — which passes whatever the production code does. Stubs stand in
+        for the two builds because what is under test is the COMPARISON, not the compiler.
+        """
+        alternative = SimpleNamespace(name="alternative")
+        preferred = SimpleNamespace(name="preferred")
+        blockers = {id(alternative): alternative_blockers, id(preferred): preferred_blockers}
+        winner = builder_mod._preserve_requirements_under_arrangement(
+            alternative,
+            "stacked-iso",
+            lambda _scale, _arrangements: preferred,
+            lambda built: blockers[id(built)],
+        )
+        return winner.name
+
+    def test_an_alternative_that_loses_something_else_is_rejected(self):
+        # The defect: preferred drops B, alternative drops A. Both have one blocker, so a
+        # `len(preferred) < len(alt)` test keeps the alternative — even though the default
+        # preserved A.
+        assert (
+            self._decide(
+                [_blocker("location_ref_dropped", "loc_a")],
+                [_blocker("location_ref_dropped", "loc_b")],
+            )
+            == "preferred"
+        )
+
+    def test_an_alternative_losing_the_same_thing_is_not_penalised(self):
+        # The converse, so the rule is not simply "always reject": a blocker the default
+        # produces too is not the alternative's fault, and it keeps its smaller sheet.
+        same = [_blocker("location_ref_dropped", "loc_a")]
+        assert self._decide(list(same), list(same)) == "alternative"
+
+    def test_an_alternative_that_loses_more_of_the_same_is_rejected(self):
+        # A multiset, not a set: losing the same requirement twice where the default lost it
+        # once is a new loss.
+        one = [_blocker("location_ref_dropped", "loc_a")]
+        assert self._decide(one * 2, list(one)) == "preferred"
+
+    def test_the_alternative_is_not_required_to_beat_the_default_on_volume(self):
+        # One-sided by design. The default is the baseline every drawing had before this
+        # choice existed, so an alternative earns its place by costing nothing NEW — not by
+        # costing less. Here it introduces nothing and preserves strictly more.
+        shared = _blocker("location_ref_dropped", "loc_a")
+        assert (
+            self._decide([shared], [shared, _blocker("hole_pattern_dim_dropped", "pat_b")])
+            == "alternative"
+        )
+
+    def test_identity_ignores_the_message(self):
+        # Messages carry positions and sheet sizes, so two layouts of the SAME defect read
+        # differently. Keying on them would make every blocker unique and the comparison
+        # vacuous — it would reject every alternative, always.
+        a = _blocker("location_ref_dropped", "loc_a")
+        b = dict(a, message="the same defect described from another sheet")
+        assert builder_mod._blocker_identity(a) == builder_mod._blocker_identity(b)
+
+    def test_identity_separates_different_requirements(self):
+        # The precondition for the whole comparison meaning anything.
+        assert builder_mod._blocker_identity(
+            _blocker("location_ref_dropped", "loc_a")
+        ) != builder_mod._blocker_identity(_blocker("location_ref_dropped", "loc_b"))

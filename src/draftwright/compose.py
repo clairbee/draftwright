@@ -650,7 +650,10 @@ def choose_scale(
 
     def _candidate(cand, arrangement):
         return LayoutCandidate(
-            views=third_angle_view_names(),
+            # What `_fits` actually evaluates, not the fixed three: a candidate whose
+            # first-class infeasibility data disagreed with the layout it was judged on
+            # would be worse than no data (#1130 review).
+            views=tuple(views) if views is not None else third_angle_view_names(),
             scale=float(cand[0]),
             page=(cand[1], cand[2]),
             title_block_width=cand[3],
@@ -960,25 +963,40 @@ def _layout_geometry(
     # the column, so its gap is that column band PLUS its own facing band (sum) —
     # disjoint by construction (#121). Byte-identical for the estimator path,
     # where fv/pv bands are equal and sv.left == 0.
-    col_left = max(fv.left, pv.left)
-    col_right = max(fv.right, pv.right)
+    # ADR 0018: which principal views this sheet actually carries. `views=None` is the
+    # third-angle three, so every existing caller is byte-identical. The column is the
+    # stacked front/plan pair — it exists while EITHER is planned, and is x-wide either way,
+    # since both project the x extent across the page (`view_plan.VIEW_AXES`).
+    has_front = views is None or "front" in views
+    has_plan = views is None or "plan" in views
+    has_side = views is None or "side" in views
+    has_column = has_front or has_plan
+    _present = [b for b, present in ((fv, has_front), (pv, has_plan)) if present]
+
+    col_left = max((b.left for b in _present), default=0.0)
+    col_right = max((b.right for b in _present), default=0.0)
 
     # FV↔PV vertical gap = fv.top + pv.bottom (abutting → sum). Estimated and
     # measured paths now use the same block footprint semantics: if the plan
     # view carries a bottom halo, that band is part of the stacked block layout
     # rather than a special-case lift outside the ViewBlock model (#112).
     base_gap = fv.top + pv.bottom
-    # ADR 0018: the plan view is stacked ABOVE the front, so a view set without it reclaims
-    # its height and the gap between them. Reserving space for a view the sheet does not
-    # carry is what made dropping one cost nothing — the drawing lost a view and stayed on
-    # the same paper, which is the opposite of the point (#1130).
-    #
-    # `views=None` means the third-angle three, so every existing caller is byte-identical.
-    has_plan = views is None or "plan" in views
-    if has_plan:
-        total_h = 2 * margin + fv.bottom + 2 * fv.hh + base_gap + 2 * pv.hh + pv.top
+    # Reserving space for a view the sheet does not carry is what made dropping one cost
+    # nothing — the drawing lost a view and stayed on the same paper, the opposite of the
+    # point. Every term below is conditioned on the view being present, not just the plan:
+    # a set omitting front or side reserved its paper too, and only the plan case was
+    # handled when this first landed (#1130 review).
+    if has_front and has_plan:
+        # Stacked, sharing the gap between them.
+        column_h = fv.bottom + 2 * fv.hh + base_gap + 2 * pv.hh + pv.top
+    elif has_front:
+        column_h = fv.bottom + 2 * fv.hh + fv.top
+    elif has_plan:
+        column_h = pv.bottom + 2 * pv.hh + pv.top
     else:
-        total_h = 2 * margin + fv.bottom + 2 * fv.hh + fv.top
+        column_h = 0.0
+    side_h = (sv.bottom + 2 * sv.hh + sv.top) if has_side else 0.0
+    total_h = 2 * margin + max(column_h, side_h)
     y_offset = max(0.0, (page_h - total_h) / 2)
 
     section_right_band = (sv.right + 10.0 + 2 * section_hw + DIM_PAD) if section else 0.0
@@ -988,9 +1006,9 @@ def _layout_geometry(
     ortho_row_w = (
         col_left
         + col_right
-        + x_size * scale
-        + y_size * scale
-        + max(2 * DIM_PAD, sv.right + DIM_PAD, section_right_band)
+        + (x_size * scale if has_column else 0.0)
+        + (y_size * scale if has_side else 0.0)
+        + max(2 * DIM_PAD, (sv.right + DIM_PAD) if has_side else 0.0, section_right_band)
     )
     iso_row_budget = bbox_max * scale * _ISO_WIDTH_BUDGET
     # Does the orthographic band clear the title-block column vertically? Needed before the
@@ -1090,16 +1108,16 @@ def _layout_geometry(
     # the DIM_PAD-padded boxes for byte-identity.
     if blocks is not None:
         obstacles = [
-            fv.footprint(FV_X, FV_Y),
+            *([fv.footprint(FV_X, FV_Y)] if has_front else []),
             *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
-            sv.footprint(SV_X, SV_Y),
+            *([sv.footprint(SV_X, SV_Y)] if has_side else []),
             title_block.footprint(tb_cx, tb_cy),
         ]
     else:
         obstacles = [
-            _padded_box(FV_X, FV_Y, fv_hw, fv_hh),
+            *([_padded_box(FV_X, FV_Y, fv_hw, fv_hh)] if has_front else []),
             *([_padded_box(PV_X, PV_Y, fv_hw, pv_hh)] if has_plan else []),
-            _padded_box(SV_X, SV_Y, sv_hw, fv_hh),
+            *([_padded_box(SV_X, SV_Y, sv_hw, fv_hh)] if has_side else []),
             title_block.footprint(tb_cx, tb_cy),
         ]
     if section:
@@ -1146,9 +1164,9 @@ def _layout_geometry(
     # what tells the repack to escalate to a larger sheet when the measured
     # footprints no longer fit the estimate's page.
     _view_boxes = [
-        fv.footprint(FV_X, FV_Y),
+        *([fv.footprint(FV_X, FV_Y)] if has_front else []),
         *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
-        sv.footprint(SV_X, SV_Y),
+        *([sv.footprint(SV_X, SV_Y)] if has_side else []),
     ]
     if section:
         _view_boxes.append(section_block.footprint(SECTION_X, SECTION_Y))
@@ -1170,9 +1188,9 @@ def _layout_geometry(
     # obstacles. Otherwise a table can be accepted in space already reserved for
     # planned strips/halos and then drop after real annotations are rendered.
     table_obstacles = [
-        fv.footprint(FV_X, FV_Y),
+        *([fv.footprint(FV_X, FV_Y)] if has_front else []),
         *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
-        sv.footprint(SV_X, SV_Y),
+        *([sv.footprint(SV_X, SV_Y)] if has_side else []),
         title_block.footprint(tb_cx, tb_cy),
     ]
     if section:

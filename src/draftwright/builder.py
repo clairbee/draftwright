@@ -10,6 +10,8 @@ stage modules -- never make_drawing -- so the graph stays a DAG.
 
 from __future__ import annotations
 
+import collections
+import json
 import os
 import warnings
 from collections.abc import Callable, Sequence
@@ -1119,6 +1121,25 @@ def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, .
     return tuple(blockers)
 
 
+def _blocker_identity(blocker) -> str:
+    """A stable identity for one required placement failure, for comparing two builds.
+
+    Keyed on WHAT was lost — the code and the measurement/requirement/source ids — never the
+    message, which carries positions and sheet sizes that differ between two layouts of the
+    same defect and would make every blocker look unique.
+    """
+    return json.dumps(
+        {
+            "code": blocker.get("code"),
+            "measurements": blocker.get("measurements", ()),
+            "hole_requirements": blocker.get("hole_requirements", ()),
+            "source_ids": blocker.get("source_ids", ()),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
 def _preserve_requirements_under_arrangement(drawing, chosen, build, blockers_for):
     """ADR 0018 §5's first hard gate, applied to the arrangement: preserve every supported
     requirement or reject the candidate.
@@ -1162,7 +1183,21 @@ def _preserve_requirements_under_arrangement(drawing, chosen, build, blockers_fo
     # blockers that the preferred arrangement would have produced too.
     preferred = build(None, (ARRANGEMENTS[0],))
     preferred_blockers = blockers_for(preferred)
-    if len(preferred_blockers) < len(blockers):
+    # Compared by IDENTITY as a multiset, not by count. Cardinality alone accepts a
+    # DIFFERENT loss: if the preferred layout drops requirement B and the alternative drops
+    # requirement A, both have one blocker, and a `<` test keeps the alternative even though
+    # the default preserved A. That is the opposite of "preserve every supported requirement
+    # or reject the candidate" (#1130 review).
+    #
+    # The rule is therefore one-sided, and deliberately so: the alternative may not introduce
+    # any blocker the preferred result did not already have. It is free to preserve MORE, and
+    # it does not have to beat the default on volume — the default is the baseline every
+    # drawing had before this choice existed, so an alternative earns its place by costing
+    # nothing, not by costing less.
+    introduced = collections.Counter(map(_blocker_identity, blockers)) - collections.Counter(
+        map(_blocker_identity, preferred_blockers)
+    )
+    if introduced:
         return _record(
             preferred,
             [

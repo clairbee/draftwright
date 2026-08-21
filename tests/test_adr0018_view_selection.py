@@ -96,6 +96,65 @@ class TestTheLayoutReclaimsADroppedView:
         )
         assert two.FV_Y > full.FV_Y, "the front view did not move into the reclaimed band"
 
+    def test_omitting_the_side_view_reclaims_its_width(self):
+        # Only the plan case was handled when this first landed: a set omitting front or
+        # side built a sheet without the view and reserved its paper anyway (#1130 review).
+        full = _layout_geometry(90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0)
+        no_side = _layout_geometry(
+            90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0, views=("front", "plan")
+        )
+        assert no_side.auto_row_w < full.auto_row_w
+        # Specifically the side view's own width, at this scale.
+        assert full.auto_row_w - no_side.auto_row_w == pytest.approx(60.0)
+
+    def test_omitting_the_front_view_keeps_the_column_the_plan_still_needs(self):
+        # The asymmetry worth pinning: front and plan SHARE a column and both project the x
+        # extent across the page, so dropping one of them reclaims height, not width.
+        full = _layout_geometry(90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0)
+        no_front = _layout_geometry(
+            90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0, views=("plan", "side")
+        )
+        assert no_front.auto_row_w == full.auto_row_w
+
+    def test_omitting_both_column_views_reclaims_the_column(self):
+        # Front and plan share the column, so its width is only reclaimed when BOTH go.
+        full = _layout_geometry(90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0)
+        side_only = _layout_geometry(
+            90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0, views=("side",)
+        )
+        assert full.auto_row_w - side_only.auto_row_w >= 90.0
+
+    def test_the_candidate_records_the_views_it_was_judged_on(self, monkeypatch):
+        # First-class infeasibility data that disagreed with the layout `_fits` actually
+        # evaluated would be worse than none. Observed at the predicate, because the
+        # rejected candidates are not yet exposed on a result.
+        import draftwright.compose as compose_mod
+
+        seen = []
+        original = compose_mod.candidate_is_feasible
+
+        def spy(candidate, fits):
+            seen.append(candidate.views)
+            return original(candidate, fits)
+
+        monkeypatch.setattr(compose_mod, "candidate_is_feasible", spy)
+        compose_mod.choose_scale(90.0, 60.0, 25.0, views=("front", "side"))
+        assert seen, "no candidate was judged"
+        assert set(seen) == {("front", "side")}
+
+    def test_the_candidate_defaults_to_the_third_angle_three(self, monkeypatch):
+        import draftwright.compose as compose_mod
+
+        seen = []
+        original = compose_mod.candidate_is_feasible
+        monkeypatch.setattr(
+            compose_mod,
+            "candidate_is_feasible",
+            lambda candidate, fits: (seen.append(candidate.views), original(candidate, fits))[1],
+        )
+        compose_mod.choose_scale(90.0, 60.0, 25.0)
+        assert set(seen) == {("front", "plan", "side")}
+
     def test_the_default_is_unchanged(self):
         explicit = _layout_geometry(
             90.0, 60.0, 25.0, 1.0, 297.0, 210.0, 120.0, None, 0, views=ALL_THREE
