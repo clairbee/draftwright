@@ -14,7 +14,7 @@ from typing import Literal
 
 from b123d_recognisers import HoleSpec, RecognitionResult, countersink_matches_hole
 
-from draftwright._geometry import _is_principal_axis
+from draftwright._geometry import _END_ON, _is_principal_axis
 from draftwright.linting.issues import LintIssue, is_placement_drop
 
 HoleRequirementState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
@@ -660,7 +660,7 @@ def _structured_locations_placed(evidence, features, parameter: str, turned_axis
         if getattr(feature, "kind", None) != "hole":
             continue
         for point, view in evidence.centers.get(feature, ()):
-            if view != {"x": "side", "y": "front", "z": "plan"}[feature.frame.axis]:
+            if view != _END_ON[feature.frame.axis]:
                 continue
             if _member_coaxial_with_turned_profile(feature, point, turned_axis_centers):
                 covered.add((feature, point))

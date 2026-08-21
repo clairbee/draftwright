@@ -414,6 +414,24 @@ class BuildState:
         return self.recognition_cache.ensure(part)
 
 
+class ViewNotPlanned(KeyError):
+    """A projection was requested in a view this drawing does not have.
+
+    Subclasses :class:`KeyError` so existing handlers keep working — the point is not a new
+    control-flow contract but a named, inspectable one: `view` is what was asked for and
+    `planned` is what the sheet actually carries, so a caller can report the miss instead of
+    re-deriving it from a message (ADR 0018 §6).
+    """
+
+    def __init__(self, view: str, planned: tuple[str, ...] = ()):
+        self.view = view
+        self.planned = tuple(planned)
+        super().__init__(f"view {view!r} is not on this sheet; planned views are {self.planned}")
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else ""
+
+
 class Drawing:
     """A composable technical drawing — the editable form of :func:`make_drawing`.
 
@@ -426,6 +444,10 @@ class Drawing:
         scale: drawing scale factor (e.g. ``2.0`` for 2:1).
         scale_decision: JSON-friendly resolution of an automatic or explicit scale request,
             including the requested/effective scales and any required placement blockers.
+        arrangement_decision: JSON-friendly record of how the sheet arrangement was resolved
+            (#1130) — ``chosen`` names the arrangement the sheet was composed under, and
+            ``attempts`` lists each one built, in order, with the required placement blockers
+            that rejected it. One entry means one compile.
         section_decision: JSON-friendly record of the section A-A outcome (#1190) —
             ``status`` is ``"placed"``, ``"skipped"``, ``"not_warranted"``, or
             ``"not_evaluated"`` when the section pass never ran (``auto_dims=False``),
@@ -476,6 +498,16 @@ class Drawing:
             "blockers": (),
             "attempted_scales": (),
             "attempts": (),
+        }
+        # Public, JSON-friendly record of how the sheet ARRANGEMENT was resolved — ADR 0018
+        # §5's fourth dimension and §6's "infeasibility is a first-class result" (#1130).
+        # Always present for the same reason as `section_decision`: a caller must not have to
+        # infer from a log line whether an alternative was tried and rejected. `attempts` is
+        # also the honest compile count, since proving an alternative preserves every
+        # requirement costs a real build (ADR 0014 Amdt 3 — measure, do not predict).
+        self.arrangement_decision = {
+            "chosen": "columns",
+            "attempts": ({"arrangement": "columns", "status": "chosen", "blockers": ()},),
         }
         # Public, JSON-friendly record of what happened to section A-A (#1190). Always
         # present, so a caller never has to infer the outcome from a log line that one
@@ -627,8 +659,18 @@ class Drawing:
         self._coords.pop(view, None)
 
     def at(self, view, x, y, z):
-        """Map a world point to a page point ``(px, py, 0)`` in ``view``."""
-        px, py = self._coords[view].pp(x, y, z)
+        """Map a world point to a page point ``(px, py, 0)`` in ``view``.
+
+        Raises :class:`ViewNotPlanned` when *view* is not on the sheet. A bare ``KeyError``
+        from inside whichever render pass happened to ask first is not a usable answer to
+        "this drawing does not have that view" — ADR 0018 §6 wants an absent view to be a
+        named result, because view-set selection makes asking for one the normal case rather
+        than a bug (#1130).
+        """
+        coords = self._coords.get(view)
+        if coords is None:
+            raise ViewNotPlanned(view, tuple(self._coords))
+        px, py = coords.pp(x, y, z)
         return (px, py, 0.0)
 
     def view_bounds(self, view):

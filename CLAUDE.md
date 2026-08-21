@@ -114,8 +114,9 @@ reaches the sheet through the LABEL, never `tolerance=`, and an approved dimensi
 cannot be placed is reported against its measurement, not dropped in silence — that
 superseding ADR is now proposed as 0019) · **0017** recognition inventory as first-class
 result (ownership landed; correspondence work evidence-gated by #1018) ·
-**0018** requirement-driven view planning (**accepted, nothing implemented yet** — the
-evidence list is the per-slice gate) · **0019** display-complete labels + dimension-outcome
+**0018** requirement-driven view planning (**accepted, partly implemented** — Amdt 1 maps the
+authored surface onto ADR 0016's verb model and bans authored views + automatic dimensions;
+the evidence list is the per-slice gate) · **0019** display-complete labels + dimension-outcome
 ledger (**proposed** — finish the 0016 Amdt 1 boundary: the plan carries the whole label,
 renderers never compose a tolerance; absences reconcile at one seam).
 

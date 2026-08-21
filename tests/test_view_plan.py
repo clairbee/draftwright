@@ -492,3 +492,80 @@ class TestSectionsAndDetailsAreNotPlannedYet:
         assert cover.indeterminate, "the collapse is not being reported as unanswerable"
         assert not cover.carries_nothing_exclusively
         assert "detail_a" not in views_carrying_nothing_exclusively(drawing)
+
+
+class TestTheLayoutCandidate:
+    """ADR 0018 §5: page, scale, views and arrangement as ONE constrained choice.
+
+    `compose.choose_scale` has always been the planner's candidate loop — build a list of
+    possibilities, return the first that fits — but the possibility was an anonymous
+    `(scale, page_w, page_h, tb_w)` tuple, so two of the ADR's four dimensions had nowhere to
+    live: the view set stayed fixed across three modules and the arrangement stayed a sentence
+    in a docstring.
+
+    These pin the structure, not the values. Nothing varies yet — every candidate is the
+    third-angle three in the `columns` arrangement — and that is deliberate: this slice makes
+    varying them an addition to a generator rather than a rewrite of the loop.
+    """
+
+    def test_a_candidate_carries_all_four_dimensions(self):
+        from draftwright.view_plan import LayoutCandidate, third_angle_view_names
+
+        candidate = LayoutCandidate(
+            views=third_angle_view_names(), scale=1.0, page=(420.0, 297.0), title_block_width=150.0
+        )
+        assert candidate.views == ("front", "plan", "side")
+        assert candidate.arrangement == "columns"
+        assert candidate.legacy_tuple == (1.0, 420.0, 297.0, 150.0)
+
+    def test_the_candidate_view_set_is_the_one_the_resolver_uses(self):
+        """One source for "which views", so a candidate and a resolved plan cannot disagree.
+
+        If the generator's idea of the view set drifted from the resolver's, a candidate could
+        be judged feasible for a layout the builder never produces — which is the failure mode
+        of having the topology written down in more than one place, and the reason this slice
+        exists.
+        """
+        from draftwright.view_plan import third_angle_principals, third_angle_view_names
+
+        assert third_angle_view_names() == tuple(spec.name for spec in third_angle_principals())
+
+    def test_an_infeasible_candidate_says_why_rather_than_returning_false(self):
+        """ADR 0018 §6, the half of it this slice delivers.
+
+        The terminal behaviour is unchanged — `choose_scale` still falls back to the last
+        candidate with a warning, which the ADR wants replaced by a `plan_infeasible` result.
+        What changes is that a rejection is now a value carrying its reason, which is what a
+        diagnostic would have to print; a bare `False` could never become one.
+        """
+        from draftwright.view_plan import LayoutCandidate, candidate_is_feasible
+
+        candidate = LayoutCandidate(
+            views=("front", "plan", "side"),
+            scale=1.0,
+            page=(210.0, 297.0),
+            title_block_width=120.0,
+        )
+        assert candidate_is_feasible(candidate, lambda _c: True) is None
+
+        verdict = candidate_is_feasible(candidate, lambda _c: False)
+        assert verdict is not None
+        assert verdict.reason == "layout_does_not_fit"
+        assert verdict.candidate is candidate
+        assert "columns" in verdict.detail and "3 views" in verdict.detail
+
+    def test_the_fit_predicate_is_the_callers_not_this_leafs(self):
+        """The rank-0 boundary, asserted.
+
+        Feasibility needs the strip estimates and font metrics that live in `compose`; this
+        module must not reach up for them. So the predicate arrives as an argument, and the leaf
+        stays a leaf — the same reason `view_coverage` is duck-typed on the drawing.
+        """
+        from draftwright.view_plan import LayoutCandidate, candidate_is_feasible
+
+        seen = []
+        candidate = LayoutCandidate(
+            views=("front",), scale=2.0, page=(297.0, 210.0), title_block_width=120.0
+        )
+        candidate_is_feasible(candidate, lambda c: seen.append(c) or True)
+        assert seen == [candidate], "the predicate was not given the candidate to judge"

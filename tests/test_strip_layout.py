@@ -1175,16 +1175,34 @@ def _pitch_dim_over_centerline(centerline_factory, centerline_name):
     part = Box(100, 50, 10)
     for x in (-30, 30):
         part = part - Pos(x, 0, 0) * Cylinder(3, 10)
+
+    def _place(dwg, place_centerline):
+        a = dwg._analysis
+        _view, to_page = build_view_of_axis(a)["z"]
+        ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
+        if place_centerline is not None:
+            place_centerline(a)
+        _place_pitch_dim(
+            dwg, a, "plan", (-30, 0, 0), (30, 0, 0), 2, 60, to_page, "test_pitch", ctx=ctx
+        )
+        return dwg.get_annotation("test_pitch")
+
+    # Where the pitch dim actually lands, measured rather than assumed. The x was already
+    # computed live; the y used to be a page coordinate written into the call site, so the
+    # bolt-circle variant stopped overlapping anything the moment the sheet changed size and
+    # the test passed its own precondition by accident. A dry placement on a throwaway
+    # drawing costs one build and keeps both variants pinned to the real strip (#1130).
+    probe = _place(build_drawing(part), None)
+    dim_cy = probe._dw_spec.p1[1] + probe._dw_spec.distance  # label row, not the hole row
+
     dwg = build_drawing(part)
-    a = dwg._analysis
-    view, to_page = build_view_of_axis(a)["z"]
-    part_cx = a.proj.plan_x(0)
-    ctx = PlacementContext(registry=dwg.registry, coverage=dwg.coverage, items=dwg.items)
-    dwg._add(centerline_factory(part_cx), centerline_name, view="plan")
-    _place_pitch_dim(
-        dwg, a, "plan", (-30, 0, 0), (30, 0, 0), 2, 60, to_page, "test_pitch", ctx=ctx
+    dim = _place(
+        dwg,
+        # `a` comes from the one read inside `_place`; the centre x stays computed live.
+        lambda a: dwg._add(
+            centerline_factory(a.proj.plan_x(0), dim_cy), centerline_name, view="plan"
+        ),
     )
-    dim = dwg.get_annotation("test_pitch")
     cl = dwg.get_annotation(centerline_name)
     issues = []
     _lint_centerline_dim_overlap(dim, cl, issues)
@@ -1199,7 +1217,7 @@ def test_pitch_dim_label_clears_a_thin_vertical_centerline():
     from build123d_drafting import Centerline
 
     dim, issues = _pitch_dim_over_centerline(
-        lambda cx: Centerline((cx, 150, 0), (cx, 300, 0)), "test_centerline"
+        lambda cx, cy: Centerline((cx, cy - 75, 0), (cx, cy + 75, 0)), "test_centerline"
     )
     assert dim._dw_spec.kwargs.get("label_offset_x", 0.0) != 0.0, "label was not shifted"
     assert issues == [], f"label still overlaps the centerline: {[i.message for i in issues]}"
@@ -1212,7 +1230,7 @@ def test_pitch_dim_label_clears_a_bolt_circle_centerline():
     from build123d_drafting import CenterlineCircle
 
     dim, issues = _pitch_dim_over_centerline(
-        lambda cx: CenterlineCircle((cx, 222.5), 30), "test_circle"
+        lambda cx, cy: CenterlineCircle((cx, cy), 30), "test_circle"
     )
     assert dim._dw_spec.kwargs.get("label_offset_x", 0.0) != 0.0, "label was not shifted"
     assert issues == [], f"label still overlaps the bolt circle: {[i.message for i in issues]}"

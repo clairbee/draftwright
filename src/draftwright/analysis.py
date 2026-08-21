@@ -55,6 +55,7 @@ from draftwright.compose import (
 from draftwright.model import build_part_model
 from draftwright.model.ir import Datum, PartModel, StepFeature, StepLevelFeature
 from draftwright.model.planner import plan_dimensions
+from draftwright.view_plan import arrangement_of
 
 _log = logging.getLogger(__name__)
 
@@ -520,6 +521,8 @@ def _analyse(
     zones: bool = False,
     _reuse: Analysis | None = None,
     _required_tables=(),
+    _arrangements: tuple[str, ...] | None = None,
+    _views: tuple[str, ...] | None = None,
 ) -> Analysis:
     """Load STEP or use a build123d Shape, analyse geometry, compute layout.
 
@@ -753,14 +756,22 @@ def _analyse(
             table_sizes=layout_table_sizes,
             required_tables=layout_required_tables,
             margin=margin,
+            arrangements=_arrangements,
+            views=_views,
         )
 
-    (SCALE, PAGE_W, PAGE_H, TB_W), strips_i, n_for_sizing = _converge_step_sizing(
+    scale_pick, strips_i, n_for_sizing = _converge_step_sizing(
         len(step_zs),
         _measure_for_step_count,
         _pick_for_step_count,
         lambda scale_i: len(_legible_steps(step_zs, bb.min.Z, scale_i)[0]),
     )
+    SCALE, PAGE_W, PAGE_H, TB_W = scale_pick
+    # The fourth dimension of the ADR 0018 §5 choice, carried from `choose_scale` rather than
+    # re-derived here: this call sees MEASURED strip depths where selection saw estimates, so
+    # re-deriving would compose the sheet under a different arrangement than the one whose
+    # feasibility was actually established (#1130).
+    ARRANGEMENT = arrangement_of(scale_pick)
     _validate_explicit_scale(
         scale,
         SCALE,
@@ -805,6 +816,8 @@ def _analyse(
         table_sizes=layout_table_sizes,
         required_tables=layout_required_tables,
         margin=margin,
+        arrangement=ARRANGEMENT,
+        views=_views,
     )
     fv_hw = _g.fv_hw
     fv_hh = _g.fv_hh
@@ -852,6 +865,8 @@ def _analyse(
     )
 
     return Analysis(
+        arrangement=ARRANGEMENT,
+        planned_views=_views,
         part=part,
         recognition=recognition,
         bb=bb,

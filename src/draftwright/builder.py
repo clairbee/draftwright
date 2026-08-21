@@ -10,6 +10,8 @@ stage modules -- never make_drawing -- so the graph stays a DAG.
 
 from __future__ import annotations
 
+import collections
+import json
 import os
 import warnings
 from collections.abc import Callable, Sequence
@@ -75,7 +77,7 @@ from draftwright.projection import (
     _fit_iso_view,
     _project_iso,
 )
-from draftwright.view_plan import resolve_from_analysis
+from draftwright.view_plan import ARRANGEMENTS, resolve_from_analysis
 
 # A view centre must move by more than this (mm) for the measure-and-repack
 # pass to re-assemble.  Below it, the estimate already matched the measured
@@ -652,6 +654,22 @@ def _repack(
             required_tables=a.layout_required_tables,
             warn_no_iso=False,
             margin=a.margin,
+            # Compose the repack under the SAME arrangement placement used. Without this the
+            # default would silently recompose as `columns`, which is the exact stage
+            # disagreement this decision is carried to prevent.
+            #
+            # No natural part reaches this, and the reason is structural rather than an
+            # accident of the corpus: repack only re-assembles when measured footprints move
+            # a view, and a part annotated densely enough for that is also dense enough to
+            # lose a requirement on the smaller sheet the alternative offers — so the gate
+            # above rejects it first. The two conditions are anti-correlated BY the gate.
+            # (Measured: across the golden corpus and parts built to provoke it,
+            # `_repack_to_fixed_point` is entered under `stacked-iso` and always returns
+            # None.) `test_adr0018_arrangement_gate` therefore forces the trigger, in the
+            # same idiom the other repack tests use, and pins BOTH arrangements so the
+            # assertion cannot be met by a constant.
+            arrangement=a.arrangement,
+            views=a.planned_views,
         )
 
     candidates = _repack_candidates(a, scale, page)
@@ -863,6 +881,8 @@ def _build_drawing_once(
     _analysis_base=None,
     _analysis_sink: Callable[[Analysis], None] | None = None,
     _critique_recognition=None,
+    _arrangements: tuple[str, ...] | None = None,
+    _views: tuple[str, ...] | None = None,
     _required_tables=(),
 ) -> Drawing:
     """Build a customisable 4-view :class:`Drawing` without exporting it.
@@ -965,6 +985,8 @@ def _build_drawing_once(
         zones=zones,
         _reuse=_analysis_base,
         _required_tables=_required_tables,
+        _arrangements=_arrangements,
+        _views=_views,
     )
 
     # Pass 1: place + annotate from the estimated layout, then measure the real
@@ -1071,10 +1093,14 @@ def _is_required_scale_drop(issue) -> bool:
     return True
 
 
-def _scale_blockers(drawing: Drawing) -> tuple[dict, ...]:
-    """Required placement failures on a finished drawing, as stable plain data."""
+def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, ...]:
+    """Required placement failures on a finished drawing, as stable plain data.
+
+    ``physical=False`` restricts the critique to the recognition-free components, so a caller
+    that must not materialise the ADR 0017 aggregate can still read what failed to place.
+    """
     blockers = []
-    for issue in drawing.lint():
+    for issue in drawing.lint(physical=physical):
         if not _is_required_scale_drop(issue):
             continue
         blockers.append(
@@ -1093,6 +1119,99 @@ def _scale_blockers(drawing: Drawing) -> tuple[dict, ...]:
             }
         )
     return tuple(blockers)
+
+
+def _blocker_identity(blocker) -> str:
+    """A stable identity for one required placement failure, for comparing two builds.
+
+    Keyed on WHAT was lost — the code and the measurement/requirement/source ids — never the
+    message, which carries positions and sheet sizes that differ between two layouts of the
+    same defect and would make every blocker look unique.
+    """
+    return json.dumps(
+        {
+            "code": blocker.get("code"),
+            "measurements": blocker.get("measurements", ()),
+            "hole_requirements": blocker.get("hole_requirements", ()),
+            "source_ids": blocker.get("source_ids", ()),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _preserve_requirements_under_arrangement(drawing, chosen, build, blockers_for):
+    """ADR 0018 §5's first hard gate, applied to the arrangement: preserve every supported
+    requirement or reject the candidate.
+
+    The candidate loop can only ask whether the view blocks *fit*. Fitting is necessary and
+    not sufficient, which #1130 measured three separate ways: an alternative arrangement can
+    reach a larger scale whose enlarged views leave the location dims nowhere to go; it can
+    reach a smaller sheet whose reduced free area does the same; and re-deriving it per stage
+    can compose a sheet under an arrangement whose feasibility was never established. In each
+    case the geometry was feasible and the drawing lost a dimension anyway.
+
+    So the gate is not predicted, it is measured on the finished drawing (ADR 0014 Amdt 3),
+    reusing the engine's own definition of a lost requirement — the same `_scale_blockers`
+    the explicit-scale policy rejects a scale on. Applying it here is what closes the gap
+    that made the automatic path emit sheets it would have refused if asked for them
+    explicitly (#1250).
+
+    Costs a second compile only for a drawing that both departed from the preferred
+    arrangement AND lost something: an alternative that lost nothing cannot be improved on,
+    and the preferred arrangement is never second-guessed at all (the caller checks that
+    before calling, since only it knows what the attempt was built under). Every attempt is
+    recorded on the returned drawing, so the cost and the reason are both visible.
+    """
+
+    def _record(winner, attempts):
+        winner.arrangement_decision = {
+            "chosen": next(name for name, status, _found in attempts if status == "chosen"),
+            "attempts": tuple(
+                {"arrangement": name, "status": status, "blockers": found}
+                for name, status, found in attempts
+            ),
+        }
+        return winner
+
+    blockers = blockers_for(drawing)
+    if not blockers:
+        return _record(drawing, [(chosen, "chosen", ())])
+
+    # Rebuild confined to the arrangement every drawing used before this choice existed. It
+    # is kept only if it genuinely preserves more — an alternative is not rejected for
+    # blockers that the preferred arrangement would have produced too.
+    preferred = build(None, (ARRANGEMENTS[0],))
+    preferred_blockers = blockers_for(preferred)
+    # Compared by IDENTITY as a multiset, not by count. Cardinality alone accepts a
+    # DIFFERENT loss: if the preferred layout drops requirement B and the alternative drops
+    # requirement A, both have one blocker, and a `<` test keeps the alternative even though
+    # the default preserved A. That is the opposite of "preserve every supported requirement
+    # or reject the candidate" (#1130 review).
+    #
+    # The rule is therefore one-sided, and deliberately so: the alternative may not introduce
+    # any blocker the preferred result did not already have. It is free to preserve MORE, and
+    # it does not have to beat the default on volume — the default is the baseline every
+    # drawing had before this choice existed, so an alternative earns its place by costing
+    # nothing, not by costing less.
+    introduced = collections.Counter(map(_blocker_identity, blockers)) - collections.Counter(
+        map(_blocker_identity, preferred_blockers)
+    )
+    if introduced:
+        return _record(
+            preferred,
+            [
+                (chosen, "rejected", blockers),
+                (ARRANGEMENTS[0], "chosen", preferred_blockers),
+            ],
+        )
+    return _record(
+        drawing,
+        [
+            (chosen, "chosen", blockers),
+            (ARRANGEMENTS[0], "rejected", preferred_blockers),
+        ],
+    )
 
 
 def _scale_decision(
@@ -1166,6 +1285,7 @@ def build_drawing(
     scale_policy: Literal["strict", "fallback", "permissive"] = "fallback",
     _post_build: Callable[[Drawing], Drawing] | None = None,
     _required_tables=(),
+    _views: tuple[str, ...] | None = None,
 ) -> Drawing:
     """Build a drawing, protecting required annotations under an explicit scale.
 
@@ -1213,11 +1333,39 @@ def build_drawing(
     analysis_base = None
     critique_recognition = None
 
-    def _build(candidate_scale: float | None) -> Drawing:
+    built_arrangement = ARRANGEMENTS[0]
+
+    def _build(
+        candidate_scale: float | None,
+        arrangements: tuple[str, ...] | None = None,
+        views: tuple[str, ...] | None = None,
+    ) -> Drawing:
         nonlocal analysis_base
 
+        # Default to the REQUESTED view set, not to None. Any rebuild — the arrangement
+        # gate's fallback, a scale retry — must carry the decisions the attempt was made
+        # under; the arrangement gate's rebuild silently reverted a two-view request to four
+        # views on a larger sheet until this defaulted (#1130). Same defect class the carried
+        # arrangement fixed, one stage further out.
+        views = _views if views is None else views
+
+        if arrangements is None and not auto_dims:
+            # Nothing to measure means nothing is proved, so fail closed on the arrangement
+            # every drawing used before the choice existed. The gate establishes an
+            # alternative's feasibility by compiling the requirements and reading what failed
+            # to place; a build with no automatic dimensioning compiles none, so an
+            # alternative would be accepted on the strength of an empty ledger — and then
+            # annotations added afterwards through the deferred/`Sheet` seams would be the
+            # ones to lose. Measured: a mixed deferred batch loses its shoulder dimension.
+            arrangements = (ARRANGEMENTS[0],)
+
         def retain_analysis(value: Analysis) -> None:
-            nonlocal analysis_base
+            # `analysis_base` keeps the FIRST analysis (geometry reuse across attempts);
+            # `built_arrangement` tracks the LATEST, because the arrangement gate asks what
+            # the attempt just built under. Read here rather than off the returned drawing:
+            # engine modules must not touch `dwg._*` (ADR 0005 §2).
+            nonlocal analysis_base, built_arrangement
+            built_arrangement = value.arrangement
             if analysis_base is None:
                 analysis_base = value
 
@@ -1226,6 +1374,8 @@ def build_drawing(
             _analysis_base=analysis_base,
             _analysis_sink=retain_analysis,
             _critique_recognition=critique_recognition,
+            _arrangements=arrangements,
+            _views=views,
         )
         return _post_build(built) if _post_build is not None else built
 
@@ -1239,7 +1389,20 @@ def build_drawing(
     if scale is None:
         if scale_policy != "fallback":
             raise ValueError("scale_policy applies only when an explicit scale is supplied")
-        drawing = _build(None)
+        drawing = _build(None, views=_views)
+        if built_arrangement != ARRANGEMENTS[0]:
+            # The RECOGNITION-FREE critique, not `scale_blockers_for`: the gate must reach the
+            # same verdict whether the model was detected or declared, or the arrangement
+            # would depend on how the part was described and ADR 0011's declare-equals-detect
+            # parity would break. Materialising the aggregate here would also recognise a
+            # solid whose features a declared caller has already stated (ADR 0011 / 0017).
+            # Placement drops are recorded during the build, so they survive the restriction.
+            drawing = _preserve_requirements_under_arrangement(
+                drawing,
+                built_arrangement,
+                _build,
+                lambda built: _scale_blockers(built, physical=False),
+            )
         drawing.scale_decision = _scale_decision(
             policy="automatic",
             requested=None,

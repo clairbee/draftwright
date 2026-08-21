@@ -34,6 +34,7 @@ from build123d_drafting.helpers import (
 )
 
 from draftwright._core import (
+    _EDGE_ON,
     _END_ON,
     _EST_CHAR_WIDTH_EM,
     _MARGIN,
@@ -113,6 +114,7 @@ from draftwright.model.ir import (
     PocketFeature,
     SlotFeature,
 )
+from draftwright.view_plan import views_showing
 
 
 def callout_from_spec(spec, draft, count) -> HoleCallout | None:
@@ -1070,7 +1072,17 @@ def _diameter_row_below(dwg, items, start: int = 0, trace=None, *, ctx) -> int:
         return 0
     ev = trace.pass_event("diameter_row_below", view="front") if trace is not None else None
     draft = dwg.draft
-    fx0, fy0, fx1, _ = dwg.view_bounds("front")
+    bounds = dwg.view_bounds("front")
+    if bounds is None:
+        # The row is anchored under the front elevation, and this sheet does not carry one.
+        # `view_bounds` has always documented `None` for a view it does not have (#28); with a
+        # fixed four-view topology that could not happen, so the caller unpacked it directly
+        # and a view set without the front crashed here. Skipping is the established
+        # behaviour of this function when there is no room — the diameters then surface as
+        # `feature_not_dimensioned` — and it is what lets the requirement gate WEIGH a view
+        # set instead of the build dying inside a pass (#1130).
+        return 0
+    fx0, fy0, fx1, _ = bounds
     obstacle_bottom = fy0
     for o in dwg.items:
         try:
@@ -2609,7 +2621,7 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
     normal to the DEPTH axis — not identical, so the map stays."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "plan", "x": "side", "y": "front"}
+    view_of = _END_ON
     pocket_groups = list(plan.of_kind("pocket"))
     jobs = []
     for i, g in enumerate(
@@ -2688,7 +2700,7 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
     width is visible — not provably identical, so the map stays."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "front", "x": "front", "y": "side"}
+    view_of = _EDGE_ON  # a groove profile reads on the face its axis lies in
     groove_groups = list(plan.of_kind("groove"))
     jobs = []
     for gi, g in enumerate(
@@ -2756,7 +2768,7 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
         # OD diameter row/column, not an end-on plan leader. Only true prismatic parts qualify.
         return 0
     draft = dwg.draft
-    view_of = {"z": "plan", "x": "side", "y": "front"}  # the view looking down the boss axis
+    view_of = _END_ON  # the view looking down the boss axis
     boss_groups = list(plan.of_kind("boss"))
     mentioned = _mentioned_diameters(dwg)
     reach = draft.font_size + 6 * draft.pad_around_text
@@ -3188,7 +3200,7 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
         if (pd := g.dim(role="channel_width", kind="length")) is not None and pd.span is not None
     ]
     channel_counts: dict[str, int] = {"x": 0, "y": 0, "z": 0}
-    view_for_long_axis = {"x": "side", "y": "front", "z": "plan"}
+    view_for_long_axis = _END_ON  # looking down the long axis IS reading it end-on
     zones_for_view = {"front": a.fv_zones, "side": a.sv_zones, "plan": a.pv_zones}
     for g, pd in sorted(
         channel_groups,
@@ -3430,21 +3442,50 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             ),
         )
 
-    width = env.dim(role="width")
-    if width is not None and width.span is not None:
-        (x0, y0, z0), (x1, _, _) = width.span
-        p1, p2 = dwg.at("plan", x0, y0, z0), dwg.at("plan", x1, y0, z0)
+    # ADR 0018: an extent is observable in EITHER view whose page plane contains its axis —
+    # the overall width reads in plan and equally in front. Each was previously pinned to one
+    # view, which is why dropping the plan view raised `ViewNotPlanned` from here instead of
+    # re-homing the width dim. `views_showing` prefers the view each has always used, so
+    # nothing moves while all three principals are planned.
+    zones_for_view = {"front": a.fv_zones, "plan": a.pv_zones, "side": a.sv_zones}
+    for role, axis, slot, ann_name in (
+        ("width", "x", _SLOT_DIM_WIDTH, "m_env_width"),
+        ("depth", "y", _SLOT_DIM_DEPTH, "m_env_depth"),
+    ):
+        extent = env.dim(role=role)
+        if extent is None or extent.span is None:
+            continue
+        view = views_showing(axis, dwg.views, horizontal=True)
+        if view is None:
+            # No planned view can carry it. Reported against the measurement, never dropped
+            # in silence (ADR 0016 Amdt 6) — and this is exactly what the ADR 0018
+            # requirement gate reads to reject a view set that costs a mandatory extent.
+            ctx.record_issue(
+                "error",
+                "overall_dim_withheld",
+                f"overall {role} cannot be shown: no planned view lays the {axis} axis "
+                f"out horizontally (planned: {tuple(dwg.views)})",
+                measurement=extent.id,
+            )
+            continue
+        index = "xyz".index(axis)
+        start_pt = tuple(extent.span[0])
+        end_pt = tuple(
+            extent.span[1][index] if i == index else value for i, value in enumerate(start_pt)
+        )
+        p1, p2 = dwg.at(view, *start_pt), dwg.at(view, *end_pt)
         witness = p1[1] - _WITNESS_LIFT_MM
+        zones = zones_for_view[view]
         _queue(
-            "m_env_width",
-            a.pv_zones.below,
-            a.pv_zones.above,
-            "plan",
-            _SLOT_DIM_WIDTH,
-            abs(x1 - x0),
+            ann_name,
+            zones.below,
+            zones.above,
+            view,
+            slot,
+            abs(end_pt[index] - start_pt[index]),
             (p1[0], p2[0]),
-            _env_label(width, dwg.draft),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(width, dwg.draft): _dim(
+            _env_label(extent, dwg.draft),
+            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(extent, dwg.draft): _dim(
                 (_p1[0], _w, 0),
                 (_p2[0], _w, 0),
                 "below",
@@ -3462,38 +3503,10 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
             # flip regime (span ~8-20 mm), and there the toleranced footprint reserves LESS in
             # the strip-depth direction, not more — the opposite of "reserves too little"
             # (#1234 review r2).
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(width, dwg.draft): (
+            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(extent, dwg.draft): (
                 dim_footprint((_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v)
             ),
-            measurement=width.id,
-        )
-        n += 1
-    depth = env.dim(role="depth")
-    if depth is not None and depth.span is not None:
-        (x0, y0, z0), (_, y1, _) = depth.span
-        p1, p2 = dwg.at("side", x0, y0, z0), dwg.at("side", x0, y1, z0)
-        witness = p1[1] - _WITNESS_LIFT_MM
-        _queue(
-            "m_env_depth",
-            a.sv_zones.below,
-            a.sv_zones.above,
-            "side",
-            _SLOT_DIM_DEPTH,
-            abs(y1 - y0),
-            (p1[0], p2[0]),
-            _env_label(depth, dwg.draft),
-            lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(depth, dwg.draft): _dim(
-                (_p1[0], _w, 0),
-                (_p2[0], _w, 0),
-                "below",
-                _w - pos,
-                dwg.draft,
-                label=_v,
-            ),
-            footprint=lambda pos, _p1=p1, _p2=p2, _w=witness, _v=_env_label(depth, dwg.draft): (
-                dim_footprint((_p1[0], _w, 0), (_p2[0], _w, 0), "below", _w - pos, dwg.draft, _v)
-            ),
-            measurement=depth.id,
+            measurement=extent.id,
         )
         n += 1
     return n

@@ -1,16 +1,244 @@
 # ADR 0018 — Requirement-driven view planning and editable sheet layout
 
-- **Status:** **Accepted** (2026-08-16). **Nothing here is implemented yet** — no
-  `ViewSpec`, `ViewConstraints` or `ResolvedViewPlan` exists in the code, and the engine
-  still builds the fixed front/plan/side/iso topology. Read this as the decided
-  direction, not as a description of current behaviour; delivery is phased through
-  #1130, first slice a no-behaviour-change `ViewSpec`/`ResolvedViewPlan` representation.
+- **Status:** **Accepted** (2026-08-16), **partially implemented** — see Amendment 1
+  (2026-08-21) for the authored surface. Delivery is phased through #1130. What exists:
+  `ViewSpec`, `ResolvedViewPlan` and `ViewCoverage` (`view_plan.py`); the layout choice as a
+  candidate over scale x sheet x **arrangement**, with §5's first hard gate applied by real
+  compile; and a chosen view set that is buildable, refusable and reclaims the paper it frees.
+  What does not: `ViewConstraints` and the `Sheet` verbs, automatic view SELECTION (nothing
+  drops a view on its own — the case study reaches its A2 target and costs six annotations, so
+  a gate weighing it refuses), and any planning of sections or details. `_views` is an engine
+  seam, not a public option.
   The "Required evidence before acceptance" list below is retained verbatim as the
   **delivery gate** each slice is measured against — accepting the direction does not
   waive it, and automatic semantic view selection lands only once those invariants are
   guarded.
 - **Date:** 2026-08-11 (proposed), 2026-08-16 (accepted)
 - **Deciders:** Paul Fremantle (pzfreo)
+
+## Amendment 1 — the authored surface mirrors the dimension model, and bans one combination (2026-08-21)
+
+**`Sheet` gains view intent through the same three-verb structure as ADR 0016's dimensions,
+and authored views with automatic dimensions is refused rather than resolved.**
+
+The §1 sketch below (`s.views.remove("plan")`, `s.layout.row(...)`) predates the shipped
+`Sheet` DSL and does not match it. `Sheet` has no sub-namespaces: every declaration is a verb
+on the sheet returning a handle (#922), and aspects chain onto that handle. More importantly,
+ADR 0016 already settled how an authored set relates to an automatic one, and view selection
+must not invent a second answer to the same question.
+
+### The verb structure
+
+| dimensions (ADR 0016) | views (this ADR) | meaning |
+| --- | --- | --- |
+| `dimension(...)` | `view(...)` | these lines **are** the set; omission suppresses |
+| `add_dimension(...)` | `add_view(...)` | augments the planner's set; requires the `auto_` form |
+| `authored_dimensions()` | `authored_views()` | states the source with a verb; makes the EMPTY set sayable |
+| `auto_dimensions()` | `auto_views()` | the planner's set; soft-deprecated in favour of authored |
+| requesting neither raises | same | a silently unplanned sheet is plausible-looking and wrong |
+
+The soft-deprecation of the `auto_` form carries over for the same three reasons ADR 0016
+gives: authored is what `--script` emits, omission-means-suppression only holds for an
+authored set, and an authored list is editable text.
+
+`view(...)` selects the authored source on its own, exactly as `dimension(...)` does. That is
+not the "implicit-by-usage" design this ADR's predecessor rejected — what makes it safe is the
+verb split. A user who wants to *add* one view reaches for `add_view`, so `view` is
+unambiguous. Recycling one verb for both sources is the rejected design; two verbs is not.
+
+Cardinality argues for this rather than against it. A drawing carries three or four views and
+dozens of dimensions, so "authored means all of them" costs almost nothing here — it is cheap
+in precisely the case where the dimension version was expensive enough to need an emitter.
+
+### The ban: authored views with automatic dimensions
+
+`authored_views()` (or any `view(...)` line) together with `auto_dimensions()` raises, at the
+point the second verb is called, so the error names the line that created the contradiction.
+
+The reason is this ADR's own thesis stated as an API constraint. **The dependency is one-way:
+requirements determine views, and views do not determine requirements.** Of the four
+combinations, three are coherent and one is inverted:
+
+- automatic views + automatic dimensions — the planner owns both.
+- authored views + authored dimensions — the author owns both, and every line that cannot be
+  placed is reported against its own statement.
+- automatic views + authored dimensions — **the best case**, and the one to lead with in
+  documentation. The planner knows exactly which requirements exist, so it can select the
+  minimal view set that carries them. Requirement-driven planning works best when the
+  requirements are stated.
+- authored views + automatic dimensions — inverted. The user fixes the views and then asks
+  the planner to produce requirements that happen to fit them. It cannot, and nobody owns the
+  conflict: the failure surfaces as dimensions the compiler assigned to views that are not
+  there. Measured during #1130 — a view set the layout accepts still costs annotations, and
+  the drawing loses six of them on this ADR's own case study.
+
+Refusing it removes an entire policy from the design. Without the ban, this ADR would owe a
+re-homing rule for planner-chosen dimensions landing in author-chosen views, plus a way to
+report what could not be re-homed, plus a decision about whether the planner may override the
+authored set to save a requirement. With it, the requirement gate keeps exactly one job:
+proving that an **automatically** dropped view costs nothing.
+
+The workflow the ban implies is better than the thing it forbids. "I want two views" becomes:
+generate the script, delete the `view("plan")` line, rebuild. Both sets are text in front of
+you, so stranding a dimension by dropping a view is visible in the diff instead of discovered
+at build time.
+
+**The honest cost.** The ban is transitive: authored views now imply accepting the authored-
+dimension mirror's gaps, tabulated under "What the mirror does and does not cover" in ADR
+0016. The one that bites is inter-feature spans and angles, which have no `(feature, role)`
+form and emit as a comment until `RelationDimensionId` lands — so a part whose automatic
+drawing carries such a span loses it on authoring views. That is a pre-existing property of
+authored dimensions rather than something the ban creates, but the ban propagates it to a new
+population and couples authored views to the relation-selector roadmap. Two things make it
+acceptable: three of the six gaps shrink as the identity model grows, and the emitter writes a
+self-describing comment for anything it cannot re-solve, so the loss is visible in the script
+rather than silent on the sheet.
+
+### How a user finds out their view set does not work
+
+An authored view set can be wrong in a way an authored dimension set cannot: omitting a
+dimension omits one thing, but omitting a *view* can strand dimensions the compiler assigned
+to it. The surface must therefore say so, at the earliest moment that can.
+
+Today it says so at the worst one. A `Sheet` user whose views cannot carry their dimensions
+gets `ViewNotPlanned` raised from inside `render_centermarks` — an exception naming the view
+but not their line, not the dimension that needed it, and not what to add. That is an internal
+invariant escaping to a user.
+
+**Three moments, and the rule is to fail at the earliest one that can give a complete answer.**
+
+1. **At the verb.** `view("elevation")` raises immediately, naming the valid view names. No
+   build required, and no reason to defer it.
+
+2. **At `build()`, before projection — the one that matters.** The authored view set and the
+   authored dimension set are both known before `build()`; that is the same property that
+   makes ADR 0016's suppression-by-omission work without a recompose. So the planner resolves
+   every approved dimension's view against the authored set and collects those with nowhere
+   to go, using no geometry, no projection and no rendering.
+
+   Because the observability map knows which views *could* carry a requirement — not merely
+   which one it was assigned — the diagnostic is actionable rather than descriptive. It names
+   what is unshowable, why, and which view would show it:
+
+   ```
+   ViewPlanIncomplete: 2 authored dimensions cannot be shown by the authored view set
+     ('front',):
+
+     envelope.depth    reads horizontally only in `side` — add view("side")
+     hole_1.location   reads face-on only in `plan`      — add view("plan")
+
+     View declared at part.py:14 view("front").
+   ```
+
+   That example is derived from the maps rather than sketched: with `("front",)` authored,
+   `views_showing("y", horizontal=True)` is `None` and only `side` qualifies, `_END_ON["z"]`
+   is `plan`, and `envelope.width` resolves to `front` and is therefore absent from the
+   report. A diagnostic example that defines a public contract has to be executable, not
+   illustrative — the first draft of this block declared `("front", "side")` and then told
+   the reader to add `side`.
+
+   Named against the ADR 0016 dimension identity rather than a page-keyed annotation name, so
+   it survives a re-solve at another scale and matches the line in an emitted script.
+
+3. **After `build()`.** `dwg.view_decision` is always present, on the model of
+   `section_decision` — a caller must not have to infer the outcome from a log line one code
+   path emits and another does not. Lint carries anything that passed the coherence check and
+   failed anyway. That split is real and worth keeping: *no view can show this* is knowable
+   statically, *it did not fit* needs measurement (ADR 0014 Amdt 3).
+
+**There is no `fallback` policy for an authored view set.** `scale_policy` has three settings
+because the engine can choose a different scale; here the request IS the answer, so the
+choices collapse to raise or report. The default is to raise, on ADR 0016's reasoning that a
+plausible-looking incomplete drawing is worse than a visible failure, and on §6 above:
+authored constraints are never silently relaxed. A `permissive` opt-in may return the
+incomplete drawing, and must warn.
+
+**Consequence for `ViewNotPlanned`.** Once the pre-projection check exists, that exception is
+unreachable from the public API — it becomes an internal invariant. A user who sees one has
+found a hole in the check, and that is the bug, not the drawing.
+
+**This is gated on the compiler, not the DSL.** The check asks "which view does this
+dimension need, given this view set", which is `planner._group_view` — still hardwired to the
+fixed topology, so it cannot answer for a set it was not told about. Until it takes the
+planned view set, the earliest a user can find out remains a render pass tripping over a
+missing view. That is the same prerequisite the rest of this amendment has, and it is the
+reason to take it first.
+
+### Sections and details are views, and their verbs are reshaped
+
+`Sheet.section(feature=None, *, at=None)` and `Sheet.detail()` shipped in v0.3.9 (#841/#847)
+and cannot express what this ADR needs. Three defects: they return `Sheet` where every
+declaration verb returns a handle (#922); `_section` is a single slot, so A–A and B–B cannot
+coexist; and `detail()` takes no target at all — it is an enable flag, not a declaration.
+
+They are **hard-deprecated** (`DeprecationWarning`, removal target 0.6.0, batching with the
+existing 0.6.0 cohort) rather than soft. Soft deprecation is for a surface that works and is
+staying; these are compat surfaces, which ADR 0005 §4 requires to carry an exit date.
+
+The replacements are named, targeted and return handles:
+
+```python
+sec = s.section_view("A", through=bore)          # or at=12.0 for a bare cut plane
+det = s.detail_view("B", around=hole).scale(2.0)
+```
+
+Being views, they join the authored view set: declaring one puts it on the sheet, and omitting
+it from an authored set means it is absent. The automatic section trigger (`plan_sections`)
+belongs to `auto_views()`.
+
+New names rather than an overload, on two precedents. #720 removed `dimension`'s transitional
+dual call-shape because "`dimension` means one thing", splitting `measured_dimension` out as a
+separate verb. And ADR 0016 holds that a verb must not mean one thing in one release and
+another in the next — which forbids recycling `section` for a different arity and return type.
+So `section` retires; it is not reused.
+
+`docs/deprecations.md` currently tells `Drawing.add_view()` callers to "use the section verb",
+a pointer that must name the replacement or it directs people at something being removed.
+
+### Derived views augment; only authoring verbs define a set
+
+`Sheet.section(feature)` today forces a section onto an otherwise automatic drawing, and that
+capability must survive. Under the rules above it would not: `section_view(...)` joins the
+authored view set, which selects the authored source, which triggers the ban — so forcing one
+section would cost a user their automatic principal views AND their automatic dimensions.
+That is a real loss of expressiveness introduced by this amendment, and the fix is to say
+which verbs define a set and which only add to one.
+
+**Derived views are their own set**, separate from the principal views, with the same
+three-verb structure:
+
+| verb | meaning |
+| --- | --- |
+| `section_view(...)` / `detail_view(...)` | these lines **are** the derived set; omission suppresses the automatic section |
+| `add_section_view(...)` / `add_detail_view(...)` | augments the automatic derived set; requires `auto_views()` |
+
+The `plan_sections` trigger is the automatic derived set, so omission has something to mean:
+an authored derived set with no `section_view(...)` line is how a user says "no section, even
+though the counterbore would fire one".
+
+**The ban is on authoring, not on adding.** The general rule, which the principal-view ban is
+one case of:
+
+- an **authoring** verb defines a set, so omission is significant, so it can strand a
+  planner-chosen dimension in a view that is not there. Authored views of either kind with
+  `auto_dimensions()` raises.
+- an **augmenting** verb is purely additive. It removes nothing, so it can strand nothing, and
+  it is legal with `auto_dimensions()`.
+
+That restores the lost capability exactly, and gives `Sheet.section(feature)` a like-for-like
+replacement rather than a lossy one:
+
+```python
+s = Sheet(part).auto_views().auto_dimensions()
+s.add_section_view("A", through=bore)      # today's Sheet.section(bore)
+```
+
+### What this amendment does not change
+
+The value vocabulary of §1 stands: `ViewSpec` as the semantic description, `ViewConstraints`
+as the authored request, `ResolvedViewPlan` as the immutable result. What changes is how the
+request is spelled on `Sheet` — verbs and handles, not namespaces — and that one combination
+of the two sources is refused rather than reconciled.
 
 ## Why now — the evidence that converged (2026-08-16)
 
@@ -131,6 +359,11 @@ Automatic and authored modes therefore share one planner and one value vocabular
 pretending its input and output are the same state.  A generated resolved script converts a
 `ResolvedViewPlan` into explicit `ViewConstraints`; it does not feed a result object back into
 the builder or mutate a built `Drawing`.
+
+> **Superseded by Amendment 1 (2026-08-21).** The `s.views.*` / `s.layout.*` spelling below
+> predates the shipped `Sheet` DSL and does not match it — `Sheet` has no sub-namespaces. Read
+> the amendment for the verb structure that replaces it. The lifecycle distinction this section
+> draws (request vs result) is unchanged and still holds.
 
 The exact Python spelling is deliberately left to the implementation issue, but the intended
 capability is:

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from draftwright._geometry import _END_ON, HoleRef
+from draftwright._geometry import _EDGE_ON, _END_ON, HoleRef
 from draftwright.model.ir import (
     ChannelFeature,
     Datum,
@@ -282,7 +282,7 @@ class DimensionGroup:
 # span is degenerate — a point). The front view is the x–z plane, so X- and Z-turned
 # axes both derive to "front" by that one containment rule (X/Z parity); a Y axis
 # lies in the side (y–z) plane — the same map the groove profile callouts use.
-_PROFILE = {"x": "front", "z": "front", "y": "side"}
+_PROFILE = _EDGE_ON
 
 
 def _group_view(feature: Feature) -> str:

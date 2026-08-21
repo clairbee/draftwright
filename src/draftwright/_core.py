@@ -42,7 +42,14 @@ from build123d_drafting.helpers import (
 # now live in the leaf `draftwright._geometry` so the IR waist (`model/`) can use them
 # without importing this stage-level grab-bag (ADR 0008; #584 WP2). Re-exported here for
 # the above-`_core` consumers (annotations/sheet/drawing/linting) that already import them.
-from draftwright._geometry import _END_ON, HoleRef, _axis_letter, _fmt, _xyz  # noqa: F401
+from draftwright._geometry import (  # noqa: F401
+    _EDGE_ON,
+    _END_ON,
+    HoleRef,
+    _axis_letter,
+    _fmt,
+    _xyz,
+)
 from draftwright.fits import FitClass
 from draftwright.fonts import PLEX_MONO, PLEX_SANS_CONDENSED
 from draftwright.layout import _greedy_strip_1d, _solve_strip_1d
@@ -1090,6 +1097,19 @@ class Analysis:
     # declared a model (ADR 0011) or on a manually-built Analysis — consumers fall
     # back to build_model(a).
     model: object | None = None
+    #: The relational arrangement the sheet was composed under — ADR 0018 §5's fourth
+    #: dimension, decided once by `compose.choose_scale` and carried here so that placement
+    #: and the repack loop compose under the arrangement whose feasibility was actually
+    #: established. They call `_layout_geometry` with MEASURED strip depths where selection
+    #: passed estimates, so a stage that re-derives this instead of reading it can reach a
+    #: different answer for the same sheet and lose dimensions to the mismatch (#1130).
+    #: Defaulted for hand-built `Analysis` objects, which mean the long-standing arrangement.
+    arrangement: str = "columns"
+    #: The principal views this sheet carries, or None for the third-angle three (ADR 0018).
+    #: Decided once alongside scale/page/arrangement and carried, for the same reason: the
+    #: layout must reserve space for exactly the views the builder creates, or dropping one
+    #: costs its annotations without reclaiming its paper.
+    planned_views: tuple[str, ...] | None = None
 
     @property
     def pmi(self) -> list:
