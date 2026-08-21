@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any
 
 #: The model axes a principal view projects onto the page, as ``(page_x, page_y)``.
 #: Third-angle front shows model x across and z up; the plan shows x across and y up; the side
@@ -174,4 +175,84 @@ def resolve_from_analysis(analysis) -> ResolvedViewPlan:
         placements=placements,
         scale=analysis.SCALE,
         page=(analysis.PAGE_W, analysis.PAGE_H),
+    )
+
+
+@dataclass(frozen=True)
+class ViewCoverage:
+    """What one view carries, and what would be lost with it.
+
+    `carries` is every measurement drawn in this view; `exclusive` is the subset no other view
+    draws. The distinction is the whole point: a view whose measurements all appear elsewhere
+    costs the sheet its area and contributes nothing a reader could not get from another view.
+    """
+
+    view: str
+    carries: frozenset
+    exclusive: frozenset
+
+    @property
+    def carries_nothing_exclusively(self) -> bool:
+        """No measurement would be lost if this view were removed.
+
+        **Necessary, not sufficient**, and the name says so rather than saying "redundant". A
+        view can carry no exclusive DIMENSION and still be required: it may be the only view
+        showing a feature's shape, the projection convention may demand it, or a reader may need
+        it to relate two others. ADR 0018 makes exactly this the trap to avoid — "removing a
+        visually similar but semantically necessary view is rejected by an asymmetric
+        counterexample" — so this answers the measurable half and refuses to imply the rest.
+        """
+        return not self.exclusive
+
+
+def view_coverage(drawing) -> Mapping[str, ViewCoverage]:
+    """Per-view measurement coverage of a FINISHED drawing.
+
+    The evidence view selection needs and does not yet have: before a view can be dropped,
+    something has to be able to say what goes with it. Read through the ADR 0010 provenance
+    seam — an annotation claiming a `DimensionId` is asserting it draws that measurement — and
+    the view each annotation was tagged with at placement, so this is what the sheet actually
+    carries rather than what the compiler hoped for.
+
+    Duck-typed on `drawing` (`registry.names()`, `view_of`, `registry.measurement_of`) so this
+    stays a rank-0 leaf, the way `audit` reads finished drawings without the engine depending on
+    it. Annotations owned by no orthographic view — the title block, iso furniture — are grouped
+    under `None` and take part in the exclusivity arithmetic, because a measurement stated only
+    on the iso is still stated.
+    """
+    per_view: dict[Any, set] = {}
+    for name in drawing.registry.names():
+        view = drawing.view_of(name)
+        claimed = drawing.registry.measurement_of(name) or ()
+        per_view.setdefault(view, set()).update(claimed)
+
+    coverage = {}
+    for view, carries in per_view.items():
+        elsewhere: set = set()
+        for other, theirs in per_view.items():
+            if other != view:
+                elsewhere |= theirs
+        coverage[view] = ViewCoverage(
+            view=view, carries=frozenset(carries), exclusive=frozenset(carries - elsewhere)
+        )
+    return MappingProxyType(coverage)
+
+
+def views_carrying_nothing_exclusively(drawing) -> tuple[str, ...]:
+    """Principal views whose every measurement is also drawn elsewhere, sorted.
+
+    A CANDIDATE list for removal, not a verdict — see
+    :attr:`ViewCoverage.carries_nothing_exclusively`. Restricted to principal views because the
+    pictorial view is orientation and carries no requirements by design, so reporting it here
+    every time would be noise that trains a reader to ignore the answer.
+    """
+    coverage = view_coverage(drawing)
+    plan = getattr(drawing, "view_plan", None)
+    principals = set(plan.principal_names) if plan is not None else {"front", "plan", "side"}
+    return tuple(
+        sorted(
+            name
+            for name, cover in coverage.items()
+            if name in principals and cover.carries_nothing_exclusively
+        )
     )

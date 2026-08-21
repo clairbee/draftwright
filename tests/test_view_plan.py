@@ -215,3 +215,115 @@ def test_the_repack_loop_really_consumes_the_plan():
         "changing the measured view geometry changes nothing on this fixture, so it no longer "
         "exercises the repack loop and the plan's only uncovered consumer is unverified again"
     )
+
+
+class TestPerViewRequirementCoverage:
+    """ADR 0018 slice 2: what each view carries, and what would go with it.
+
+    Selection cannot happen until something can answer "what is lost if this view goes", and
+    nothing could. This is that answer, and the ADR names the two cases it must separate:
+
+        Removing a truly redundant view retains every requirement and reduces the selected
+        footprint.
+
+        Removing a visually similar but semantically necessary view is rejected by an
+        asymmetric counterexample.
+
+    The pair below is that asymmetry. Both parts have three principal views showing broadly
+    similar silhouettes; on one, a view carries nothing of its own, and on the other every view
+    does. A rule that cannot tell them apart would either strip a needed view or never strip
+    anything.
+    """
+
+    def test_a_rotational_plate_has_one_view_carrying_nothing_of_its_own(self):
+        """The redundant case, and the reason the thin plate needs an A1.
+
+        On an X-axis rotational part the front and plan are the same edge-on projection. The
+        engine draws both because the topology is fixed, and the plan ends up carrying no
+        measurement at all — 217 mm of sheet for a repeat of its neighbour.
+        """
+        from test_issue_1130_view_planning_evidence import thin_rotational_plate
+
+        from draftwright.view_plan import view_coverage, views_carrying_nothing_exclusively
+
+        drawing = build_drawing(thin_rotational_plate(), title="T", number="N")
+        coverage = view_coverage(drawing)
+
+        assert views_carrying_nothing_exclusively(drawing) == ("plan",)
+        assert coverage["plan"].carries == frozenset(), (
+            f"the plan view now carries {len(coverage['plan'].carries)} measurements, so this "
+            "is no longer the redundant-view case"
+        )
+        # The other two are not candidates, and carry real content — otherwise "one candidate"
+        # would be satisfied by a drawing that had simply lost its dimensions.
+        assert coverage["front"].exclusive and coverage["side"].exclusive
+        assert len(coverage["side"].carries) > 5
+
+    def test_a_prismatic_plate_has_none(self):
+        """The counterexample. Three views, every one carrying something only it carries.
+
+        Without this the redundancy rule could be "drop the plan view", which is true of the
+        fixture above and false in general.
+        """
+        from draftwright.view_plan import view_coverage, views_carrying_nothing_exclusively
+
+        part = (
+            Box(120, 80, 12)
+            - Pos(-30, 10, 0) * Cylinder(4, 40)
+            - Pos(30, -10, 0) * Cylinder(4, 40)
+        )
+        drawing = build_drawing(part, title="T", number="N")
+        coverage = view_coverage(drawing)
+
+        assert views_carrying_nothing_exclusively(drawing) == ()
+        for name in ("front", "plan", "side"):
+            assert coverage[name].exclusive, (
+                f"{name} carries nothing exclusively on the counterexample, so the asymmetry "
+                f"this pair exists to prove is gone: "
+                f"{ {v: len(c.exclusive) for v, c in coverage.items()} }"
+            )
+
+    def test_coverage_is_read_from_what_the_sheet_actually_carries(self):
+        """Through the ADR 0010 seam, not from the compiler's intentions.
+
+        A measurement the compiler approved and no annotation drew must not appear as covered —
+        that is the difference between "the plan wanted this" and "the drawing says this", and
+        the whole value of the answer depends on it being the second.
+        """
+        from draftwright.view_plan import view_coverage
+
+        drawing = build_drawing(Box(80, 60, 20), title="T", number="N")
+        coverage = view_coverage(drawing)
+
+        claimed_by_annotations = set()
+        for name in drawing.registry.names():
+            claimed_by_annotations |= set(drawing.registry.measurement_of(name) or ())
+        from_coverage = set().union(*(cover.carries for cover in coverage.values()))
+        assert from_coverage == claimed_by_annotations
+
+    def test_an_exclusive_measurement_is_one_no_other_view_draws(self):
+        """The arithmetic, on a constructed drawing rather than on whatever a part produces."""
+        from types import SimpleNamespace
+
+        from draftwright.view_plan import view_coverage
+
+        shared, only_front = object(), object()
+        registry = SimpleNamespace(
+            names=lambda: ["a", "b", "c"],
+            measurement_of=lambda n: {
+                "a": (shared, only_front),
+                "b": (shared,),
+                "c": (),
+            }[n],
+        )
+        drawing = SimpleNamespace(
+            registry=registry,
+            view_of=lambda n: {"a": "front", "b": "side", "c": "plan"}[n],
+            view_plan=None,
+        )
+        coverage = view_coverage(drawing)
+
+        assert coverage["front"].carries == frozenset({shared, only_front})
+        assert coverage["front"].exclusive == frozenset({only_front})
+        assert coverage["side"].exclusive == frozenset()
+        assert coverage["plan"].carries_nothing_exclusively
