@@ -889,10 +889,10 @@ def ctc01_annotated(tmp_path_factory):
     return build_drawing(str(CTC01), out=stem, title="CTC-01", number="NIST-01", pmi="annotate")
 
 
-def _single_source_dimension_drawing():
+def _single_source_dimension_drawing(**opts):
     from draftwright import Sheet
 
-    sheet = Sheet(Box(40, 30, 20), title="PMI render mutation").authored_dimensions()
+    sheet = Sheet(Box(40, 30, 20), title="PMI render mutation", **opts).authored_dimensions()
     sheet.measured_dimension(
         kind="linear",
         value=20,
@@ -1192,7 +1192,12 @@ class TestBuildDrawingPmi:
 
         monkeypatch.setattr(common, "place_strip_candidates", reject_source_candidate)
         monkeypatch.setattr(from_model, "place_strip_candidates", reject_source_candidate)
-        drawing = _single_source_dimension_drawing()
+        # Pinned scale + `permissive`: this test FORCES a placement drop, and since #1250 the
+        # automatic path answers a drop by looking for a smaller complete scale. Asking for
+        # the incomplete drawing explicitly is how a caller says "yes, I want this one" — and
+        # it keeps the fixture's subject, which is how the drop is REPORTED, not whether the
+        # engine can dodge it.
+        drawing = _single_source_dimension_drawing(scale=1.0, scale_policy="permissive")
         feature = next(
             feature
             for feature in drawing.model().features

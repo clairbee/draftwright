@@ -17,7 +17,7 @@ from draftwright import (
     SoftDeprecationWarning,
     build_drawing,
 )
-from draftwright.builder import _is_required_scale_drop
+from draftwright.builder import _complete_automatic_plan, _is_required_scale_drop
 from draftwright.linting import LintIssue
 
 
@@ -34,6 +34,45 @@ def _scale_sensitive_plate():
 
 def _placement_drops(drawing):
     return [issue for issue in drawing.lint() if _is_required_scale_drop(issue)]
+
+
+def test_automatic_incomplete_summary_preserves_every_provenance_channel():
+    """Unknown registry coverage fails closed; the error stays addressable (#1250 review)."""
+
+    dropped = LintIssue(
+        severity="warning",
+        code="pmi_dropped",
+        message="synthetic source and physical requirement drop",
+        source_ids=("dimension:mutation",),
+        hole_requirement_ids=(("hole:mutation", "location.location.x"),),
+        outcome_stage="placement",
+    )
+
+    class Registry:
+        def __init__(self):
+            self.issues = [dropped]
+
+        def record_issue(self, issue):
+            self.issues.append(issue)
+
+    registry = Registry()
+    drawing = SimpleNamespace(
+        scale=1.0,
+        registry=registry,
+        lint=lambda physical=False: tuple(registry.issues),
+    )
+
+    with pytest.warns(ScaleCompletenessWarning, match="returning the incomplete drawing"):
+        returned = _complete_automatic_plan(drawing)
+
+    assert returned is drawing
+    assert drawing.scale_decision["status"] == "incomplete"
+    assert drawing.scale_decision["attempted_scales"] == (1.0,)
+    summary = registry.issues[-1]
+    assert summary.code == "plan_incomplete"
+    assert summary.measurement_ids == ()
+    assert summary.hole_requirement_ids == dropped.hole_requirement_ids
+    assert summary.source_ids == dropped.source_ids
 
 
 @pytest.mark.timeout(120)

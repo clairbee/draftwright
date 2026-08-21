@@ -118,6 +118,21 @@ def test_corridor_dim_constructions_bounded(monkeypatch):
         builds += 1
         return real_dimension(p1, p2, side, distance, draft, **kwargs)
 
+    # Count COMPILES too. A build is no longer one compile: the ADR 0018 arrangement gate and
+    # the #1250 completeness fallback both prove a candidate by building it, so the bound has
+    # to be per compile or it measures how many candidates were tried rather than whether the
+    # corridor probes (#1130, #1250).
+    import draftwright.builder as builder_mod
+
+    compiles = 0
+    real_assemble = builder_mod._assemble
+
+    def counting_assemble(*args, **kwargs):
+        nonlocal compiles
+        compiles += 1
+        return real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(builder_mod, "_assemble", counting_assemble)
     monkeypatch.setattr(core, "Dimension", counting_dimension)
     dwg = build_drawing(_scattered_plate())
 
@@ -130,7 +145,6 @@ def test_corridor_dim_constructions_bounded(monkeypatch):
     # arrangement preserves every requirement by building it and reading what failed to
     # place. This part is one that gets rejected, so it compiles twice; dividing by the
     # recorded attempts keeps the guard measuring what it was written to measure (#1130).
-    compiles = len(dwg.arrangement_decision["attempts"])
     assert compiles >= 1
     assert builds <= (len(placed) + 5) * compiles, (
         f"{builds} Dimension builds for {len(placed)} placed — the #602 corridor "
@@ -153,12 +167,25 @@ def test_grid_pitch_dim_constructions_bounded(monkeypatch):
             pitch_builds += 1
         return real_dimension(p1, p2, side, distance, draft, **kwargs)
 
+    # Per compile, for the same reason as the corridor guard above.
+    import draftwright.builder as builder_mod
+
+    compiles = 0
+    real_assemble = builder_mod._assemble
+
+    def counting_assemble(*args, **kwargs):
+        nonlocal compiles
+        compiles += 1
+        return real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(builder_mod, "_assemble", counting_assemble)
     monkeypatch.setattr(core, "Dimension", counting_dimension)
     dwg = build_drawing(_grid_plate())
 
     placed = [name for name, _ in dwg.iter_annotations() if name.startswith("dim_pitch_")]
     assert placed, "fixture no longer places pitch dims — the guard lost its subject"
-    assert pitch_builds <= 3 * len(placed), (
+    assert compiles >= 1
+    assert pitch_builds <= 3 * len(placed) * compiles, (
         f"{pitch_builds} Dimension builds for {len(placed)} placed pitch dims — the "
         f"#602 footprint probe regressed to constructing geometry for rejected offsets"
     )

@@ -614,6 +614,11 @@
   ],
   "build_issues": [
     [
+      "error",
+      "plan_incomplete",
+      "the automatically planned sheet drops 1 required annotation outcome(s) (location_ref_dropped)"
+    ],
+    [
       "info",
       "feature_leader_crossing",
       "hole callout 2\u00d7 \u230010 THRU retained under Policy B across: m_locx9:segment:3"

@@ -445,6 +445,11 @@
   ],
   "build_issues": [
     [
+      "error",
+      "plan_incomplete",
+      "the automatically planned sheet drops 1 required annotation outcome(s) (hole_pattern_dim_dropped)"
+    ],
+    [
       "warning",
       "hole_pattern_dim_dropped",
       "hole pattern pitch 15 not placed (no clear room beside the plan)"

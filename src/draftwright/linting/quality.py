@@ -257,6 +257,13 @@ _UNSCORED_CODES = frozenset(
         "gear_semantics_missing",
         "missing_principal_dimension",
         "pad_footprint_not_defined",
+        # A SUMMARY of required placement failures the automatic path would otherwise return
+        # while reporting success (#1250). Unscored because it double-counts by construction:
+        # every loss it names is already reported by the `*_dropped` code that produced it, and
+        # those score wherever they score. It prints nothing false and misplaces nothing; what
+        # it adds is an error-severity verdict so `passed` cannot be true over a drawing the
+        # engine would refuse if the same sheet were requested explicitly.
+        "plan_incomplete",
         "pmi_not_extracted",
         "pmi_not_lowered",
         "pmi_not_rendered",

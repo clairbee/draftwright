@@ -65,6 +65,7 @@ from draftwright.compose import (
 )
 from draftwright.drawing import Drawing, feature_key
 from draftwright.fonts import PLEX_MONO
+from draftwright.linting import LintIssue
 from draftwright.model import (
     Datum,
     Feature,
@@ -1140,6 +1141,82 @@ def _blocker_identity(blocker) -> str:
     )
 
 
+def _automatic_blockers(drawing) -> tuple[dict, ...]:
+    """Required placement failures on an automatically planned drawing.
+
+    The RECOGNITION-FREE critique, unlike the explicit path's `scale_blockers_for`, which also
+    materialises the ADR 0017 aggregate for later critique. A declared automatic build must
+    recognise nothing until asked (ADR 0011 / 0017), and placement drops are recorded during
+    the build so they survive the restriction — verified to return the same blockers as the
+    physical critique on the #1130 case study and on the side-drilled fixtures.
+    """
+    return _scale_blockers(drawing, physical=False)
+
+
+def _complete_automatic_plan(drawing: Drawing) -> Drawing:
+    """Give the automatic path the completeness the explicit path already has (#1250).
+
+    `_scale_blockers` ran on the explicit-scale policy loop and on nothing else, so the two
+    paths disagreed about the same part: asked for the sheet and scale it had just chosen
+    itself, the engine would refuse or quietly reduce the scale, while the automatic path
+    returned the incomplete drawing reporting `passed: True`.
+
+    Severity is NOT the discriminator: the explicit path never accepts a drawing with blockers
+    at all. The automatic path cannot safely search scales here, because annotations whose
+    semantic identity has not yet reached the registry make candidate coverage unverifiable.
+    Accepting a candidate from the known subset would violate ADR 0017/0018 by allowing
+    source-only or physical requirements to disappear. It therefore fails closed on the
+    settled drawing and records `plan_incomplete` at error severity. This makes `passed` false
+    without introducing a second sheet/scale-selection policy ahead of #1262.
+    """
+    blockers = _automatic_blockers(drawing)
+    if not blockers:
+        return drawing
+
+    codes = ", ".join(sorted({item["code"] for item in blockers}))
+    dropped = [i for i in drawing.lint(physical=False) if _is_required_scale_drop(i)]
+    measurements = tuple(
+        dict.fromkeys(mid for issue in dropped for mid in getattr(issue, "measurement_ids", ()))
+    )
+    hole_requirements = tuple(
+        dict.fromkeys(
+            req for issue in dropped for req in getattr(issue, "hole_requirement_ids", ())
+        )
+    )
+    source_ids = tuple(
+        dict.fromkeys(sid for issue in dropped for sid in getattr(issue, "source_ids", ()))
+    )
+    drawing.registry.record_issue(
+        LintIssue(
+            severity="error",
+            code="plan_incomplete",
+            message=(
+                f"the automatically planned sheet drops {len(blockers)} required "
+                f"annotation outcome(s) ({codes})"
+            ),
+            measurement_ids=measurements,
+            source_ids=source_ids,
+            hole_requirement_ids=hole_requirements,
+        )
+    )
+    drawing.scale_decision = _scale_decision(
+        policy="automatic",
+        requested=None,
+        effective=drawing.scale,
+        status="incomplete",
+        blockers=blockers,
+        attempted=(drawing.scale,),
+        attempts=(_scale_attempt(drawing.scale, "incomplete", blockers),),
+    )
+    warnings.warn(
+        f"the automatically planned sheet drops required annotation outcomes ({codes}); "
+        f"returning the incomplete drawing — see Drawing.scale_decision",
+        ScaleCompletenessWarning,
+        stacklevel=2,
+    )
+    return drawing
+
+
 def _preserve_requirements_under_arrangement(drawing, chosen, build, blockers_for):
     """ADR 0018 §5's first hard gate, applied to the arrangement: preserve every supported
     requirement or reject the candidate.
@@ -1403,13 +1480,18 @@ def build_drawing(
                 _build,
                 lambda built: _scale_blockers(built, physical=False),
             )
+        # The default record, set BEFORE the completeness pass so that pass can replace it.
+        # It used to be assigned afterwards and silently overwrote whatever the pass had
+        # decided, so an incomplete plan reported itself as an ordinary automatic one.
+        # Completeness runs last because the arrangement gate above may return a different
+        # drawing, and it is the settled drawing whose completeness matters.
         drawing.scale_decision = _scale_decision(
             policy="automatic",
             requested=None,
             effective=drawing.scale,
             status="automatic",
         )
-        return drawing
+        return _complete_automatic_plan(drawing)
 
     requested_scale = float(scale)
 

@@ -99,19 +99,25 @@ def automatic():
 
 class TestTheFixedTopologyForcesTheSheet:
     def test_the_automatic_result_is_a1_at_full_scale_and_reports_no_problem(self, automatic):
-        """The ADR's headline: A1 landscape at 1:1, and the drawing says it is fine.
+        """The ADR's headline: A1 landscape at 1:1 for a part 43 mm thick.
 
-        `passed` and the lint are the part worth reading. Nothing in the engine considers an A1
-        sheet for a part 43 mm thick to be a fault, because no check owns the question — which
-        is the gap ADR 0018 exists to close, stated as an assertion rather than as an opinion.
+        The sheet is the ADR's subject and is unchanged — nothing yet owns the question of
+        whether four views are the right four. What the drawing no longer does is call itself
+        complete: #1250 closed the gap where the automatic path skipped the requirement gate
+        the explicit path had always run.
         """
         drawing = automatic
 
         assert (drawing.page_w, drawing.page_h) == (841.0, 594.0), "not A1 landscape"
         assert drawing.scale == 1.0
         assert set(drawing.views) == {"front", "plan", "side", "iso"}
-        assert not [issue for issue in drawing.lint() if issue.severity == "error"]
-        assert drawing.lint_summary()["passed"] is True
+        # The sheet is still A1 at 1:1 — the fixed four-view topology still forces it, which is
+        # what ADR 0018 exists to fix and has not fixed yet. What HAS changed is the second
+        # half of the original claim: the drawing no longer says it is fine. Since #1250 the
+        # automatic path runs the same requirement gate as the explicit one and records
+        # `plan_incomplete` when the settled drawing loses a required outcome.
+        assert {i.code for i in drawing.lint() if i.severity == "error"} == {"plan_incomplete"}
+        assert drawing.lint_summary()["passed"] is False
 
     def test_the_plan_view_repeats_the_front_and_carries_almost_nothing(self, automatic):
         """WHY it is the wrong sheet, not just that it is a big one.
@@ -148,29 +154,32 @@ class TestTheFixedTopologyForcesTheSheet:
         )
 
     def test_the_automatic_sheet_is_one_the_engine_would_refuse_if_asked_for_it(self, automatic):
-        """The sharp end of the evidence, and a defect in its own right (#1250).
+        """The sharp end of the evidence, and the defect #1250 fixed.
 
-        The automatic build chooses A1 at 1:1 and reports `passed: True` with no lint errors.
-        Ask for that SAME page and scale explicitly and the engine refuses — "requested scale 1
-        cannot preserve required annotations (callout_dropped, slot_dim_dropped)". Same part,
-        same sheet, same scale, two verdicts, decided by how the caller phrased the request:
-        the explicit path runs `_scale_blockers` and the automatic path does not.
+        Before #1250 the automatic build chose A1 at 1:1 and reported `passed: True` with no
+        lint errors. Asking for that SAME page and scale explicitly made the engine refuse —
+        "requested scale 1 cannot preserve required annotations". Same part, same sheet, same
+        scale, two verdicts, decided by how the caller phrased the request: the explicit path
+        ran `_scale_blockers` and the automatic path did not.
 
-        And the blockers are real, not an artefact of the stricter path: the automatic drawing
-        itself carries `slot_dim_dropped` and `hole_requirement_missing`, so it IS the
-        incomplete drawing the explicit gate exists to prevent. It reports success because
-        `completeness` is unavailable on this part, so nothing scores the omission.
+        The blockers are real, not an artefact of the stricter path: the automatic drawing
+        still carries `slot_dim_dropped` and `hole_requirement_missing`, so it IS the
+        incomplete drawing the explicit gate exists to prevent.
 
-        ADR 0018's evidence list requires exactly the opposite: "A forced small sheet/large
-        scale that drops a requirement is rejected, not accepted with a warning-only incomplete
-        drawing." Today it is not even warning-only.
+        ADR 0018's evidence list requires: "A forced small sheet/large scale that drops a
+        requirement is rejected, not accepted with a warning-only incomplete drawing." The
+        automatic path now runs the same gate and reports the settled drawing's loss at error
+        severity. Candidate search remains the joint planner's responsibility (#1262), because
+        partial registry provenance cannot prove that a rebuilt candidate preserves everything.
 
         The first version of this test asserted that A2 at 1:1 raises, and read that as the
         four-view topology forcing the sheet. It does raise — but so does A1, so the assertion
         demonstrated this inconsistency rather than the sheet cost it claimed. The mutation that
         found it changed `page="A2"` to `page="A1"` and the test still passed.
         """
-        assert automatic.lint_summary()["passed"] is True
+        assert automatic.lint_summary()["passed"] is False, (
+            "the automatic path is reporting success again — #1250 has regressed"
+        )
         dropped = {issue.code for issue in automatic.lint()}
         assert {"slot_dim_dropped", "hole_requirement_missing"} <= dropped, (
             f"the automatic drawing no longer loses requirements, so there is nothing "
@@ -190,3 +199,13 @@ class TestTheFixedTopologyForcesTheSheet:
         assert "slot_dim_dropped" in message, (
             f"the refusal no longer names the requirements it would lose: {message}"
         )
+
+        # The two verdicts now AGREE, which is the fix. The explicit path refuses; the
+        # automatic path cannot refuse — the caller made no claim and has no lever, so
+        # raising would break a build with no remedy — but it records the same loss at error
+        # severity and names the same measurements.
+        decision = automatic.scale_decision
+        assert decision["status"] == "incomplete"
+        assert {item["code"] for item in decision["blockers"]} <= dropped
+        summary = next(i for i in automatic.lint() if i.code == "plan_incomplete")
+        assert summary.measurement_ids, "the summary must stay addressable (ADR 0010/0016)"
