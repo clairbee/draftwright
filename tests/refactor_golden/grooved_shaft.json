@@ -134,7 +134,7 @@
     [
       "error",
       "plan_incomplete",
-      "no standard scale preserves every required annotation on this part; the automatically planned sheet drops 1 outcome(s) (step_dim_dropped)"
+      "the automatically planned sheet drops 1 required annotation outcome(s) (step_dim_dropped)"
     ],
     [
       "warning",

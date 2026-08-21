@@ -115,7 +115,7 @@ class TestTheFixedTopologyForcesTheSheet:
         # what ADR 0018 exists to fix and has not fixed yet. What HAS changed is the second
         # half of the original claim: the drawing no longer says it is fine. Since #1250 the
         # automatic path runs the same requirement gate as the explicit one and records
-        # `plan_incomplete` when no standard scale preserves everything.
+        # `plan_incomplete` when the settled drawing loses a required outcome.
         assert {i.code for i in drawing.lint() if i.severity == "error"} == {"plan_incomplete"}
         assert drawing.lint_summary()["passed"] is False
 
@@ -156,22 +156,21 @@ class TestTheFixedTopologyForcesTheSheet:
     def test_the_automatic_sheet_is_one_the_engine_would_refuse_if_asked_for_it(self, automatic):
         """The sharp end of the evidence, and the defect #1250 fixed.
 
-        The automatic build chooses A1 at 1:1 and reports `passed: True` with no lint errors.
-        Ask for that SAME page and scale explicitly and the engine refuses — "requested scale 1
-        cannot preserve required annotations (callout_dropped, slot_dim_dropped)". Same part,
-        same sheet, same scale, two verdicts, decided by how the caller phrased the request:
-        the explicit path runs `_scale_blockers` and the automatic path does not.
+        Before #1250 the automatic build chose A1 at 1:1 and reported `passed: True` with no
+        lint errors. Asking for that SAME page and scale explicitly made the engine refuse —
+        "requested scale 1 cannot preserve required annotations". Same part, same sheet, same
+        scale, two verdicts, decided by how the caller phrased the request: the explicit path
+        ran `_scale_blockers` and the automatic path did not.
 
-        And the blockers are real, not an artefact of the stricter path: the automatic drawing
-        itself carries `slot_dim_dropped` and `hole_requirement_missing`, so it IS the
-        incomplete drawing the explicit gate exists to prevent. It reports success because
-        `completeness` is unavailable on this part, so nothing scores the omission.
+        The blockers are real, not an artefact of the stricter path: the automatic drawing
+        still carries `slot_dim_dropped` and `hole_requirement_missing`, so it IS the
+        incomplete drawing the explicit gate exists to prevent.
 
         ADR 0018's evidence list requires: "A forced small sheet/large scale that drops a
         requirement is rejected, not accepted with a warning-only incomplete drawing." The
-        automatic path now runs the same gate — it first looks for a smaller standard scale
-        that preserves everything (and takes it, when one exists and it loses no coverage),
-        and reports at error severity when none does.
+        automatic path now runs the same gate and reports the settled drawing's loss at error
+        severity. Candidate search remains the joint planner's responsibility (#1262), because
+        partial registry provenance cannot prove that a rebuilt candidate preserves everything.
 
         The first version of this test asserted that A2 at 1:1 raises, and read that as the
         four-view topology forcing the sheet. It does raise — but so does A1, so the assertion
