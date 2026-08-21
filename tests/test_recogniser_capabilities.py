@@ -20,6 +20,7 @@ from draftwright.model.detect import (
     _CONVERTERS,
     _DERIVED_CONVERTERS,
     _ORCHESTRATED_RECORDS,
+    _UNCONSUMED_RECORDS,
     build_part_model,
 )
 from draftwright.recogniser_contract import (
@@ -116,12 +117,20 @@ def test_installed_released_package_contract_validates_without_a_sibling_checkou
     validate_recogniser_capabilities()
     package = recognition.capability_manifest(format_version=1)
     declaration = consumer_capability_declaration()
-    assert len(package["families"]) == len(declaration["families"]) == 22
+    # 25 since 0.2.6 added angled-steps, passages and prismatic-pockets (#1244). A literal,
+    # not a length comparison against the package: the point is that BOTH sides changed
+    # together, so an upgrade that declared nothing would leave this at 22 and fail.
+    assert len(package["families"]) == len(declaration["families"]) == 25
 
 
 def test_runtime_adapter_inventory_is_derived_independently_and_exhaustive() -> None:
     runtime = _runtime_emitted_records()
-    tiers = [set(_CONVERTERS), set(_DERIVED_CONVERTERS), set(_ORCHESTRATED_RECORDS)]
+    tiers = [
+        set(_CONVERTERS),
+        set(_DERIVED_CONVERTERS),
+        set(_ORCHESTRATED_RECORDS),
+        set(_UNCONSUMED_RECORDS),
+    ]
     # Subset again, and the third place the same coupling was written. A converter for a
     # record the installed package no longer emits is dead code pointing at a type that is
     # gone, so that direction still fails. A record with no converter yet is the additive
@@ -253,6 +262,18 @@ def test_repeating_profile_is_explicit_geometry_only_critique_evidence() -> None
     assert recognition.RepeatingRadialProfile not in _CONVERTERS | _DERIVED_CONVERTERS
 
 
+def _supported(value: dict) -> dict:
+    """The first family declared `supported`, by disposition rather than by position.
+
+    These mutations need a family that HAS an ir_adapter implementation, documentation evidence
+    and a `BossRecord` schema — i.e. a supported one. They indexed `families[0]` and got it
+    because "bosses" sorted first; 0.2.6 added `angled-steps`, which sorts ahead of it and is
+    declared unsupported, so every one of them began mutating the wrong shape and asserting the
+    wrong error (#1244). Selecting by what the mutation needs cannot drift with the alphabet.
+    """
+    return next(family for family in value["families"] if family.get("disposition") == "supported")
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -272,23 +293,23 @@ def test_repeating_profile_is_explicit_geometry_only_critique_evidence() -> None
             "stale=",
         ),
         (
-            lambda value: value["families"][0]["record_schemas"].update({"BossRecord": 99}),
+            lambda value: _supported(value)["record_schemas"].update({"BossRecord": 99}),
             "record schema mismatch",
         ),
         (
-            lambda value: value["families"][0]["ir_adapter"].update(
+            lambda value: _supported(value)["ir_adapter"].update(
                 {"implementation": "draftwright.model.detect.no_such_adapter"}
             ),
             "stale implementation",
         ),
         (
-            lambda value: value["families"][0]["documentation"].update(
+            lambda value: _supported(value)["documentation"].update(
                 {"evidence": ["docs/reference/missing.md"]}
             ),
             "evidence .* is missing",
         ),
         (
-            lambda value: value["families"][0]["completeness"].update({"state": "maybe"}),
+            lambda value: _supported(value)["completeness"].update({"state": "maybe"}),
             "unknown state",
         ),
     ],
@@ -402,35 +423,40 @@ def test_state_transition_requires_version_release_notes_and_compatibility_evide
     ("mutate", "message"),
     [
         (
-            lambda declaration, _package: declaration["families"][0]["ir_adapter"].update(
+            lambda declaration, _package: _families(declaration)["bosses"]["ir_adapter"].update(
                 {"implementation": "not-a-reference"}
             ),
             "invalid Draftwright implementation reference",
         ),
         (
-            lambda declaration, _package: declaration["families"][0].update({"ir_adapter": []}),
+            lambda declaration, _package: _families(declaration)["bosses"].update(
+                {"ir_adapter": []}
+            ),
             "unknown or invalid fields",
         ),
         (
-            lambda declaration, _package: declaration["families"][0]["ir_adapter"].pop(
+            lambda declaration, _package: _families(declaration)["bosses"]["ir_adapter"].pop(
                 "implementation"
             ),
             "supported claim lacks required evidence",
         ),
         (
-            lambda declaration, _package: declaration["families"][0]["ir_adapter"].update(
+            lambda declaration, _package: _families(declaration)["bosses"]["ir_adapter"].update(
                 {"evidence": []}
             ),
             "evidence must be non-empty",
         ),
         (
-            lambda declaration, _package: declaration["families"][0]["ir_adapter"].update(
+            lambda declaration, _package: _families(declaration)["bosses"]["ir_adapter"].update(
                 {"implementation": 7}
             ),
             "implementation must be a reference",
         ),
         (
-            lambda declaration, _package: declaration["families"][1]["completeness"].pop(
+            # A family whose `completeness` is genuinely deferred — "bosses" declares it
+            # supported, and index 1 stopped being a deferred one when 0.2.6's three new
+            # families changed the sort order (#1244).
+            lambda declaration, _package: _families(declaration)["channels"]["completeness"].pop(
                 "tracking"
             ),
             "deferred state needs rationale and tracking",
@@ -474,11 +500,11 @@ def test_state_transition_requires_version_release_notes_and_compatibility_evide
             "consumer family declarations",
         ),
         (
-            lambda declaration, _package: declaration["families"][0].update({"surprise": 1}),
+            lambda declaration, _package: _families(declaration)["bosses"].update({"surprise": 1}),
             "unknown or missing fields",
         ),
         (
-            lambda declaration, _package: declaration["families"][0].update(
+            lambda declaration, _package: _families(declaration)["bosses"].update(
                 {"disposition": "maybe"}
             ),
             "invalid disposition",
@@ -496,13 +522,13 @@ def test_state_transition_requires_version_release_notes_and_compatibility_evide
             "needs package-owned evidence",
         ),
         (
-            lambda declaration, _package: declaration["families"][0].update(
+            lambda declaration, _package: _families(declaration)["bosses"].update(
                 {"rationale": "not allowed on supported"}
             ),
             "has geometry-only/reserved fields",
         ),
         (
-            lambda declaration, _package: declaration["families"][0].update(
+            lambda declaration, _package: _families(declaration)["bosses"].update(
                 {"disposition": "deferred", "rationale": "later"}
             ),
             "reserved family .* needs rationale and tracking",
@@ -574,7 +600,9 @@ def test_transition_keys_must_be_unique() -> None:
 
 def test_deferred_family_cannot_claim_supported_downstream_semantics() -> None:
     declaration = consumer_capability_declaration()
-    family = declaration["families"][0]
+    # A family with supported boundaries to demote — selected by id, since 0.2.6's new
+    # families sort ahead of "bosses" and are already unsupported (#1244).
+    family = _families(declaration)["bosses"]
     family.update(
         {
             "disposition": "deferred",

@@ -16,6 +16,7 @@ from draftwright.linting.issues import LintIssue
 from draftwright.linting.quality import (
     _NON_REQUIREMENT_INVENTORIES,
     _RECOGNISED_REQUIREMENT_FAMILIES,
+    _UNDECIDED_INVENTORIES,
     quality_components,
 )
 
@@ -146,7 +147,11 @@ def test_semantic_issues_stay_out_of_the_legibility_component():
 
 def test_every_recognition_inventory_is_either_a_requirement_family_or_excluded():
     inventories = set(RecognitionResult.__dataclass_fields__)
-    classified = set(_RECOGNISED_REQUIREMENT_FAMILIES) | _NON_REQUIREMENT_INVENTORIES
+    classified = (
+        set(_RECOGNISED_REQUIREMENT_FAMILIES)
+        | _NON_REQUIREMENT_INVENTORIES
+        | set(_UNDECIDED_INVENTORIES)
+    )
     unclassified = sorted(inventories - classified)
 
     assert unclassified == [], (
@@ -181,3 +186,26 @@ def test_an_unavailable_completeness_component_is_data_not_a_zero_score():
     assert completeness["coverage"] == "unavailable"
     assert completeness["reason"] == "physical recognition inventory unavailable"
     assert completeness["requirements"] == 0
+
+
+def test_an_undecided_inventory_names_a_real_open_issue():
+    """The undecided register must not become a quiet permanent home.
+
+    `_NON_REQUIREMENT_INVENTORIES` and `_UNDECIDED_INVENTORIES` both remove a family from
+    scoring, and only the second is supposed to be temporary — so the second has to carry the
+    thing the first does not: the issue that ends it. Without this the cheapest way to silence
+    the completeness guard for a new family would be a one-line addition here, which is exactly
+    how a blind spot becomes permanent (#1244).
+    """
+    from draftwright.recogniser_contract import _UNSUPPORTED
+
+    assert not set(_UNDECIDED_INVENTORIES) & _NON_REQUIREMENT_INVENTORIES, (
+        "an inventory is registered both as permanently-not-a-requirement and as undecided; "
+        "those mean different things and it cannot be both"
+    )
+    tracked = {tracking for _records, tracking, _rationale in _UNSUPPORTED.values()}
+    for inventory, issue in _UNDECIDED_INVENTORIES.items():
+        assert issue in tracked, (
+            f"{inventory} is unscored pending {issue}, which is not one of the issues the "
+            f"capability declaration tracks ({sorted(tracked)}) — the registers disagree"
+        )

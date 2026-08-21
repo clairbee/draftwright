@@ -738,10 +738,26 @@ class TestEdgeFaceMap:
         # hashing/comparing equal across the faces meeting at it. A solid box has
         # edges shared by two faces; if Edge hashing ever regressed, each edge
         # would map to a single face and this would fail. (#150)
-        from b123d_recognisers._features import _edge_face_map
+        #
+        # Read through the PUBLIC `FaceEdges` memo since 0.2.6: this used
+        # `b123d_recognisers._features._edge_face_map`, a private helper the upgrade removed
+        # — one of two private reaches that broke on a patch bump with no announced removals,
+        # which is the cost of testing past the published surface (#1244).
+        from collections import Counter
 
-        counts = [len(faces) for faces in _edge_face_map(Box(10, 10, 10)).values()]
-        assert counts and max(counts) >= 2
+        from b123d_recognisers import FaceEdges
+
+        box = Box(10, 10, 10)
+        memo = FaceEdges()
+        shared: Counter = Counter()
+        for face in box.faces():
+            for edge in memo.of(face):
+                shared[edge] += 1
+        assert shared, "the memo returned no edges at all"
+        assert max(shared.values()) >= 2, (
+            "every edge maps to exactly one face, so a topologically shared edge is no longer "
+            "hashing equal across the faces meeting at it"
+        )
 
 
 class TestFeatureDiameters:

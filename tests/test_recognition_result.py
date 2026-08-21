@@ -1,11 +1,9 @@
 """ADR 0017 phase 1: one explicit recognition result."""
 
 from dataclasses import FrozenInstanceError
-from types import SimpleNamespace
 
 import pytest
 from b123d_recognisers import (
-    FaceLevel,
     RecognitionResult,
     build_recognition_result,
     recognise_plates,
@@ -60,140 +58,19 @@ def test_built_drawing_exposes_its_recognition_result_without_private_state(monk
     assert drawing.recognition() is result
 
 
-def test_orchestrator_injects_each_shared_dependency_once(monkeypatch):
-    import b123d_recognisers.result as result_module
-
-    calls: dict[str, int] = {}
-    cylinders = ([{"axis": "z"}], [{"axis": "x"}])
-    countersinks = [object()]
-    holes = [object()]
-    slots = [object()]
-    pockets = [object()]
-
-    def fake_cylinders(part):
-        calls["cylinders"] = calls.get("cylinders", 0) + 1
-        return cylinders
-
-    def counted(name, returns):
-        """A stand-in that records the call and returns *returns*."""
-
-        def fake(part, **kwargs):
-            calls[name] = calls.get(name, 0) + 1
-            return returns
-
-        return fake
-
-    def cyl_consumer(name, returns):
-        """A stand-in for a recogniser the orchestration hands the cylinder substrate.
-
-        Asserts the SAME list objects arrive — the point of the aggregate is that no
-        recogniser rediscovers a dependency, and an equal-but-fresh pair would mean it did.
-        """
-
-        def fake(part, *, cyls=None, **kwargs):
-            calls[name] = calls.get(name, 0) + 1
-            assert cyls is not None, f"{name} was not given the cylinder substrate"
-            assert cyls[0] is cylinders[0] and cyls[1] is cylinders[1]
-            return returns
-
-        return fake
-
-    def derived(name, source, returns):
-        """A stand-in for a pattern recogniser, which must be handed its members."""
-
-        def fake(records):
-            calls[name] = calls.get(name, 0) + 1
-            assert records is source, f"{name} was not given the accepted member records"
-            return returns
-
-        return fake
-
-    def fake_holes(part, *, cyls=None, csinks=None):
-        calls["holes"] = calls.get("holes", 0) + 1
-        assert cyls[0] is cylinders[0] and cyls[1] is cylinders[1]
-        assert csinks is countersinks
-        return holes
-
-    monkeypatch.setattr(result_module, "analyse_cylinders", fake_cylinders)
-    monkeypatch.setattr(
-        result_module, "recognise_countersinks", counted("countersinks", countersinks)
-    )
-    monkeypatch.setattr(result_module, "recognise_holes", fake_holes)
-    monkeypatch.setattr(result_module, "recognise_double_d_bores", counted("double_d_bores", []))
-    monkeypatch.setattr(result_module, "recognise_hole_patterns", derived("patterns", holes, []))
-    monkeypatch.setattr(result_module, "recognise_bosses", cyl_consumer("bosses", []))
-    monkeypatch.setattr(
-        result_module, "recognise_polygonal_bosses", counted("polygonal_bosses", [])
-    )
-    monkeypatch.setattr(result_module, "recognise_polygonal_stock", counted("polygonal_stock", []))
-    monkeypatch.setattr(result_module, "recognise_channels", counted("channels", []))
-    monkeypatch.setattr(result_module, "recognise_slots", counted("slots", slots))
-    monkeypatch.setattr(result_module, "recognise_pockets", counted("pockets", pockets))
-    monkeypatch.setattr(
-        result_module, "recognise_pocket_patterns", derived("pocket_patterns", pockets, [])
-    )
-    monkeypatch.setattr(result_module, "recognise_rectangular_pads", counted("pads", []))
-    monkeypatch.setattr(
-        result_module,
-        "recognise_repeating_radial_profiles",
-        counted("repeating_radial_profiles", []),
-    )
-    monkeypatch.setattr(result_module, "recognise_turned_steps", cyl_consumer("turned_steps", []))
-    # The area-filtered records retain face support (#915); the scalar-span boundary projects Z
-    # values for sizing/critique. It takes the part only — no substrate identity to assert.
-    level_records = [FaceLevel(4.0, (0.0, 8.0), (0.0, 6.0)), FaceLevel(9.0)]
-    monkeypatch.setattr(result_module, "step_level_records", counted("step_levels", level_records))
-    # #1026 hoisted these three out of `build_part_model`. `slot_patterns` is derived, so it
-    # must be handed the accepted slot records rather than rediscovering them; the other two
-    # take the shared cylinder substrate.
-    monkeypatch.setattr(
-        result_module, "recognise_slot_patterns", derived("slot_patterns", slots, [])
-    )
-    monkeypatch.setattr(result_module, "recognise_grooves", cyl_consumer("grooves", []))
-    monkeypatch.setattr(result_module, "recognise_flats", cyl_consumer("flats", []))
-    # #1025: the level-free riser scan. Takes the part only — the level set that used to
-    # make this family caller-specific now lives in `project_step_shoulders`.
-    monkeypatch.setattr(result_module, "recognise_risers", counted("risers", []))
-    # #1028: gated on the classification the aggregate carries. This orchestration runs
-    # with the default `rotational=False`, so all three are expected to run.
-    monkeypatch.setattr(result_module, "recognise_chamfers", counted("chamfers", []))
-    monkeypatch.setattr(result_module, "recognise_fillets", counted("fillets", []))
-    monkeypatch.setattr(result_module, "recognise_plates", counted("plates", []))
-
-    built = result_module.build_recognition_result(object())
-
-    # ONCE, not merely "at least once": a second call is a rediscovered substrate wearing
-    # a correct answer's clothes. Both halves — WHICH families ran, and how often.
-    assert set(calls) == {
-        "cylinders",
-        "countersinks",
-        "holes",
-        "double_d_bores",
-        "patterns",
-        "bosses",
-        "polygonal_bosses",
-        "polygonal_stock",
-        "channels",
-        "slots",
-        "pockets",
-        "pocket_patterns",
-        "pads",
-        "repeating_radial_profiles",
-        "turned_steps",
-        "step_levels",
-        "slot_patterns",
-        "grooves",
-        "flats",
-        "risers",
-        "chamfers",
-        "fillets",
-        "plates",
-    }, f"the orchestration ran a different set of families: {sorted(calls)}"
-    assert set(calls.values()) == {1}, f"a family ran more than once: {calls}"
-    assert built.holes == tuple(holes)
-    assert built.step_levels == tuple(level_records)
-    bb = SimpleNamespace(min=SimpleNamespace(Z=0.0), max=SimpleNamespace(Z=10.0))
-    assert built.step_ladder_for_z_span(bb.min.Z, bb.max.Z) == [4.0, 9.0]
+# `test_orchestrator_injects_each_shared_dependency_once` was here until #1244.
+#
+# It replaced every recogniser in `b123d_recognisers.result` with a fake to assert the aggregate
+# injects the cylinder substrate once and hands the same objects on. Every symbol it asserted
+# belonged to the package — it stated nothing about draftwright — and 0.2.6 restructured that
+# orchestration (`analyse_cylinders` gave way to `CylinderInventory`), so its patch targets no
+# longer exist.
+#
+# Not retargeted: the property draftwright depends on is "each family runs exactly once per
+# build, and nothing rescans", and that is asserted from OUR side, against the running engine and
+# the public family names, by `test_recognition_manifest.py::
+# test_an_automatic_build_runs_each_family_exactly_once_and_lint_runs_no_migrated_one`. A second
+# copy phrased in the dependency's private vocabulary bought a private reach and no coverage.
 
 
 def _grooved_flatted_shaft():

@@ -107,9 +107,26 @@ _RECOGNISED_REQUIREMENT_FAMILIES = {
 # explicit rather than implied by absence so that a new
 # ``RecognitionResult`` inventory cannot silently join the blind spot the completeness
 # component exists to report (``tests/test_quality_components.py``).
+#: Inventories that are not requirement families because of what they ARE — nested sub-records,
+#: raw geometry, classification flags, evidence aggregated into another feature. Permanent by
+#: design, not pending a decision.
 _NON_REQUIREMENT_INVENTORIES = frozenset(
     {"countersinks", "cylinders", "plates", "risers", "rotational", "step_levels"}
 )
+
+#: Inventories the installed package proves and this consumer has not decided about, each with
+#: the issue deciding it. Held SEPARATELY from the set above, because the two mean different
+#: things: those will never be requirement families, these have simply not been ruled on, and
+#: merging them would let an undecided family look settled (#1244).
+#:
+#: The effect on the score is deliberate and worth stating: a drawing that omits a recognised
+#: passage, prismatic pocket or angled step scores complete today. That is a blind spot — the
+#: register is what stops it being a silent one, and closing each issue closes the gap.
+_UNDECIDED_INVENTORIES: dict[str, str] = {
+    "angled_steps": "https://github.com/pzfreo/draftwright/issues/1247",
+    "passages": "https://github.com/pzfreo/draftwright/issues/1245",
+    "prismatic_pockets": "https://github.com/pzfreo/draftwright/issues/1246",
+}
 
 _AUDITED_FAMILIES = (
     "channels",
