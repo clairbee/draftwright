@@ -4080,7 +4080,12 @@ class TestPrismaticClassification:
         dwg = build_drawing(part)
         xlocs = {n for n in dwg.annotations() if n.startswith("dim_loc_front_x")}
         assert len(xlocs) == 2, f"both side-drilled holes must be located, got {xlocs}"
-        assert [i for i in dwg.lint() if i.severity != "info"] == []
+        # The X offsets are the #225 subject and both land. Their two Z-height companions do
+        # not: `off_axis_location_dropped` records that loss at info severity, so #1250 must
+        # keep the automatic drawing from reporting success over it.
+        issues = dwg.lint()
+        assert [i.code for i in issues if i.severity == "error"] == ["plan_incomplete"]
+        assert [i.code for i in issues].count("off_axis_location_dropped") == 2
 
     @pytest.mark.timeout(60)
     def test_corner_fillets_do_not_make_a_plate_rotational(self):
@@ -4478,9 +4483,13 @@ class TestAutoHoleAnnotations:
         )
         dwg = build_drawing(part)
         assert len([n for n in dwg.annotations() if n.startswith("hc_front")]) == 2
-        # Both side-drilled holes are now located (#225 fixed), so the sheet is
-        # fully lint-clean — no filtered feature_not_located warning.
-        assert [i for i in dwg.lint() if i.severity != "info"] == []
+        # Both callouts and both X offsets land, but the two Z-height companions do not.
+        # Their info-level placement drops are required outcomes, so the #1250 summary keeps
+        # this automatic sheet from claiming a clean verdict while preserving this test's
+        # subject: both front-view callouts fit.
+        issues = dwg.lint()
+        assert [i.code for i in issues if i.severity == "error"] == ["plan_incomplete"]
+        assert [i.code for i in issues].count("off_axis_location_dropped") == 2
 
     @pytest.mark.timeout(60)
     def test_all_distinct_bores_get_callouts(self):
