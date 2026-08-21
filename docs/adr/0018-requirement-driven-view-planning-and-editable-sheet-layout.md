@@ -94,6 +94,69 @@ acceptable: three of the six gaps shrink as the identity model grows, and the em
 self-describing comment for anything it cannot re-solve, so the loss is visible in the script
 rather than silent on the sheet.
 
+### How a user finds out their view set does not work
+
+An authored view set can be wrong in a way an authored dimension set cannot: omitting a
+dimension omits one thing, but omitting a *view* can strand dimensions the compiler assigned
+to it. The surface must therefore say so, at the earliest moment that can.
+
+Today it says so at the worst one. A `Sheet` user whose views cannot carry their dimensions
+gets `ViewNotPlanned` raised from inside `render_centermarks` — an exception naming the view
+but not their line, not the dimension that needed it, and not what to add. That is an internal
+invariant escaping to a user.
+
+**Three moments, and the rule is to fail at the earliest one that can give a complete answer.**
+
+1. **At the verb.** `view("elevation")` raises immediately, naming the valid view names. No
+   build required, and no reason to defer it.
+
+2. **At `build()`, before projection — the one that matters.** The authored view set and the
+   authored dimension set are both known before `build()`; that is the same property that
+   makes ADR 0016's suppression-by-omission work without a recompose. So the planner resolves
+   every approved dimension's view against the authored set and collects those with nowhere
+   to go, using no geometry, no projection and no rendering.
+
+   Because the observability map knows which views *could* carry a requirement — not merely
+   which one it was assigned — the diagnostic is actionable rather than descriptive. It names
+   what is unshowable, why, and which view would show it:
+
+   ```
+   ViewPlanIncomplete: 2 authored dimensions cannot be shown by the authored view set
+     ('front', 'side'):
+
+     envelope.depth    reads horizontally only in `side` — add view("side")
+     hole_1.location   reads face-on only in `plan` — add view("plan")
+
+     Views declared at part.py:14 view("front"), part.py:15 view("side").
+   ```
+
+   Named against the ADR 0016 dimension identity rather than a page-keyed annotation name, so
+   it survives a re-solve at another scale and matches the line in an emitted script.
+
+3. **After `build()`.** `dwg.view_decision` is always present, on the model of
+   `section_decision` — a caller must not have to infer the outcome from a log line one code
+   path emits and another does not. Lint carries anything that passed the coherence check and
+   failed anyway. That split is real and worth keeping: *no view can show this* is knowable
+   statically, *it did not fit* needs measurement (ADR 0014 Amdt 3).
+
+**There is no `fallback` policy for an authored view set.** `scale_policy` has three settings
+because the engine can choose a different scale; here the request IS the answer, so the
+choices collapse to raise or report. The default is to raise, on ADR 0016's reasoning that a
+plausible-looking incomplete drawing is worse than a visible failure, and on §6 above:
+authored constraints are never silently relaxed. A `permissive` opt-in may return the
+incomplete drawing, and must warn.
+
+**Consequence for `ViewNotPlanned`.** Once the pre-projection check exists, that exception is
+unreachable from the public API — it becomes an internal invariant. A user who sees one has
+found a hole in the check, and that is the bug, not the drawing.
+
+**This is gated on the compiler, not the DSL.** The check asks "which view does this
+dimension need, given this view set", which is `planner._group_view` — still hardwired to the
+fixed topology, so it cannot answer for a set it was not told about. Until it takes the
+planned view set, the earliest a user can find out remains a render pass tripping over a
+missing view. That is the same prerequisite the rest of this amendment has, and it is the
+reason to take it first.
+
 ### Sections and details are views, and their verbs are reshaped
 
 `Sheet.section(feature=None, *, at=None)` and `Sheet.detail()` shipped in v0.3.9 (#841/#847)
