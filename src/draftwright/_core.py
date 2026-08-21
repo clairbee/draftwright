@@ -42,7 +42,14 @@ from build123d_drafting.helpers import (
 # now live in the leaf `draftwright._geometry` so the IR waist (`model/`) can use them
 # without importing this stage-level grab-bag (ADR 0008; #584 WP2). Re-exported here for
 # the above-`_core` consumers (annotations/sheet/drawing/linting) that already import them.
-from draftwright._geometry import _END_ON, HoleRef, _axis_letter, _fmt, _xyz  # noqa: F401
+from draftwright._geometry import (  # noqa: F401
+    _EDGE_ON,
+    _END_ON,
+    HoleRef,
+    _axis_letter,
+    _fmt,
+    _xyz,
+)
 from draftwright.fits import FitClass
 from draftwright.fonts import PLEX_MONO, PLEX_SANS_CONDENSED
 from draftwright.layout import _greedy_strip_1d, _solve_strip_1d

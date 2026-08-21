@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import warnings
 
-from draftwright._geometry import _solids_body, plane_axes
+from draftwright._geometry import _EDGE_ON, _END_ON, _solids_body, plane_axes
 from draftwright.model.ir import (
     AUTHORED_DIMENSION_KINDS,
     AuthoredDimension,
@@ -1817,10 +1817,12 @@ def _envelope_from_bbox(bb) -> EnvelopeFeature:
 # P2b deferred. Derivation runs at declaration time (no Analysis), so it is purely
 # geometric; `view=`/`side=` overrides always win (a best-effort default + an escape hatch).
 
-# A feature's axis points AT the viewer in this view (a z-hole is a circle in plan).
-_FACE_ON_VIEW = {"x": "side", "y": "front", "z": "plan"}
-# A planar face whose normal is this axis shows as an EDGE here (prefer front, else side).
-_EDGE_ON_VIEW = {"x": "front", "y": "side", "z": "front"}
+# A feature's axis points AT the viewer in this view (a z-hole is a circle in plan) — the
+# same routing as `_END_ON`, which owns it.
+_FACE_ON_VIEW = _END_ON
+# A planar face whose normal is this axis shows as an EDGE here (prefer front, else side) —
+# `_EDGE_ON` owns that routing.
+_EDGE_ON_VIEW = _EDGE_ON
 # Default strip side for a FEATURE target, per its face-on view — the empirically roomiest
 # one: the plan's below strip always carries the overall-width envelope dim (so use above),
 # while the front/side above strips are the shallow gaps between stacked views (so use below).

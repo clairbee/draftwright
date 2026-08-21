@@ -1724,7 +1724,7 @@ def render_pocket_patterns(dwg, plan, a, *, ctx, only=None) -> int:
     so ``i`` stays the model index."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "plan", "x": "side", "y": "front"}
+    view_of = _END_ON
     pat_groups = list(plan.of_kind("pocket_pattern"))
     jobs = []
     furniture = []  # (i, feat, view) for the placed patterns' pitch dims
@@ -1835,7 +1835,7 @@ def render_slot_patterns(dwg, plan, a, *, ctx, only=None) -> int:
     index."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "plan", "x": "side", "y": "front"}
+    view_of = _END_ON
     pat_groups = list(plan.of_kind("slot_pattern"))
     jobs = []
     furniture = []  # (i, feat, view, name) for the placed patterns' pitch dims

@@ -19,8 +19,22 @@ from build123d import Compound
 
 _log = logging.getLogger(__name__)
 
-# Axis letter -> the orthographic view a feature on that axis reads end-on in.
+# Axis letter -> the orthographic view a feature on that axis reads end-on in: a z-hole is
+# a circle in plan, an x-channel is a cross-section in side.
+#
+# The ONE owner of that routing. It was duplicated as a bare literal at eight sites across
+# six modules, which is ADR 0018's own sentence about itself — "which views should exist is
+# a decision nothing currently owns" — in miniature: a mapping copied eight times cannot be
+# taught that a view is absent, and the engine's answer to a missing view was a `KeyError`
+# raised inside a centermark pass. Route through this, never re-spell it (#1130).
 _END_ON = {"x": "side", "y": "front", "z": "plan"}
+
+# Axis letter -> the orthographic view a planar face with that NORMAL shows as an edge in
+# (prefer front, else side). The companion routing to `_END_ON`, and its second owner: this
+# one was spelled out three times — the groove profile callouts, `declare._EDGE_ON_VIEW` and
+# `planner._PROFILE`, the last of which documented the duplication in a comment rather than
+# resolving it. Same reasoning as above: route through it, never re-spell it (#1130).
+_EDGE_ON = {"x": "front", "y": "side", "z": "front"}
 
 
 def _xyz(loc) -> tuple[float, float, float]:

@@ -34,6 +34,7 @@ from build123d_drafting.helpers import (
 )
 
 from draftwright._core import (
+    _EDGE_ON,
     _END_ON,
     _EST_CHAR_WIDTH_EM,
     _MARGIN,
@@ -2609,7 +2610,7 @@ def render_pockets(dwg, plan, a, *, ctx, only=None) -> int:
     normal to the DEPTH axis — not identical, so the map stays."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "plan", "x": "side", "y": "front"}
+    view_of = _END_ON
     pocket_groups = list(plan.of_kind("pocket"))
     jobs = []
     for i, g in enumerate(
@@ -2688,7 +2689,7 @@ def render_grooves(dwg, plan, a, *, ctx, only=None) -> int:
     width is visible — not provably identical, so the map stays."""
     draft = dwg.draft
     reach = _leader_callout_reach(draft)
-    view_of = {"z": "front", "x": "front", "y": "side"}
+    view_of = _EDGE_ON  # a groove profile reads on the face its axis lies in
     groove_groups = list(plan.of_kind("groove"))
     jobs = []
     for gi, g in enumerate(
@@ -2756,7 +2757,7 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
         # OD diameter row/column, not an end-on plan leader. Only true prismatic parts qualify.
         return 0
     draft = dwg.draft
-    view_of = {"z": "plan", "x": "side", "y": "front"}  # the view looking down the boss axis
+    view_of = _END_ON  # the view looking down the boss axis
     boss_groups = list(plan.of_kind("boss"))
     mentioned = _mentioned_diameters(dwg)
     reach = draft.font_size + 6 * draft.pad_around_text
@@ -3188,7 +3189,7 @@ def render_plates(dwg, plan, a, *, ctx) -> int:
         if (pd := g.dim(role="channel_width", kind="length")) is not None and pd.span is not None
     ]
     channel_counts: dict[str, int] = {"x": 0, "y": 0, "z": 0}
-    view_for_long_axis = {"x": "side", "y": "front", "z": "plan"}
+    view_for_long_axis = _END_ON  # looking down the long axis IS reading it end-on
     zones_for_view = {"front": a.fv_zones, "side": a.sv_zones, "plan": a.pv_zones}
     for g, pd in sorted(
         channel_groups,

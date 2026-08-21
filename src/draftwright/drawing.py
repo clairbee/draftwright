@@ -414,6 +414,24 @@ class BuildState:
         return self.recognition_cache.ensure(part)
 
 
+class ViewNotPlanned(KeyError):
+    """A projection was requested in a view this drawing does not have.
+
+    Subclasses :class:`KeyError` so existing handlers keep working — the point is not a new
+    control-flow contract but a named, inspectable one: `view` is what was asked for and
+    `planned` is what the sheet actually carries, so a caller can report the miss instead of
+    re-deriving it from a message (ADR 0018 §6).
+    """
+
+    def __init__(self, view: str, planned: tuple[str, ...] = ()):
+        self.view = view
+        self.planned = tuple(planned)
+        super().__init__(f"view {view!r} is not on this sheet; planned views are {self.planned}")
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else ""
+
+
 class Drawing:
     """A composable technical drawing — the editable form of :func:`make_drawing`.
 
@@ -641,8 +659,18 @@ class Drawing:
         self._coords.pop(view, None)
 
     def at(self, view, x, y, z):
-        """Map a world point to a page point ``(px, py, 0)`` in ``view``."""
-        px, py = self._coords[view].pp(x, y, z)
+        """Map a world point to a page point ``(px, py, 0)`` in ``view``.
+
+        Raises :class:`ViewNotPlanned` when *view* is not on the sheet. A bare ``KeyError``
+        from inside whichever render pass happened to ask first is not a usable answer to
+        "this drawing does not have that view" — ADR 0018 §6 wants an absent view to be a
+        named result, because view-set selection makes asking for one the normal case rather
+        than a bug (#1130).
+        """
+        coords = self._coords.get(view)
+        if coords is None:
+            raise ViewNotPlanned(view, tuple(self._coords))
+        px, py = coords.pp(x, y, z)
         return (px, py, 0.0)
 
     def view_bounds(self, view):
