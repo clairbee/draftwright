@@ -137,6 +137,15 @@ def third_angle_principals() -> tuple[ViewSpec, ...]:
     )
 
 
+def third_angle_view_names() -> tuple[str, ...]:
+    """The principal view names, in the order the layout arranges them.
+
+    One source for "which views a candidate contains", so a candidate generator and the resolver
+    cannot disagree about the set while both claiming to describe the same drawing.
+    """
+    return tuple(_PRINCIPAL_PAGE_AXES)
+
+
 def principal_placements(analysis) -> dict[str, ViewPlacement]:
     """Where the principal view blocks sit, read from a finished `Analysis`.
 
@@ -287,3 +296,93 @@ def views_carrying_nothing_exclusively(drawing) -> tuple[str, ...]:
             if name in principals and cover.carries_nothing_exclusively
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR 0018 §5 — page, scale, views and arrangement as ONE constrained choice
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LayoutCandidate:
+    """One complete answer to "what does this drawing look like", before it is judged.
+
+    ADR 0018 §5 says the planner evaluates
+
+        candidate semantic view sets
+        x preferred ISO 5455 scales
+        x standard sheets
+        x plausible relational arrangements
+
+    `compose.choose_scale` has always been that loop for two of the four: it builds a list of
+    `(scale, page_w, page_h, tb_w)` tuples and returns the first that fits. What it could not do
+    is carry the other two, because an anonymous tuple has nowhere to put them — so the view set
+    stayed fixed in three modules and the arrangement stayed a sentence in a docstring.
+
+    This is that tuple as a value, with all four dimensions present. Today `views` is always the
+    third-angle three and `arrangement` is always `"columns"`, so nothing varies and nothing
+    changes; the point is that varying them is now an addition to a generator rather than a
+    rewrite of the loop.
+    """
+
+    views: tuple[str, ...]
+    scale: float
+    page: tuple[float, float]
+    title_block_width: float
+    #: How the view blocks are related on the sheet. `"columns"` is the arrangement the engine
+    #: has always used — front and side side by side with the plan stacked above the front, iso
+    #: and title block to the right. Named rather than assumed so a second one can be proposed
+    #: without the first becoming a special case.
+    arrangement: str = "columns"
+
+    @property
+    def legacy_tuple(self) -> tuple[float, float, float, float]:
+        """`(scale, page_w, page_h, tb_w)` — the shape `choose_scale` returns to its callers.
+
+        A migration seam, and a deliberately narrow one: callers keep taking the tuple until
+        they have a reason to want the candidate, so this slice does not ripple.
+        """
+        return (self.scale, self.page[0], self.page[1], self.title_block_width)
+
+
+@dataclass(frozen=True)
+class Infeasible:
+    """Why a candidate was rejected, in terms a diagnostic can print.
+
+    ADR 0018 §6: "Infeasibility is a first-class result, not a silent relaxation." Today the
+    only rejection reason the engine can give is that the geometry did not fit, and when every
+    candidate is rejected `choose_scale` logs a warning and returns the last one anyway. That
+    fallback is not this type's doing and this slice does not change it — but the reason a
+    candidate lost is now a value rather than a `False`, which is the half that has to exist
+    before the terminal behaviour can be anything but a shrug.
+    """
+
+    candidate: LayoutCandidate
+    reason: str
+    detail: str = ""
+
+
+def candidate_is_feasible(candidate: LayoutCandidate, fits) -> Infeasible | None:
+    """`None` when *candidate* survives every gate, else why it did not.
+
+    *fits* is the caller's geometric predicate — passed in rather than imported, because this is
+    a rank-0 leaf and the fit maths lives in `compose` with the strip estimates it needs.
+
+    ADR 0018 §5 lists four hard gates; only the second ("keep all view blocks and required
+    annotations in bounds and conflict-free") is evaluated here, and only in its cheap estimated
+    form. The first — "preserve every supported requirement or reject the candidate" — is not
+    evaluated by anything today, which is #1250: the automatic path emits sheets it would refuse
+    if asked for them explicitly, because the requirement gate runs only on the explicit-scale
+    path. Naming the gates in one predicate is what makes that gap a missing branch here rather
+    than a difference between two call sites.
+    """
+    if not fits(candidate):
+        return Infeasible(
+            candidate=candidate,
+            reason="layout_does_not_fit",
+            detail=(
+                f"{candidate.arrangement} arrangement of {len(candidate.views)} views at "
+                f"{candidate.scale:g} does not fit {candidate.page[0]:.0f}x{candidate.page[1]:.0f}"
+            ),
+        )
+    return None

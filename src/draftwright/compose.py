@@ -54,7 +54,12 @@ from draftwright._core import (
 )
 from draftwright.layout import fit_box
 from draftwright.model.callout import hole_callout_spec
-from draftwright.view_plan import principal_placements
+from draftwright.view_plan import (
+    LayoutCandidate,
+    candidate_is_feasible,
+    principal_placements,
+    third_angle_view_names,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -601,12 +606,29 @@ def choose_scale(
     else:
         candidates = _LADDER
         pack_iso_2d = False
-    for cand in candidates:
-        if _fits(
+
+    # ADR 0018 §5: this loop is the planner's candidate evaluation, and it is now expressed as
+    # one. Each tuple becomes a `LayoutCandidate` carrying all four dimensions — view set,
+    # scale, sheet, arrangement — and is judged by `candidate_is_feasible`, which names the
+    # gates rather than returning a bare `False`.
+    #
+    # Two of the four are still singular: every candidate has the third-angle three and the
+    # `columns` arrangement, because nothing generates alternatives yet. That is the point of
+    # doing it in this order — varying them becomes an addition to the generator below, not a
+    # rewrite of the loop, and the rejections become a list a diagnostic can print instead of a
+    # warning about the last thing tried.
+    def _geometric_fit(candidate) -> bool:
+        # Unpacked by name rather than starred: `*candidate.legacy_tuple` fills seven positional
+        # parameters by arithmetic, and mypy could not see that it stops before `n_steps`.
+        cand_scale, cand_w, cand_h, cand_tb = candidate.legacy_tuple
+        return _fits(
             x_size,
             y_size,
             z_size,
-            *cand,
+            cand_scale,
+            cand_w,
+            cand_h,
+            cand_tb,
             n_steps=n_steps,
             strips=strips,
             pack_iso_2d=pack_iso_2d,
@@ -614,8 +636,20 @@ def choose_scale(
             table_sizes=table_sizes,
             required_tables=required_tables,
             margin=margin,
-        ):
+        )
+
+    rejected: list = []
+    for cand in candidates:
+        candidate = LayoutCandidate(
+            views=third_angle_view_names(),
+            scale=float(cand[0]),
+            page=(cand[1], cand[2]),
+            title_block_width=cand[3],
+        )
+        verdict = candidate_is_feasible(candidate, _geometric_fit)
+        if verdict is None:
             return cand
+        rejected.append(verdict)
     # The ISO 5455 ladder exhausted with no standard fit (a part too large even for
     # A0 1:10000). Rather than return a layout that overflows (#350), bisect for the
     # largest scale that genuinely fits on the largest candidate sheet — the layout is
