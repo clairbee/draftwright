@@ -43,8 +43,13 @@ def thin_rotational_plate():
     are chosen to hit 43 x 217 x 217 exactly.
     """
     part = Rot(0, 90, 0) * Cylinder(108.5, 12)
-    part += Rot(0, 90, 0) * Pos(0, 0, 12) * Cylinder(45, 18)  # axial stack
-    part += Rot(0, 90, 0) * Pos(0, 0, 30) * Cylinder(28, 13)
+    # The axial stack, each tier STARTING where the last ends. The first version left a 2.5 mm
+    # gap between them, so the second tier floated: build123d 0.11 tolerates that as a
+    # two-solid `Compound` and 0.10 returns a `ShapeList`, which `build_drawing` then tried to
+    # open as a file path. A disconnected part was never the intent — every measurement taken
+    # from this fixture was taken from a part in two pieces (#1130).
+    part += Rot(0, 90, 0) * Pos(0, 0, 12) * Cylinder(45, 18)  # z 3 .. 21
+    part += Rot(0, 90, 0) * Pos(0, 0, 28.75) * Cylinder(28, 15.5)  # z 21 .. 36.5
     part -= Rot(0, 90, 0) * Cylinder(16, 60)  # central bore
     part -= Pos(30, 0, 0) * Box(60, 8, 20)  # keyway
     for index in range(6):  # outer concentric hole pattern
@@ -66,10 +71,20 @@ def test_the_synthetic_plate_matches_the_case_studys_geometry():
     Without it the fixture could drift into some other shape and the numbers below would still
     look like evidence for ADR 0018 while describing something else.
     """
-    box = thin_rotational_plate().bounding_box()
+    part = thin_rotational_plate()
+    box = part.bounding_box()
     measured = (box.size.X, box.size.Y, box.size.Z)
     assert measured == pytest.approx(_BBOX, abs=0.5), (
         f"the fixture is {measured}, not the case study's {_BBOX}"
+    )
+    # ONE solid. The first version left a 2.5 mm gap in the axial stack, so the top tier floated
+    # — and a bounding box cannot see that, which is why every measurement taken from this
+    # fixture was taken from a part in two pieces. build123d 0.11 tolerates it as a `Compound`
+    # while 0.10 returns a `ShapeList` that `build_drawing` tries to open as a file path, so it
+    # passed here and failed every Linux CI shard (#1130).
+    assert len(part.solids()) == 1, (
+        f"the fixture is in {len(part.solids())} pieces; a disconnected stand-in is not the "
+        "case study's part and behaves differently across build123d versions"
     )
 
 
