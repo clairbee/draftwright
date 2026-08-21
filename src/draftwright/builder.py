@@ -667,6 +667,7 @@ def _repack(
             # same idiom the other repack tests use, and pins BOTH arrangements so the
             # assertion cannot be met by a constant.
             arrangement=a.arrangement,
+            views=a.planned_views,
         )
 
     candidates = _repack_candidates(a, scale, page)
@@ -879,6 +880,7 @@ def _build_drawing_once(
     _analysis_sink: Callable[[Analysis], None] | None = None,
     _critique_recognition=None,
     _arrangements: tuple[str, ...] | None = None,
+    _views: tuple[str, ...] | None = None,
     _required_tables=(),
 ) -> Drawing:
     """Build a customisable 4-view :class:`Drawing` without exporting it.
@@ -982,6 +984,7 @@ def _build_drawing_once(
         _reuse=_analysis_base,
         _required_tables=_required_tables,
         _arrangements=_arrangements,
+        _views=_views,
     )
 
     # Pass 1: place + annotate from the estimated layout, then measure the real
@@ -1247,6 +1250,7 @@ def build_drawing(
     scale_policy: Literal["strict", "fallback", "permissive"] = "fallback",
     _post_build: Callable[[Drawing], Drawing] | None = None,
     _required_tables=(),
+    _views: tuple[str, ...] | None = None,
 ) -> Drawing:
     """Build a drawing, protecting required annotations under an explicit scale.
 
@@ -1297,9 +1301,18 @@ def build_drawing(
     built_arrangement = ARRANGEMENTS[0]
 
     def _build(
-        candidate_scale: float | None, arrangements: tuple[str, ...] | None = None
+        candidate_scale: float | None,
+        arrangements: tuple[str, ...] | None = None,
+        views: tuple[str, ...] | None = None,
     ) -> Drawing:
         nonlocal analysis_base
+
+        # Default to the REQUESTED view set, not to None. Any rebuild — the arrangement
+        # gate's fallback, a scale retry — must carry the decisions the attempt was made
+        # under; the arrangement gate's rebuild silently reverted a two-view request to four
+        # views on a larger sheet until this defaulted (#1130). Same defect class the carried
+        # arrangement fixed, one stage further out.
+        views = _views if views is None else views
 
         if arrangements is None and not auto_dims:
             # Nothing to measure means nothing is proved, so fail closed on the arrangement
@@ -1327,6 +1340,7 @@ def build_drawing(
             _analysis_sink=retain_analysis,
             _critique_recognition=critique_recognition,
             _arrangements=arrangements,
+            _views=views,
         )
         return _post_build(built) if _post_build is not None else built
 
@@ -1340,7 +1354,7 @@ def build_drawing(
     if scale is None:
         if scale_policy != "fallback":
             raise ValueError("scale_policy applies only when an explicit scale is supplied")
-        drawing = _build(None)
+        drawing = _build(None, views=_views)
         if built_arrangement != ARRANGEMENTS[0]:
             # The RECOGNITION-FREE critique, not `scale_blockers_for`: the gate must reach the
             # same verdict whether the model was detected or declared, or the arrangement

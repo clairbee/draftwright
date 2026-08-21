@@ -178,7 +178,15 @@ def resolve_from_analysis(analysis) -> ResolvedViewPlan:
     and recording a placeholder would be a claim the engine cannot honour.
     """
     placements = principal_placements(analysis)
-    specs = third_angle_principals() + (ViewSpec(name="iso", kind="pictorial"),)
+    # The resolver now CHOOSES, which is what this function's docstring said would happen when
+    # view selection became a real decision: `planned_views` is the set the layout reserved
+    # space for, so the builder must create exactly those or the two disagree about the sheet.
+    # None keeps the third-angle three, so every existing path is unchanged (ADR 0018, #1130).
+    principals = third_angle_principals()
+    wanted = getattr(analysis, "planned_views", None)
+    if wanted is not None:
+        principals = tuple(spec for spec in principals if spec.name in set(wanted))
+    specs = principals + (ViewSpec(name="iso", kind="pictorial"),)
     return ResolvedViewPlan(
         specs=specs,
         placements=placements,
@@ -451,3 +459,56 @@ def arrangement_of(pick) -> str:
     used", which is the first of :data:`ARRANGEMENTS`, not "unknown".
     """
     return getattr(pick, "arrangement", ARRANGEMENTS[0])
+
+
+#: Principal view -> the model axes it lays out as (horizontal, vertical) on the page.
+#: The primitive everything below derives from, so the derivations cannot drift from each
+#: other or be quietly mis-stated: `front` is the x-z elevation, `plan` looks down at x-y,
+#: `side` is the y-z elevation.
+VIEW_AXES: dict[str, tuple[str, str]] = {
+    "front": ("x", "z"),
+    "plan": ("x", "y"),
+    "side": ("y", "z"),
+}
+
+#: Axis letter -> the principal views that can carry a requirement about it, preference
+#: ordered. `_geometry._END_ON` answers "which single view does this feature read face-on
+#: in"; this answers the question view-set selection actually needs — "which views COULD
+#: carry this", because an overall width reads in plan and equally well in front.
+#:
+#: That difference is why droppability was uncomputable. Every principal view carries some
+#: requirement exclusively even on a featureless box, because the three envelope extents are
+#: distributed one per view — so "carries nothing exclusively" is never true and would drop
+#: nothing, ever. The real criterion is whether what a view carries can be carried by a view
+#: that REMAINS (#1130).
+#:
+#: The first entry of each is the view that extent has always been placed in, so consulting
+#: this changes nothing while all three principals are planned.
+VIEWS_SHOWING: dict[str, tuple[str, ...]] = {
+    "x": ("plan", "front"),
+    "y": ("side", "plan"),
+    "z": ("front", "side"),
+}
+
+
+def views_showing(axis: str, planned, *, horizontal: bool = False) -> str | None:
+    """The preferred view in *planned* that can carry a requirement about *axis*.
+
+    ``horizontal=True`` restricts to views where the axis runs ACROSS the page. A below-strip
+    extent dimension is drawn horizontally, so it needs more than a view containing its axis:
+    the overall depth reads in plan, but VERTICALLY, and dimensioning it there horizontally
+    collapses the span to zero length. Measured as a degenerate-border `ValueError` the first
+    time the plan view was offered as a fallback for it (#1130).
+
+    ``None`` when the sheet has no such view — a caller must report that rather than place a
+    requirement where it cannot be read (ADR 0016 Amdt 6).
+    """
+    planned = set(planned)
+    return next(
+        (
+            view
+            for view in VIEWS_SHOWING.get(axis, ())
+            if view in planned and (not horizontal or VIEW_AXES[view][0] == axis)
+        ),
+        None,
+    )

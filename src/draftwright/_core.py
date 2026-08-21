@@ -1105,6 +1105,11 @@ class Analysis:
     #: different answer for the same sheet and lose dimensions to the mismatch (#1130).
     #: Defaulted for hand-built `Analysis` objects, which mean the long-standing arrangement.
     arrangement: str = "columns"
+    #: The principal views this sheet carries, or None for the third-angle three (ADR 0018).
+    #: Decided once alongside scale/page/arrangement and carried, for the same reason: the
+    #: layout must reserve space for exactly the views the builder creates, or dropping one
+    #: costs its annotations without reclaiming its paper.
+    planned_views: tuple[str, ...] | None = None
 
     @property
     def pmi(self) -> list:

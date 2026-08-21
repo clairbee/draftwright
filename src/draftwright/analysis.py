@@ -522,6 +522,7 @@ def _analyse(
     _reuse: Analysis | None = None,
     _required_tables=(),
     _arrangements: tuple[str, ...] | None = None,
+    _views: tuple[str, ...] | None = None,
 ) -> Analysis:
     """Load STEP or use a build123d Shape, analyse geometry, compute layout.
 
@@ -756,6 +757,7 @@ def _analyse(
             required_tables=layout_required_tables,
             margin=margin,
             arrangements=_arrangements,
+            views=_views,
         )
 
     scale_pick, strips_i, n_for_sizing = _converge_step_sizing(
@@ -815,6 +817,7 @@ def _analyse(
         required_tables=layout_required_tables,
         margin=margin,
         arrangement=ARRANGEMENT,
+        views=_views,
     )
     fv_hw = _g.fv_hw
     fv_hh = _g.fv_hh
@@ -863,6 +866,7 @@ def _analyse(
 
     return Analysis(
         arrangement=ARRANGEMENT,
+        planned_views=_views,
         part=part,
         recognition=recognition,
         bb=bb,

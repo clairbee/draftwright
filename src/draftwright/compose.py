@@ -470,6 +470,7 @@ def _fits(
     required_tables=(),
     margin: float = _MARGIN,
     arrangement: str = "columns",
+    views: tuple[str, ...] | None = None,
 ) -> bool:
     """True if the composed 4-view footprint fits the page at this scale.
 
@@ -494,6 +495,7 @@ def _fits(
         warn_no_iso=False,
         margin=margin,
         arrangement=arrangement,
+        views=views,
     )
     return bool(g.fits if pack_iso_2d else g.auto_fits)
 
@@ -557,6 +559,7 @@ def choose_scale(
     required_tables=(),
     margin: float = _MARGIN,
     arrangements: tuple[str, ...] | None = None,
+    views: tuple[str, ...] | None = None,
 ) -> tuple:
     """Return (SCALE, PAGE_W, PAGE_H, TB_W) for a 4-view layout.
 
@@ -642,6 +645,7 @@ def choose_scale(
             required_tables=required_tables,
             margin=margin,
             arrangement=candidate.arrangement,
+            views=views,
         )
 
     def _candidate(cand, arrangement):
@@ -899,6 +903,7 @@ def _layout_geometry(
     warn_no_iso=True,
     margin: float = _MARGIN,
     arrangement: str = "columns",
+    views: tuple[str, ...] | None = None,
 ):
     """Compute the 4-view layout geometry for a part at a given scale/page.
 
@@ -963,7 +968,17 @@ def _layout_geometry(
     # view carries a bottom halo, that band is part of the stacked block layout
     # rather than a special-case lift outside the ViewBlock model (#112).
     base_gap = fv.top + pv.bottom
-    total_h = 2 * margin + fv.bottom + 2 * fv.hh + base_gap + 2 * pv.hh + pv.top
+    # ADR 0018: the plan view is stacked ABOVE the front, so a view set without it reclaims
+    # its height and the gap between them. Reserving space for a view the sheet does not
+    # carry is what made dropping one cost nothing — the drawing lost a view and stayed on
+    # the same paper, which is the opposite of the point (#1130).
+    #
+    # `views=None` means the third-angle three, so every existing caller is byte-identical.
+    has_plan = views is None or "plan" in views
+    if has_plan:
+        total_h = 2 * margin + fv.bottom + 2 * fv.hh + base_gap + 2 * pv.hh + pv.top
+    else:
+        total_h = 2 * margin + fv.bottom + 2 * fv.hh + fv.top
     y_offset = max(0.0, (page_h - total_h) / 2)
 
     section_right_band = (sv.right + 10.0 + 2 * section_hw + DIM_PAD) if section else 0.0
@@ -1076,14 +1091,14 @@ def _layout_geometry(
     if blocks is not None:
         obstacles = [
             fv.footprint(FV_X, FV_Y),
-            pv.footprint(PV_X, PV_Y),
+            *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
             sv.footprint(SV_X, SV_Y),
             title_block.footprint(tb_cx, tb_cy),
         ]
     else:
         obstacles = [
             _padded_box(FV_X, FV_Y, fv_hw, fv_hh),
-            _padded_box(PV_X, PV_Y, fv_hw, pv_hh),
+            *([_padded_box(PV_X, PV_Y, fv_hw, pv_hh)] if has_plan else []),
             _padded_box(SV_X, SV_Y, sv_hw, fv_hh),
             title_block.footprint(tb_cx, tb_cy),
         ]
@@ -1132,7 +1147,7 @@ def _layout_geometry(
     # footprints no longer fit the estimate's page.
     _view_boxes = [
         fv.footprint(FV_X, FV_Y),
-        pv.footprint(PV_X, PV_Y),
+        *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
         sv.footprint(SV_X, SV_Y),
     ]
     if section:
@@ -1156,7 +1171,7 @@ def _layout_geometry(
     # planned strips/halos and then drop after real annotations are rendered.
     table_obstacles = [
         fv.footprint(FV_X, FV_Y),
-        pv.footprint(PV_X, PV_Y),
+        *([pv.footprint(PV_X, PV_Y)] if has_plan else []),
         sv.footprint(SV_X, SV_Y),
         title_block.footprint(tb_cx, tb_cy),
     ]
