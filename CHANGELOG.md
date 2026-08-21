@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.9 — 2026-08-21
 
 ### Added
 
@@ -28,22 +28,6 @@
   component at all and flags any whose classification nobody made — `section_dropped` was
   found scoring on nothing while a comment beside its emission said the opposite, and eleven
   more `*_dropped` codes reach the engine as `drop_code` data with the same shape (#1176).
-
-- Recogniser co-development now has a one-command, wheel-based two-checkout check; an exact
-  registry-release evidence record; automated dependency PR preparation; and documented landing,
-  compatibility, deprecation, rollback, ownership, and CI-budget rules. Dependency PRs retain the
-  canonical coverage/Codecov gate while avoiding four duplicate platform suites and the slow tier
-  (#1170).
-- A versioned, independently authored STEP-analysis corpus and evaluator now report detection
-  recall/false positives, parameter fidelity, and downstream usefulness as separate evidence
-  layers. Hash-pinned positive, negative, ambiguous, compound, and topology-order-variant fixtures,
-  per-layer diagnostics, and an anti-self-validation mutation prevent recogniser output from
-  defining its own denominator (#1169).
-- Draftwright now validates the released `b123d-recognisers` 0.2.0 capability manifest against
-  an exhaustive consumer-owned declaration of IR, DSL, generated-code, drawing, completeness,
-  and documentation states. Unknown families, stale implementations, record-schema drift, and
-  unevidenced state transitions fail closed; intentionally geometry-only repeating-profile
-  evidence remains usable without acquiring invented drafting semantics.
 
 ### Changed
 
@@ -77,13 +61,47 @@
   The immutable PyPI wheel/sdist hashes and capability-manifest digest `7985befc8572bfe6d1c0805dfdf690d74a5a4a5f14d5988cc29c366315ff04ca` are
   recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
   normal consumer gates run on the generated PR.
-- Updated the exact `b123d-recognisers` production lock from 0.2.0 to 0.2.1.
-  The immutable PyPI wheel/sdist hashes and capability-manifest digest
-  `383a196329ed6a3d1bf88f18ae4ff75613c032f35d40f2b53302b6744da4d19e` are
-  recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
-  normal consumer gates run on the generated PR.
 
 ### Fixed
+
+- An authored tolerance the compiler approved now reaches the sheet wherever the measurement
+  is drawn (#1215, #1216). `build123d_drafting` resolves a dimension's text as
+  `label if label is not None else _number_with_units(measured, tolerance)`, and every
+  dimension this engine emits passes a label — so a forwarded `tolerance=` rendered nothing
+  while type-checking and reading back correctly from `Dimension.label`. Ten render paths
+  discarded the band that way: envelope extents, the height ladder, the turned-step chain, two
+  public `Drawing` verbs, the deferred corridor route, the detail-view redraw, the short-rise
+  escape, step shoulders, pattern pitch, compound-callout recess terms, grid pitch, and both
+  hole tables. A general guard now decorates every parameter of every feature across a corpus,
+  through both `decorations=` key shapes, and joins what the compiler approved against what the
+  claiming annotation renders.
+
+- Collapsed `N×` marks no longer state a tolerance their members do not share (#1216). A
+  pattern's pitch claimed the authored band of every gap although the recogniser admits 2%
+  jitter — holes at −30, −10, 10.3, 30 printed `3× 20 ±0.1` over a 20.3 mm gap — and fillet and
+  flat collapses took the "first-authored" band, so one of four fillets at ±0.1 printed
+  `4× R5 ±0.1`. Equality is now judged at the drawn precision, and a withheld band is reported
+  (`pattern_pitch_tolerance_withheld`, `collapsed_tolerance_withheld`) rather than dropped
+  silently.
+
+- An approved dimension that cannot be placed is now reported instead of vanishing (#1216).
+  The overall extents' corridor candidate carried a no-op drop handler — the only drop in the
+  engine that recorded nothing — and the step ladder's legibility floor skipped rungs without
+  incrementing any counter. Both now record against the measurement they concern, and a
+  withholding is withdrawn if a later pass draws the measurement after all.
+
+- A feature leader filling a view's below corridor no longer costs the part its overall extent
+  (#1236). The mandatory width or depth now retries on the view's above strip after every
+  corridor has drained, the fallthrough starved slot and plate dimensions already use. Live on
+  three NIST CTC fixtures, which drew no overall width.
+
+- The iso view and the above strips are no longer invisible to each other (#1240). Strip
+  placement never saw the iso, and the iso fit re-scaled after annotation without consulting
+  what had been placed — so growth could invade dimension ink, which it did on CTC-01. The fit
+  is now capped by measured re-projection rather than by a linear model of it: the projected
+  bbox translates as it scales, by up to 7.35 mm on a part carrying a Location, which no
+  prediction about the page centre can express.
+
 
 - A part whose feature-local extent runs between the same two faces as an overall extent
   is no longer dimensioned twice (#1154). GRM-04's drive plate printed `4.5` twice — once
@@ -98,22 +116,10 @@
   requirement. (A tolerance on the *receiving* extent is the same requirement on the same two
   faces, and does not prevent the consolidation.)
 
-- Stable release and TestPyPI snapshot builds now update package metadata and the independently
-  validated Draftwright consumer-contract identity atomically. This prevents stripped `.dev0`
-  and numbered development artifacts from failing their own capability-contract validation.
-- Installed wheels validate every portable recogniser-contract property without requiring the
-  repository-only behavior-test files whose existence remains a strict source/CI gate. This keeps
-  the packaged STEP-analysis evaluator usable without weakening evidence checks in development.
-- Post-release development-version bumps now update the consumer-contract identity on a branch,
-  open a protected PR, and dispatch the narrow maintenance gate instead of attempting a rejected
-  direct push to protected `main` (#1170).
-- Machined-feature leader callouts now collect all clear alternatives within each
-  post-drain pass and use a bounded maximum-cardinality, minimum-leader-length
-  assignment instead of taking corners greedily in feature order (#740). If a
-  deterministic alternative-count, pass-size, candidate-pair, or search budget is
-  reached, placement retains the legacy greedy result or a result no worse than it
-  rather than losing additional callouts. Pre-drain diameter clearance ranking and
-  its Policy-B fallback remain unchanged.
+## v0.4.8 — 2026-08-16
+
+### Fixed
+
 - Compatible automatic/deferred sparse ordinary side/plan hole and post-drain
   machined-feature callouts now share one bounded same-view leader inventory
   (#1166). Pattern, profiled-bore, and dense table-eligible hole queues retain
@@ -154,6 +160,53 @@
   exhausts, records the producer-floor replay separately, and names exact committed/provisional components,
   refinement status, and competing blockers; live
   single-callout edits remain immediate.
+
+## v0.4.7 — 2026-08-16
+
+### Added
+
+- Recogniser co-development now has a one-command, wheel-based two-checkout check; an exact
+  registry-release evidence record; automated dependency PR preparation; and documented landing,
+  compatibility, deprecation, rollback, ownership, and CI-budget rules. Dependency PRs retain the
+  canonical coverage/Codecov gate while avoiding four duplicate platform suites and the slow tier
+  (#1170).
+- A versioned, independently authored STEP-analysis corpus and evaluator now report detection
+  recall/false positives, parameter fidelity, and downstream usefulness as separate evidence
+  layers. Hash-pinned positive, negative, ambiguous, compound, and topology-order-variant fixtures,
+  per-layer diagnostics, and an anti-self-validation mutation prevent recogniser output from
+  defining its own denominator (#1169).
+- Draftwright now validates the released `b123d-recognisers` 0.2.0 capability manifest against
+  an exhaustive consumer-owned declaration of IR, DSL, generated-code, drawing, completeness,
+  and documentation states. Unknown families, stale implementations, record-schema drift, and
+  unevidenced state transitions fail closed; intentionally geometry-only repeating-profile
+  evidence remains usable without acquiring invented drafting semantics.
+
+### Changed
+
+- Updated the exact `b123d-recognisers` production lock from 0.2.0 to 0.2.1.
+  The immutable PyPI wheel/sdist hashes and capability-manifest digest
+  `383a196329ed6a3d1bf88f18ae4ff75613c032f35d40f2b53302b6744da4d19e` are
+  recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
+  normal consumer gates run on the generated PR.
+
+### Fixed
+
+- Stable release and TestPyPI snapshot builds now update package metadata and the independently
+  validated Draftwright consumer-contract identity atomically. This prevents stripped `.dev0`
+  and numbered development artifacts from failing their own capability-contract validation.
+- Installed wheels validate every portable recogniser-contract property without requiring the
+  repository-only behavior-test files whose existence remains a strict source/CI gate. This keeps
+  the packaged STEP-analysis evaluator usable without weakening evidence checks in development.
+- Post-release development-version bumps now update the consumer-contract identity on a branch,
+  open a protected PR, and dispatch the narrow maintenance gate instead of attempting a rejected
+  direct push to protected `main` (#1170).
+- Machined-feature leader callouts now collect all clear alternatives within each
+  post-drain pass and use a bounded maximum-cardinality, minimum-leader-length
+  assignment instead of taking corners greedily in feature order (#740). If a
+  deterministic alternative-count, pass-size, candidate-pair, or search budget is
+  reached, placement retains the legacy greedy result or a result no worse than it
+  rather than losing additional callouts. Pre-drain diameter clearance ranking and
+  its Policy-B fallback remain unchanged.
 
 ## v0.4.6 — 2026-08-15
 
