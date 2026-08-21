@@ -656,13 +656,16 @@ def _repack(
             # default would silently recompose as `columns`, which is the exact stage
             # disagreement this decision is carried to prevent.
             #
-            # Currently unexercised, and said plainly rather than assumed: pinning this to
-            # `"columns"` passes the entire fast tier (4440 tests), and five hand-built parts
-            # that do take the alternative are all byte-identical under that mutation. Repack
-            # only re-assembles when the measured footprints move a view, and no part found so
-            # far both departs from `columns` and needs that. The argument stays because
-            # dropping it would be a latent defect the moment one does, not because a test
-            # currently proves it.
+            # No natural part reaches this, and the reason is structural rather than an
+            # accident of the corpus: repack only re-assembles when measured footprints move
+            # a view, and a part annotated densely enough for that is also dense enough to
+            # lose a requirement on the smaller sheet the alternative offers — so the gate
+            # above rejects it first. The two conditions are anti-correlated BY the gate.
+            # (Measured: across the golden corpus and parts built to provoke it,
+            # `_repack_to_fixed_point` is entered under `stacked-iso` and always returns
+            # None.) `test_adr0018_arrangement_gate` therefore forces the trigger, in the
+            # same idiom the other repack tests use, and pins BOTH arrangements so the
+            # assertion cannot be met by a constant.
             arrangement=a.arrangement,
         )
 

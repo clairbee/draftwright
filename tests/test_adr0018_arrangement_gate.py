@@ -156,6 +156,69 @@ class TestTheDecisionIsMadeOnceAndCarried:
         }
 
 
+class TestTheRepackLoopComposesUnderTheCarriedArrangement:
+    """The one seam that no real part reaches — pinned deliberately rather than left bare.
+
+    `_repack_to_fixed_point` re-lays-out the sheet after measuring real annotation
+    footprints. It must compose under the arrangement PLACEMENT used; the parameter defaults
+    to `columns`, so omitting it would silently recompose the sheet the other way — exactly
+    the stage disagreement this decision is carried to prevent, resurfacing one stage later.
+
+    No part reaches it. Measured, not assumed: across the whole golden corpus plus parts
+    built to provoke it, `_repack_to_fixed_point` is ENTERED under `stacked-iso` and always
+    returns `None` — nothing re-assembles, because a well-estimated part measures as it was
+    predicted and skips pass 2. And a part annotated densely enough to need re-assembly is
+    also dense enough to lose a requirement on the smaller sheet the alternative offers, so
+    the requirement gate rejects it first. The two conditions are anti-correlated BY the
+    gate, which is why hunting for a natural fixture does not terminate.
+
+    So the trigger is forced, in the same idiom the existing repack tests already use
+    (`test_repack_to_fixed_point_*` all drive `_needs_repack` directly). This is a narrower
+    claim than an end-to-end one and is worth being explicit about: it pins the wiring, not
+    a drawing outcome.
+    """
+
+    @pytest.mark.parametrize(
+        ("part", "expected"),
+        [
+            (_chamfered, "stacked-iso"),
+            # BOTH directions, so the assertion cannot be satisfied by a constant: a repack
+            # hardcoded to either arrangement fails one case or the other.
+            (lambda: Box(80, 60, 25), "columns"),
+        ],
+        ids=["alternative", "preferred"],
+    )
+    def test_the_repack_geometry_is_asked_for_the_arrangement_placement_used(
+        self, monkeypatch, part, expected
+    ):
+        # Precondition: this part really is composed under the arrangement asserted below,
+        # so the expected value cannot appear merely as somebody's default.
+        built = part()
+        assert build_drawing(built).arrangement_decision["chosen"] == expected
+
+        # True once, then False, so the fixed-point loop re-assembles exactly one round and
+        # terminates instead of warning at the iteration limit.
+        rounds = iter([True])
+        monkeypatch.setattr(builder_mod, "_needs_repack", lambda dwg, a: next(rounds, False))
+
+        seen = []
+        original = builder_mod._layout_geometry
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("arrangement"))
+            return original(*args, **kwargs)
+
+        # `builder` holds its own reference and uses it at exactly one site — the repack's
+        # `_geom` — so this observes the repack alone, not selection or placement.
+        monkeypatch.setattr(builder_mod, "_layout_geometry", spy)
+        build_drawing(built)
+
+        assert seen, "the repack never composed — the forced trigger did not fire"
+        assert set(seen) == {expected}, (
+            f"repack composed under {set(seen)}, not the arrangement placement used"
+        )
+
+
 class TestPackingMayNotBidUpLegibility:
     """The arrangement compacts a chosen scale; it never chooses one."""
 
