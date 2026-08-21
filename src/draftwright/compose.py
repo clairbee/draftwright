@@ -467,6 +467,7 @@ def _fits(
     table_sizes=(),
     required_tables=(),
     margin: float = _MARGIN,
+    arrangement: str = "columns",
 ) -> bool:
     """True if the composed 4-view footprint fits the page at this scale.
 
@@ -490,6 +491,7 @@ def _fits(
         required_tables=required_tables,
         warn_no_iso=False,
         margin=margin,
+        arrangement=arrangement,
     )
     return bool(g.fits if pack_iso_2d else g.auto_fits)
 
@@ -851,6 +853,7 @@ def _layout_geometry(
     required_tables=(),
     warn_no_iso=True,
     margin: float = _MARGIN,
+    arrangement: str = "columns",
 ):
     """Compute the 4-view layout geometry for a part at a given scale/page.
 
@@ -919,15 +922,61 @@ def _layout_geometry(
     y_offset = max(0.0, (page_h - total_h) / 2)
 
     section_right_band = (sv.right + 10.0 + 2 * section_hw + DIM_PAD) if section else 0.0
-    total_content_w = (
+    # The orthographic band: everything in the row that is NOT the isometric. Split out
+    # because the ARRANGEMENT is exactly the question of where the iso goes relative to
+    # it (ADR 0018 §5's fourth dimension), and both arrangements share this part.
+    ortho_row_w = (
         col_left
         + col_right
         + x_size * scale
         + y_size * scale
         + max(2 * DIM_PAD, sv.right + DIM_PAD, section_right_band)
-        + bbox_max * scale * _ISO_WIDTH_BUDGET
     )
-    x_offset = max(0.0, (page_w - 2 * margin - tb_w - total_content_w) / 2)
+    iso_row_budget = bbox_max * scale * _ISO_WIDTH_BUDGET
+    # Does the orthographic band clear the title-block column vertically? Needed before the
+    # arrangement choice, since it decides whether the tb width is part of the row at all.
+    # (Recomputed below as `_auto_clears_tb` for the auto-fit verdict; same expression.)
+    _tb_col_w = 0.0 if (y_offset + margin + DIM_PAD) >= margin + _TB_H else tb_w
+
+    if arrangement == "auto":
+        # Resolve the arrangement from the inputs: columns unless its row overflows the sheet.
+        #
+        # NOT the production default, and the reason is measured (`test_adr0018_arrangement_
+        # gate.py`) rather than cautionary. The arrangement itself is sound — the `chamfered`
+        # part moves A3 -> A4 with no lint change at all, which is exactly ADR 0018 §5's
+        # "smallest standard sheet at that scale". What is not sound is resolving it HERE.
+        #
+        # This function is the single layout authority, but its three callers do not pass it
+        # the same arguments: scale selection resolves against ESTIMATED strip depths and
+        # placement/repack against MEASURED ones. Sharing the function therefore does not make
+        # them agree — for the dense plate, resolving per call site loses `location_ref_dropped`
+        # + `feature_not_located` on a sheet that does not change size at all. (At the
+        # ESTIMATE the two arrangements barely differ for that part — same iso rectangle,
+        # 0.5 mm of x_offset — so the loss comes from the resolution flipping between stages,
+        # not from any property of `stacked-iso`. The precise mechanism is not isolated here;
+        # what is measured is that a per-call-site resolution is lossy.)
+        #
+        # So the arrangement is a decision that must be made ONCE, carried alongside
+        # (scale, page, tb_w), and applied by every stage — not re-derived per call site from
+        # whatever each stage happens to know. That is the threading `choose_scale`'s 4-tuple
+        # return has no room for, and it is the work the next ADR 0018 slice owes: widen the
+        # decision that `LayoutCandidate` already models to the value the pipeline carries.
+        columns_row_w = ortho_row_w + iso_row_budget + 2 * margin + _tb_col_w
+        arrangement = "columns" if columns_row_w <= page_w + 0.5 else "stacked-iso"
+
+    if arrangement == "columns":
+        # [front][side][iso][title block] — one row, iso reserves its own column.
+        total_content_w = ortho_row_w + iso_row_budget
+        x_offset = max(0.0, (page_w - 2 * margin - tb_w - total_content_w) / 2)
+    else:
+        # [front][side] | [iso stacked above the title block] — the iso shares the right
+        # column with the title block instead of claiming one of its own, which is worth
+        # `iso_row_budget` of width. The orthographic views are packed LEFT rather than
+        # centred, because centring them would eat the very column the iso needs. Nothing
+        # here places the iso: it is already the one *placed* block, fitted into the
+        # largest empty rectangle below, and that rectangle is now the right column.
+        total_content_w = ortho_row_w
+        x_offset = 0.0
 
     # Anchor the FV/PV column on the SHARED left corridor (col_left), not fv.left
     # alone: when the measured plan-view left band is the deeper of the two, the
@@ -1119,6 +1168,9 @@ def _layout_geometry(
         auto_row_fits=auto_row_fits,
         auto_fits=auto_fits,
         fits=fits,
+        auto_row_w=_auto_row_w,
+        # The arrangement this geometry was laid out under — resolved, never "auto".
+        arrangement=arrangement,
     )
 
 
