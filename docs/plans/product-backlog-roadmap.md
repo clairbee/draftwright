@@ -1,10 +1,10 @@
 # Product backlog roadmap
 
 - **Status:** Active product strategy
-- **Last reviewed:** 2026-08-07
-- **Live execution:** [Draftwright: Trustworthy Manufacturing
-  Drawings](https://github.com/users/pzfreo/projects/3)
-- **Current delivery plan:** [Trust and coverage, August-October
+- **Last reviewed:** 2026-08-21
+- **Live execution:** [Draftwright: Semantic Fidelity and Honest
+  Failure](https://github.com/users/pzfreo/projects/3)
+- **Current delivery plan:** [Semantic fidelity and honest failure, August-October
   2026](2026-08-trust-and-coverage-plan.md)
 
 ## Product promise
@@ -41,10 +41,10 @@ state is a drift source.
 
 | Workstream | Objective | Now | Next |
 | --- | --- | --- | --- |
-| Trust and correctness | Never certify or silently emit an incomplete drawing | [#958](https://github.com/pzfreo/draftwright/issues/958) duplicate pad/phantom-slot span | [#1000](https://github.com/pzfreo/draftwright/issues/1000), [#955](https://github.com/pzfreo/draftwright/issues/955), [#1004](https://github.com/pzfreo/draftwright/issues/1004) |
-| Reliability and diagnostics | Make failures fast, reproducible, and representative | [#1067](https://github.com/pzfreo/draftwright/issues/1067) v0.4.1 and weekly release decision | No additional item until a Now slot clears |
-| Architecture | Remove boundaries only when they block a product outcome | No active implementation | Pull only from a failing product slice |
-| Manufacturing coverage | Expand independently verified feature coverage | No active implementation until the trust gate clears | [#676](https://github.com/pzfreo/draftwright/issues/676), then [#623](https://github.com/pzfreo/draftwright/issues/623) |
+| Trust and correctness | Never certify or silently emit an incomplete drawing | [#1259](https://github.com/pzfreo/draftwright/issues/1259) view-set-aware dimension planning | [#924](https://github.com/pzfreo/draftwright/issues/924), [#1116](https://github.com/pzfreo/draftwright/issues/1116), [#1260](https://github.com/pzfreo/draftwright/issues/1260), [#1261](https://github.com/pzfreo/draftwright/issues/1261), [#1262](https://github.com/pzfreo/draftwright/issues/1262) |
+| Reliability and diagnostics | Make failures fast, reproducible, and representative | No active implementation | Pull only after the current trust slice clears |
+| Architecture | Remove boundaries only when they block a product outcome | No independent implementation | Pull only from a failing product slice |
+| Manufacturing coverage | Expand independently verified feature coverage | No active implementation until the trust gate clears | No coverage expansion is committed in the current queue |
 
 The table is intentionally small. The Project records ownership, blockers, and
 movement; the dated delivery plan records the multi-week sequence and gates.
@@ -135,11 +135,12 @@ package/test boundaries no longer encourage reach-through or cyclic ownership.
 - The builder/CLI/emitter import graph is acyclic.
 - Test-side private reads have a shrink-only guard and a documented residual.
 
-## Active milestone — Trustworthy manufacturing drawings
+## Milestone 3 — Trustworthy manufacturing drawings
 
-**Target: 2026-10-02.** The former open-ended Coverage expansion milestone is
-consolidated into this time-bound outcome. Correctness fixes lead; manufacturing
-coverage follows only after the trust gate in the current delivery plan.
+**Status: EXITED (2026-08-10, 17/17 issues closed).** The former open-ended
+Coverage expansion milestone was consolidated into this time-bound outcome and
+completed early. Its Project status update records the evidence and the transition
+to semantic fidelity and honest failure.
 
 ### Outcome
 
@@ -169,6 +170,42 @@ and checked by independent coverage lint.
 - Imported semantics lower to the same IR used by declared concepts.
 - A missing rendered feature is detected independently of the plan that should
   have produced it.
+
+## Active milestone — Semantic fidelity and honest failure
+
+**Target: 2026-10-01.** Preserve one semantic owner per manufacturing fact,
+reject invalid declarations explicitly, and make view selection preserve every
+supported drawing requirement.
+
+### Outcome
+
+Authored and imported semantics reach one canonical drawing owner; invalid or
+incoherent declarations fail with actionable diagnostics; and selected view sets
+are planned against requirements before projection and placement.
+
+### Current committed sequence
+
+- [#1259](https://github.com/pzfreo/draftwright/issues/1259) — make dimension
+  planning view-set aware.
+- [#924](https://github.com/pzfreo/draftwright/issues/924) and
+  [#1116](https://github.com/pzfreo/draftwright/issues/1116) — close the queued
+  declaration and AP242 semantic-safety defects.
+- [#1260](https://github.com/pzfreo/draftwright/issues/1260) — expose typed
+  authored view constraints through the `Sheet` verbs.
+- [#1261](https://github.com/pzfreo/draftwright/issues/1261) — re-home displaced
+  requirements without changing semantic identity.
+- [#1262](https://github.com/pzfreo/draftwright/issues/1262) — select the smallest
+  complete semantic view set automatically.
+
+### Exit criteria
+
+- A selected or authored view set is coherent before rendering, or fails with a
+  diagnostic naming the unmet requirement.
+- Removing a view never silently deletes a supported requirement.
+- Imported AP242 tolerances have one canonical semantic owner.
+- Invalid zero-length declarations become explicit omissions rather than crashes.
+- The synthetic view-planning cases choose a smaller complete sheet only when the
+  real placement solve preserves the requirement multiset.
 
 ## Parked product expansion
 
