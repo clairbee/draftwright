@@ -41,10 +41,10 @@ state is a drift source.
 
 | Workstream | Objective | Now | Next |
 | --- | --- | --- | --- |
-| Trust and correctness | Never certify or silently emit an incomplete drawing | [#1259](https://github.com/pzfreo/draftwright/issues/1259) view-set-aware dimension planning | [#924](https://github.com/pzfreo/draftwright/issues/924), [#1116](https://github.com/pzfreo/draftwright/issues/1116), [#1261](https://github.com/pzfreo/draftwright/issues/1261) |
+| Trust and correctness | Never certify or silently emit an incomplete drawing | [#1259](https://github.com/pzfreo/draftwright/issues/1259) view-set-aware dimension planning | [#924](https://github.com/pzfreo/draftwright/issues/924), [#1116](https://github.com/pzfreo/draftwright/issues/1116), [#1260](https://github.com/pzfreo/draftwright/issues/1260), [#1261](https://github.com/pzfreo/draftwright/issues/1261), [#1262](https://github.com/pzfreo/draftwright/issues/1262) |
 | Reliability and diagnostics | Make failures fast, reproducible, and representative | No active implementation | Pull only after the current trust slice clears |
-| Architecture | Remove boundaries only when they block a product outcome | No independent implementation | [#1260](https://github.com/pzfreo/draftwright/issues/1260) is scheduled as an editable-planning product slice, not architecture-only work |
-| Manufacturing coverage | Expand independently verified feature coverage | No active implementation until the trust gate clears | [#1262](https://github.com/pzfreo/draftwright/issues/1262) completes semantic view selection after requirement re-homing |
+| Architecture | Remove boundaries only when they block a product outcome | No independent implementation | Pull only from a failing product slice |
+| Manufacturing coverage | Expand independently verified feature coverage | No active implementation until the trust gate clears | No coverage expansion is committed in the current queue |
 
 The table is intentionally small. The Project records ownership, blockers, and
 movement; the dated delivery plan records the multi-week sequence and gates.
