@@ -68,6 +68,8 @@ _LAYERS: dict[str, int] = {
     "fonts": 0,
     "layout": 0,
     "registry": 0,
+    # ADR 0018's view representation: describes views, imports nothing that draws them.
+    "view_plan": 0,
     "intents": 0,
     "recognition": 0,
     "recognition_cache": 0,

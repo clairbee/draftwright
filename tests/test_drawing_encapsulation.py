@@ -504,8 +504,13 @@ def test_build_state_has_a_single_construction_and_fill_site():
             "_build.part_model",
             "_build.detail_view",
             "_build.trace",
+            "_build.view_plan",
             "_build.omissions",
         ],  # omissions: ONE assignment covering both the auto and auto_dims=False paths
+        # _build.view_plan: ADR 0018's resolved plan, filled at the same site that creates the
+        # views from it — the topology and the drawing's record of the topology cannot disagree
+        # because one statement produces both. `Drawing.view_plan` is read-only with no setter,
+        # so this list staying at one entry is what stops a second writer appearing.
         # drawing.py owns the lazy #1058 principal-profile critique cache; linting returns
         # the physical result through an explicit function and never reaches into Drawing.
         # drawing.py still writes _build.trace via the deprecated attach_solve_trace

@@ -367,6 +367,12 @@ class BuildState:
     principal_profile_cache: tuple[object, bool, tuple[LintIssue, ...]] | None = None
     trace: Any = None
     detail_view: bool = False
+    #: The ADR 0018 :class:`~draftwright.view_plan.ResolvedViewPlan` — which views this drawing
+    #: has and where their blocks sit. ONE typed attachment, filled once by the builder at the
+    #: same site it creates the views, because the alternative the ADR names explicitly is what
+    #: the topology was before: the answer spread across `Analysis` fields, three hardcoded
+    #: `_add_view` calls and a docstring, with no single thing to read or replace.
+    view_plan: Any = None
     #: The compiler's :class:`~draftwright.model.compiled.Omission` records — every
     #: measurement it considered and did not approve, with the rule that stopped it (#996).
     #: The compiled plan was a local in the orchestrator: built, read by the renderers, and
@@ -529,6 +535,16 @@ class Drawing:
         # replays through the live helpers). Default off → the live path is unchanged.
         self._intents: list[Intent] = []
         self._defer_intents: bool = False
+
+    @property
+    def view_plan(self):
+        """The resolved view plan (ADR 0018), or ``None`` before the views are created.
+
+        READ ONLY, and there is no setter: a resolved plan that a caller can rebind is
+        indistinguishable from an authored request, which is the confusion ADR 0018 §1 exists to
+        prevent. Editing means converting it into constraints explicitly and resolving again.
+        """
+        return self._build.view_plan
 
     @property
     def registry(self):
