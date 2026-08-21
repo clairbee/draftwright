@@ -445,6 +445,11 @@
   ],
   "build_issues": [
     [
+      "error",
+      "plan_incomplete",
+      "no standard scale preserves every required annotation on this part; the automatically planned sheet drops 1 outcome(s) (hole_pattern_dim_dropped)"
+    ],
+    [
       "warning",
       "hole_pattern_dim_dropped",
       "hole pattern pitch 15 not placed (no clear room beside the plan)"

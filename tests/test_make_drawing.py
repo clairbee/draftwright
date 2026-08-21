@@ -874,7 +874,12 @@ class TestGrooveCallout:
         assert dwg.get_annotation(names[0]).label == _groove_label(4, 16)
         # A groove's width is axial → it reads in a profile view (axis in-plane), not down it.
         assert dwg.view_of(names[0]) == "front"
-        assert not any(i.severity == "error" for i in dwg.lint())
+        # This fixture IS incomplete, and says so since #1250: the groove floor is a step
+        # level whose span the page cannot carry, so `step_dim_dropped` is a required
+        # placement failure and `plan_incomplete` summarises it at error severity. Asserting
+        # the exact set rather than filtering it out keeps the known loss visible here — the
+        # test is about which view the groove label reads in, not about completeness.
+        assert {i.code for i in dwg.lint() if i.severity == "error"} == {"plan_incomplete"}
 
     def test_groove_floor_diameter_is_not_double_dimensioned(self):
         # The groove floor band's two walls read as shoulders, so recognise_turned_steps
@@ -4629,7 +4634,10 @@ class TestHolePatternAnnotations:
         assert len(dropped.measurement_ids) == 1
         assert dropped.measurement_ids[0].parameter == "pitch.length"
         summary = dwg.lint_summary()
-        assert summary["by_code"] == {"hole_pattern_dim_dropped": 1}
+        # `plan_incomplete` joins it: a dropped pattern pitch is a required placement failure,
+        # and since #1250 the automatic path reports one at error severity instead of
+        # returning the incomplete sheet as a success.
+        assert summary["by_code"] == {"hole_pattern_dim_dropped": 1, "plan_incomplete": 1}
         assert summary["geometry_issues"] == 1
         assert summary["quality"]["completeness"]["dropped"] == 1
 
@@ -5498,7 +5506,13 @@ class TestLintSummaryAndDrops:
     @pytest.mark.timeout(120)
     def test_location_tower_trimmed_to_legible_set(self):
         # #43: many unpatterned holes with near-coincident X/Y positions trim to
-        # a legible set; the rest surface as location_ref_dropped, no error lint.
+        # a legible set; the rest surface as location_ref_dropped.
+        #
+        # That drop is a REQUIRED placement failure, so since #1250 it also carries a
+        # `plan_incomplete` error — this test previously asserted "no error lint", which was
+        # the very combination #1250 names: a required annotation dropped and the drawing
+        # reporting success. The subject here is that the tower trims to a legible set, and
+        # that is unchanged; what changed is that the loss is no longer silent.
         from build123d import Box, Cylinder, Pos
 
         from draftwright import build_drawing
@@ -5523,7 +5537,7 @@ class TestLintSummaryAndDrops:
         n_locx = len([n for n in dwg.annotations() if n.startswith("m_locx")])
         n_locy = len([n for n in dwg.annotations() if n.startswith("m_locy")])
         assert "location_ref_dropped" in codes  # closely-spaced refs were trimmed
-        assert not any(i.severity == "error" for i in dwg.lint())
+        assert {i.code for i in dwg.lint() if i.severity == "error"} == {"plan_incomplete"}
         # The kept set is strictly fewer than the ten holes per axis.
         assert 0 < n_locx < 10
         assert 0 < n_locy < 10
@@ -11088,7 +11102,12 @@ class TestEscalation:
         assert sum(1 for n in ann if n.startswith("hc_plan")) >= 1  # spec-group callouts
         assert any(n.startswith("m_locx") for n in ann)  # location dims placed, not dropped
         warnings = [i for i in dwg.lint() if i.severity in ("warning", "error")]
-        assert warnings and {issue.code for issue in warnings} == {"hole_pattern_dim_dropped"}
+        assert warnings and {issue.code for issue in warnings} == {
+            "hole_pattern_dim_dropped",
+            # The #1250 summary of that same drop, at error severity so `passed` cannot be
+            # true over a sheet the engine would refuse if it were requested explicitly.
+            "plan_incomplete",
+        }
         assert all(issue.measurement_ids for issue in warnings)
 
     def test_escalation_clears_density_lint(self, dense_plate_dwg):

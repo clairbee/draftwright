@@ -65,6 +65,7 @@ from draftwright.compose import (
 )
 from draftwright.drawing import Drawing, feature_key
 from draftwright.fonts import PLEX_MONO
+from draftwright.linting import LintIssue
 from draftwright.model import (
     Datum,
     Feature,
@@ -1140,6 +1141,144 @@ def _blocker_identity(blocker) -> str:
     )
 
 
+def _automatic_blockers(drawing) -> tuple[dict, ...]:
+    """Required placement failures on an automatically planned drawing.
+
+    The RECOGNITION-FREE critique, unlike the explicit path's `scale_blockers_for`, which also
+    materialises the ADR 0017 aggregate for later critique. A declared automatic build must
+    recognise nothing until asked (ADR 0011 / 0017), and placement drops are recorded during
+    the build so they survive the restriction — verified to return the same blockers as the
+    physical critique on the #1130 case study and on the side-drilled fixtures.
+    """
+    return _scale_blockers(drawing, physical=False)
+
+
+def _placed_requirements(drawing) -> frozenset:
+    """The measurement identities this drawing actually draws (ADR 0010 provenance).
+
+    `measurement_of` returns empty for *unknown*, never for *measures nothing*, so this is a
+    lower bound on coverage. That is the safe direction here: it can only make the comparison
+    below stricter, never let a worse candidate through.
+    """
+    return frozenset(
+        mid for name in drawing.annotations() for mid in drawing.registry.measurement_of(name)
+    )
+
+
+def _complete_automatic_plan(drawing: Drawing, build) -> Drawing:
+    """Give the automatic path the completeness the explicit path already has (#1250).
+
+    `_scale_blockers` ran on the explicit-scale policy loop and on nothing else, so the two
+    paths disagreed about the same part: asked for the sheet and scale it had just chosen
+    itself, the engine would refuse or quietly reduce the scale, while the automatic path
+    returned the incomplete drawing reporting `passed: True`.
+
+    Severity is NOT the discriminator, which cost two wrong attempts at this. The explicit
+    path never accepts a drawing with blockers at all: it falls back to a smaller preferred
+    scale that has none, or raises when no smaller scale would help. Measured — a side-drilled
+    plate is automatic at 1:1 with two info-level drops and explicitly falls back to 1:2 with
+    none; the #1130 case study drops a slot's length and position at 1:1 and no scale fixes it.
+    Filtering by severity over-reported the first case and under-reported the second.
+
+    So this mirrors the fallback loop rather than inventing a threshold, with one deliberate
+    difference: it never raises. The explicit path can refuse because the caller made a claim
+    and has a lever; the automatic path chose for itself, so refusing would break a build with
+    no remedy to hand back. When nothing is complete it returns the drawing and records
+    `plan_incomplete` at error severity, which is enough for `passed` to be false and for the
+    loss to appear in `lint()` beside the outcomes it summarises.
+    """
+    blockers = _automatic_blockers(drawing)
+    if not blockers:
+        return drawing
+
+    chosen = drawing.scale
+    attempted = [chosen]
+    attempts = [_scale_attempt(chosen, "incomplete", blockers)]
+    # What the chosen scale actually draws. A candidate must keep ALL of it, not merely have
+    # no blockers of its own: a small enough scale drops requirements out of the plan entirely
+    # rather than failing to place them, so "no blockers" becomes trivially true and the
+    # engine would shrink until the problem stopped being generated. Measured — a 40 mm plate
+    # with two 0.1 mm holes fell to 1:10, drew four requirements instead of five, and reported
+    # itself complete. Same rule as the arrangement gate: a candidate may not lose something
+    # the incumbent kept.
+    baseline_placed = _placed_requirements(drawing)
+
+    if not _blocks_all_smaller_scales(blockers):
+        for candidate in (item for item in _SCALES if item < chosen):
+            attempted.append(candidate)
+            try:
+                fallback: Drawing = build(candidate)
+            except ValueError as exc:
+                # Past the hard rendering floor every later candidate is smaller still. Any
+                # other build error is not ours to swallow.
+                if "drawing geometry degenerates" in str(exc):
+                    attempts.append(_scale_attempt(candidate, "render_floor", error=str(exc)))
+                    break
+                raise
+            candidate_blockers = _automatic_blockers(fallback)
+            if candidate_blockers:
+                attempts.append(_scale_attempt(candidate, "incomplete", candidate_blockers))
+                continue
+            if not _placed_requirements(fallback) >= baseline_placed:
+                # STOP, not skip. `_SCALES` is descending, and coverage only falls as the
+                # drawing shrinks — once a candidate starts dropping requirements out of the
+                # plan rather than failing to place them, every smaller one does too. Without
+                # this the case study built ten times to learn nothing, and the fast tier paid
+                # 40% for it.
+                attempts.append(_scale_attempt(candidate, "loses_coverage"))
+                break
+            attempts.append(_scale_attempt(candidate, "complete"))
+            fallback.scale_decision = _scale_decision(
+                policy="automatic",
+                requested=None,
+                effective=fallback.scale,
+                status="fallback",
+                blockers=blockers,
+                attempted=attempted,
+                attempts=attempts,
+            )
+            warnings.warn(
+                f"the automatically chosen scale {chosen:g} dropped required annotation "
+                f"outcomes; using complete scale {fallback.scale:g}",
+                ScaleCompletenessWarning,
+                stacklevel=2,
+            )
+            return fallback
+
+    codes = ", ".join(sorted({item["code"] for item in blockers}))
+    dropped = [i for i in drawing.lint(physical=False) if _is_required_scale_drop(i)]
+    measurements = tuple(
+        dict.fromkeys(mid for issue in dropped for mid in getattr(issue, "measurement_ids", ()))
+    )
+    drawing.registry.record_issue(
+        LintIssue(
+            severity="error",
+            code="plan_incomplete",
+            message=(
+                f"no standard scale preserves every required annotation on this part; the "
+                f"automatically planned sheet drops {len(blockers)} outcome(s) ({codes})"
+            ),
+            measurement_ids=measurements,
+        )
+    )
+    drawing.scale_decision = _scale_decision(
+        policy="automatic",
+        requested=None,
+        effective=drawing.scale,
+        status="incomplete",
+        blockers=blockers,
+        attempted=attempted,
+        attempts=attempts,
+    )
+    warnings.warn(
+        f"no standard scale preserves every required annotation ({codes}); returning the "
+        f"incomplete drawing — see Drawing.scale_decision",
+        ScaleCompletenessWarning,
+        stacklevel=2,
+    )
+    return drawing
+
+
 def _preserve_requirements_under_arrangement(drawing, chosen, build, blockers_for):
     """ADR 0018 §5's first hard gate, applied to the arrangement: preserve every supported
     requirement or reject the candidate.
@@ -1403,13 +1542,18 @@ def build_drawing(
                 _build,
                 lambda built: _scale_blockers(built, physical=False),
             )
+        # The default record, set BEFORE the completeness pass so that pass can replace it.
+        # It used to be assigned afterwards and silently overwrote whatever the pass had
+        # decided, so a fallback or an incomplete plan reported itself as an ordinary
+        # automatic one. Completeness runs last because the arrangement gate above may return
+        # a different drawing, and it is the settled drawing whose completeness matters.
         drawing.scale_decision = _scale_decision(
             policy="automatic",
             requested=None,
             effective=drawing.scale,
             status="automatic",
         )
-        return drawing
+        return _complete_automatic_plan(drawing, lambda sc: _build(sc, views=_views))
 
     requested_scale = float(scale)
 

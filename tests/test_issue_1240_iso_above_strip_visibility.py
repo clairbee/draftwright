@@ -14,6 +14,14 @@ every time. So these tests construct the geometry at the seam instead — a plan
 the clamp, a planted obstacle box for the grow cap — and each carries a control proving the
 un-fixed behaviour differs, since a sweep that finds nothing cannot (#1216's lesson) be told
 apart from a sweep that tests nothing.
+
+
+Every build here pins ``scale=1.0, scale_policy="permissive"``. The subject is where strip
+candidates land under a planted iso bbox, and since #1250 the automatic path answers a
+placement drop by searching for a smaller complete scale — which dissolves the fixture rather
+than testing it (the clamp assertion failed with "the fixture stopped using it", which its own
+message anticipated). Asking for the incomplete drawing explicitly keeps the geometry the test
+is about fixed.
 """
 
 from __future__ import annotations
@@ -187,7 +195,7 @@ def test_iso_growth_is_capped_by_a_planted_annotation_box(monkeypatch):
 
     monkeypatch.setattr(builder_mod, "_fit_iso_view", spy_fit)
 
-    control = build_drawing(part, title="T", number="N")
+    control = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     grown = _iso_bbox(control)
     pre = prefit[0]
     cx, cy = (grown[0] + grown[2]) / 2, (grown[1] + grown[3]) / 2  # scaling preserves centre
@@ -212,7 +220,7 @@ def test_iso_growth_is_capped_by_a_planted_annotation_box(monkeypatch):
 
     monkeypatch.setattr(builder_mod, "annotation_ink_obstacles", with_planted)
     prefit.clear()
-    capped = build_drawing(part, title="T", number="N")
+    capped = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     capped_bb = _iso_bbox(capped)
     assert not _overlap(planted, capped_bb), (
         f"the fit grew onto a reported obstacle: iso={capped_bb} obstacle={planted}"
@@ -243,7 +251,7 @@ def test_the_above_strip_is_clamped_below_an_overlapping_iso(monkeypatch):
     part = _plate_with_locations()
 
     # Geometry first: where does the plan's above stack sit unclamped?
-    base = build_drawing(part, title="T", number="N")
+    base = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     pv = base.view_bounds("plan")
     assert pv is not None
     # The fake iso spans the plan's x-range with its bottom between the natural stack's
@@ -260,7 +268,7 @@ def test_the_above_strip_is_clamped_below_an_overlapping_iso(monkeypatch):
         return fake
 
     monkeypatch.setattr(orch, "_iso_bbox", fake_iso)
-    clamped = build_drawing(part, title="T", number="N")
+    clamped = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     monkeypatch.setattr(orch, "_iso_bbox", real)
 
     def boxes_in(drawing, region):
@@ -338,7 +346,7 @@ def test_the_post_fit_recap_only_ever_tightens(monkeypatch):
     from draftwright import builder as builder_mod
 
     part = _plate_with_locations()
-    baseline = build_drawing(part, title="T", number="N")
+    baseline = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     pv = baseline.view_bounds("plan")
     # An iso spanning the plan's x-range, well above it: the re-cap branch's guards both pass.
     fake = (pv[0] + 5, pv[3] + 40, pv[2] - 5, pv[3] + 90)
@@ -385,7 +393,7 @@ def test_the_page_spanning_riders_do_not_neutralise_the_iso_fit(options):
     All four configurations must agree: the riders are furniture, not obstacles.
     """
     part = Box(40, 30, 8) - Pos(-10, 5, 0) * Cylinder(3, 20) - Pos(10, -5, 0) * Cylinder(3, 20)
-    plain = build_drawing(part, title="T", number="N")
+    plain = build_drawing(part, title="T", number="N", scale=1.0, scale_policy="permissive")
     plain_iso = _iso_bbox(plain)
     # The precondition: this part's iso GROWS, so a veto is observable at all.
     assert "note_iso_nts" in plain.registry.names(), (

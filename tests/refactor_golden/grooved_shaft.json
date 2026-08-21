@@ -132,6 +132,11 @@
   ],
   "build_issues": [
     [
+      "error",
+      "plan_incomplete",
+      "no standard scale preserves every required annotation on this part; the automatically planned sheet drops 1 outcome(s) (step_dim_dropped)"
+    ],
+    [
       "warning",
       "step_dim_dropped",
       "step-length chain dropped: turned shoulders too closely spaced to dimension at this scale (use a detail view)"

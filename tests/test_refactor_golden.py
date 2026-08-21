@@ -48,6 +48,13 @@ nothing, which is exactly the refactor case the gate was created for:
 
     DRAFTWRIGHT_GOLDEN_EXACT=1 uv run pytest tests/test_refactor_golden.py
 
+#1250 re-baselined `grooved_shaft`, `grid_plate` and `scattered_plate`: both carry a required placement failure
+that was reported below error severity, so the automatic path returned them as successes. The
+build now records a `plan_incomplete` error summarising the loss. Checked against this
+corpus's own standard before re-recording — annotations identical, labels identical, page
+identical, one build issue ADDED and none removed. The drawings did not get worse; the report
+got honest, which is the one direction a completeness gate must not mistake for a regression.
+
 Re-bless the recorded baseline (advances the footprint ratchet — do it deliberately):
     DRAFTWRIGHT_UPDATE_GOLDEN=1 uv run pytest tests/test_refactor_golden.py
 """
