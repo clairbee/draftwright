@@ -122,13 +122,20 @@ invariant escaping to a user.
 
    ```
    ViewPlanIncomplete: 2 authored dimensions cannot be shown by the authored view set
-     ('front', 'side'):
+     ('front',):
 
      envelope.depth    reads horizontally only in `side` — add view("side")
-     hole_1.location   reads face-on only in `plan` — add view("plan")
+     hole_1.location   reads face-on only in `plan`      — add view("plan")
 
-     Views declared at part.py:14 view("front"), part.py:15 view("side").
+     View declared at part.py:14 view("front").
    ```
+
+   That example is derived from the maps rather than sketched: with `("front",)` authored,
+   `views_showing("y", horizontal=True)` is `None` and only `side` qualifies, `_END_ON["z"]`
+   is `plan`, and `envelope.width` resolves to `front` and is therefore absent from the
+   report. A diagnostic example that defines a public contract has to be executable, not
+   illustrative — the first draft of this block declared `("front", "side")` and then told
+   the reader to add `side`.
 
    Named against the ADR 0016 dimension identity rather than a page-keyed annotation name, so
    it survives a re-solve at another scale and matches the line in an emitted script.
@@ -187,6 +194,44 @@ So `section` retires; it is not reused.
 
 `docs/deprecations.md` currently tells `Drawing.add_view()` callers to "use the section verb",
 a pointer that must name the replacement or it directs people at something being removed.
+
+### Derived views augment; only authoring verbs define a set
+
+`Sheet.section(feature)` today forces a section onto an otherwise automatic drawing, and that
+capability must survive. Under the rules above it would not: `section_view(...)` joins the
+authored view set, which selects the authored source, which triggers the ban — so forcing one
+section would cost a user their automatic principal views AND their automatic dimensions.
+That is a real loss of expressiveness introduced by this amendment, and the fix is to say
+which verbs define a set and which only add to one.
+
+**Derived views are their own set**, separate from the principal views, with the same
+three-verb structure:
+
+| verb | meaning |
+| --- | --- |
+| `section_view(...)` / `detail_view(...)` | these lines **are** the derived set; omission suppresses the automatic section |
+| `add_section_view(...)` / `add_detail_view(...)` | augments the automatic derived set; requires `auto_views()` |
+
+The `plan_sections` trigger is the automatic derived set, so omission has something to mean:
+an authored derived set with no `section_view(...)` line is how a user says "no section, even
+though the counterbore would fire one".
+
+**The ban is on authoring, not on adding.** The general rule, which the principal-view ban is
+one case of:
+
+- an **authoring** verb defines a set, so omission is significant, so it can strand a
+  planner-chosen dimension in a view that is not there. Authored views of either kind with
+  `auto_dimensions()` raises.
+- an **augmenting** verb is purely additive. It removes nothing, so it can strand nothing, and
+  it is legal with `auto_dimensions()`.
+
+That restores the lost capability exactly, and gives `Sheet.section(feature)` a like-for-like
+replacement rather than a lossy one:
+
+```python
+s = Sheet(part).auto_views().auto_dimensions()
+s.add_section_view("A", through=bore)      # today's Sheet.section(bore)
+```
 
 ### What this amendment does not change
 
