@@ -190,6 +190,11 @@ class ViewCoverage:
     view: str
     carries: frozenset
     exclusive: frozenset
+    #: Measurements this view claims that MORE THAN ONE annotation claims somewhere on the
+    #: drawing. For those, an id cannot tell whether two views draw the same mark or different
+    #: marks of one parameter — so exclusivity by id is not an answer, and this records where
+    #: the question was unanswerable rather than letting `exclusive` imply it was answered.
+    indeterminate: frozenset = frozenset()
 
     @property
     def carries_nothing_exclusively(self) -> bool:
@@ -201,8 +206,18 @@ class ViewCoverage:
         it to relate two others. ADR 0018 makes exactly this the trap to avoid — "removing a
         visually similar but semantically necessary view is rejected by an asymmetric
         counterexample" — so this answers the measurable half and refuses to imply the rest.
+
+        **Fails closed on indeterminate coverage**, which is the difference between right and
+        wrong on a real case rather than a refinement. A `DimensionId` names a parameter, not a
+        mark (ADR 0016 Amdt 3), so every rung of a step ladder shares one id. An enlarged DETAIL
+        view exists precisely to redraw the rungs the main view could not fit — three of them,
+        on `_crowded_staircase` — and all three claim the id the main view already claims. By id
+        alone that detail carries nothing exclusively and reads as droppable, while dropping it
+        loses three dimensions from the sheet: the exact trap above, reached by arithmetic
+        rather than by judgement. Per-mark identity (ADR 0019 §3) is what makes the case
+        answerable; until then it is reported as unanswered.
         """
-        return not self.exclusive
+        return not self.exclusive and not self.indeterminate
 
 
 def view_coverage(drawing) -> Mapping[str, ViewCoverage]:
@@ -220,11 +235,24 @@ def view_coverage(drawing) -> Mapping[str, ViewCoverage]:
     under `None` and take part in the exclusivity arithmetic, because a measurement stated only
     on the iso is still stated.
     """
-    per_view: dict[Any, set] = {}
+    # SEEDED from the views the drawing has, not discovered from the annotations. A view that
+    # carries nothing at all has no annotations to discover it by, so building the map from
+    # annotations alone drops exactly the most redundant views: on an X-turned stepped shaft the
+    # `side` view carries not one measurement, and the first version of this function reported
+    # only `plan` as a candidate and never mentioned it (#1130).
+    per_view: dict[Any, set] = {name: set() for name in getattr(drawing, "views", ())}
     for name in drawing.registry.names():
         view = drawing.view_of(name)
         claimed = drawing.registry.measurement_of(name) or ()
         per_view.setdefault(view, set()).update(claimed)
+
+    # How many annotations claim each measurement, drawing-wide. An id claimed more than once
+    # cannot distinguish "two views draw the same mark" from "two views draw different marks of
+    # one parameter", and the second is exactly what a detail view is for.
+    claim_counts: dict[Any, int] = {}
+    for name in drawing.registry.names():
+        for mid in drawing.registry.measurement_of(name) or ():
+            claim_counts[mid] = claim_counts.get(mid, 0) + 1
 
     coverage = {}
     for view, carries in per_view.items():
@@ -233,7 +261,10 @@ def view_coverage(drawing) -> Mapping[str, ViewCoverage]:
             if other != view:
                 elsewhere |= theirs
         coverage[view] = ViewCoverage(
-            view=view, carries=frozenset(carries), exclusive=frozenset(carries - elsewhere)
+            view=view,
+            carries=frozenset(carries),
+            exclusive=frozenset(carries - elsewhere),
+            indeterminate=frozenset(m for m in carries if claim_counts.get(m, 0) > 1),
         )
     return MappingProxyType(coverage)
 

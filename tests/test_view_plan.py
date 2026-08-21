@@ -20,7 +20,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from build123d import Box, Cylinder, Pos
+from build123d import Box, Cylinder, Pos, Rot
 
 from draftwright.builder import build_drawing
 from draftwright.view_plan import (
@@ -51,8 +51,16 @@ class TestThePlanDescribesWhatWasActuallyBuilt:
         plan = built.view_plan
         assert plan is not None, "a built drawing has no view plan"
 
-        drawn = {name for name in built.views if name in {"front", "plan", "side", "iso"}}
-        assert {spec.name for spec in plan.specs} == drawn
+        # The comparison is to the views resolved AT BUILD TIME, and the filter is a stated
+        # limitation rather than a convenience: sections and details are created later by
+        # annotation passes (`_add_view("section_aa", …)`, `_resolve_details`) and never enter
+        # the plan, so a plain `== set(built.views)` would fail on any sectioned part. The first
+        # version of this test filtered silently, which made "every view is in the plan" true by
+        # construction. `test_sections_and_details_are_not_in_the_plan_yet` pins the gap instead.
+        planned_at_build = {
+            name for name in built.views if name in {"front", "plan", "side", "iso"}
+        }
+        assert {spec.name for spec in plan.specs} == planned_at_build
 
         assert plan.principal_names == ("front", "plan", "side")
         assert [spec.name for spec in plan.of_kind("pictorial")] == ["iso"]
@@ -259,6 +267,99 @@ class TestPerViewRequirementCoverage:
         assert coverage["front"].exclusive and coverage["side"].exclusive
         assert len(coverage["side"].carries) > 5
 
+    @pytest.mark.parametrize(
+        ("name", "build", "expected"),
+        [
+            # A plain turned part needs ONE longitudinal view: the diameters carry the ⌀
+            # symbol, so nothing requires an end view, and BOTH radial views come back empty.
+            (
+                "stepped shaft",
+                lambda: Rot(0, 90, 0) * (Cylinder(10, 40) + Pos(0, 0, 40) * Cylinder(6, 30)),
+                ("plan", "side"),
+            ),
+            (
+                "grooved shaft",
+                lambda: (
+                    (Rot(0, 90, 0) * Cylinder(12, 80))
+                    - Rot(0, 90, 0) * Pos(0, 0, 20) * (Cylinder(12, 6) - Cylinder(9, 6))
+                ),
+                ("plan", "side"),
+            ),
+            # Turned about Z rather than X: the redundant pair follows the AXIS, which is what
+            # a rule keyed on view NAMES would get wrong.
+            (
+                "Z-axis shaft",
+                lambda: Cylinder(10, 60) + Pos(0, 0, 60) * Cylinder(6, 20),
+                ("plan", "side"),
+            ),
+        ],
+    )
+    def test_a_turned_part_leaves_its_radial_views_empty(self, name, build, expected):
+        """The redundancy is structural for turned parts, not a property of one plate.
+
+        A body of revolution looks the same from every radial direction, so the two views that
+        differ only in radial direction carry nothing between them — measured here on three
+        shafts, and the count is the drafting answer: a plain turned part is conventionally
+        dimensioned on one longitudinal view.
+
+        The contrast with the fixtures below is the useful part. A turned part carrying RADIAL
+        features (a bolt circle, a hole pattern) needs its end view and only one candidate
+        appears; a plain shaft has no radial content and both appear. Coverage separates those
+        two without being told which is which.
+        """
+        from draftwright.view_plan import view_coverage, views_carrying_nothing_exclusively
+
+        drawing = build_drawing(build(), title="T", number="N")
+        assert views_carrying_nothing_exclusively(drawing) == expected
+        coverage = view_coverage(drawing)
+        assert coverage["front"].exclusive, (
+            f"{name}: the longitudinal view carries nothing either, so this part is not "
+            "dimensioned at all and the assertion above is vacuous"
+        )
+
+    def test_a_turned_part_with_radial_features_keeps_its_end_view(self):
+        """The asymmetry WITHIN turned parts, which is the sharper of the two.
+
+        The thin plate and the shafts are all rotational; the plate's end view carries its bolt
+        circle and hole pattern, so only one radial view is spare rather than both. A rule that
+        said "turned parts need one view" would strip the end view off this one and lose the
+        pattern.
+        """
+        from test_issue_1130_view_planning_evidence import thin_rotational_plate
+
+        from draftwright.view_plan import view_coverage, views_carrying_nothing_exclusively
+
+        drawing = build_drawing(thin_rotational_plate(), title="T", number="N")
+        coverage = view_coverage(drawing)
+
+        assert views_carrying_nothing_exclusively(drawing) == ("plan",)
+        assert len(coverage["side"].exclusive) > 5, (
+            "the end view no longer carries the radial features, so it no longer distinguishes "
+            "this case from a plain shaft"
+        )
+
+    def test_a_view_carrying_no_annotations_at_all_is_reported(self):
+        """The bug this class had until turned parts were tried.
+
+        Coverage was built by walking annotations, so a view with NO annotations never entered
+        the map and could never be reported — silently dropping exactly the most redundant
+        views. On a stepped shaft the `side` view carries not one measurement, and only `plan`
+        was reported. The map is seeded from the drawing's views now.
+        """
+        from draftwright.view_plan import view_coverage
+
+        drawing = build_drawing(
+            Rot(0, 90, 0) * (Cylinder(10, 40) + Pos(0, 0, 40) * Cylinder(6, 30)),
+            title="T",
+            number="N",
+        )
+        coverage = view_coverage(drawing)
+
+        assert {"front", "plan", "side"} <= set(coverage), (
+            f"a view the drawing has is missing from its coverage: {sorted(map(str, coverage))}"
+        )
+        assert coverage["side"].carries == frozenset()
+
     def test_a_prismatic_plate_has_none(self):
         """The counterexample. Three views, every one carrying something only it carries.
 
@@ -327,3 +428,67 @@ class TestPerViewRequirementCoverage:
         assert coverage["front"].exclusive == frozenset({only_front})
         assert coverage["side"].exclusive == frozenset()
         assert coverage["plan"].carries_nothing_exclusively
+
+
+class TestSectionsAndDetailsAreNotPlannedYet:
+    """The gap this slice does not close, pinned so it cannot be forgotten or overstated.
+
+    ADR 0018's `ViewSpec.kind` already admits `section` and `detail`, and the ADR's own "why
+    now" cites #1190: the section "is not part of the scale/layout decision at all… placed
+    opportunistically into whatever is left, which is why its presence tracked leftover space
+    rather than need." That is still true. These views are created by annotation passes long
+    after the plan is resolved, so the plan under-describes the drawing, and bringing them in is
+    the work #1190 pointed at.
+    """
+
+    def test_a_section_view_exists_outside_the_plan(self):
+        part = (
+            Box(120, 80, 40)
+            - Pos(0, 0, 10) * Cylinder(18, 40)
+            - Pos(-40, 0, 0) * Cylinder(6, 60)
+            - Pos(40, 0, 0) * Cylinder(6, 60)
+        )
+        drawing = build_drawing(part, title="T", number="N")
+        assert "section_aa" in drawing.views, "precondition: this part is no longer sectioned"
+        assert drawing.view_plan.spec("section_aa") is None, (
+            "the section is in the plan now — good, but this test states the opposite and must "
+            "be rewritten to assert the section participates in the layout decision"
+        )
+
+    def test_a_detail_view_that_redraws_dropped_marks_is_never_a_candidate(self):
+        """The trap, and the reason coverage fails closed.
+
+        A detail exists to redraw the marks the main view could not fit. Those marks share their
+        parameter's `DimensionId` with the ones that DID fit (ADR 0016 Amdt 3 — an id names a
+        parameter, not a mark), so by id alone the detail carries nothing exclusively. On
+        `_crowded_staircase` it draws three step heights and every one of them reads as already
+        covered by the front view.
+
+        Answering "droppable" there would lose three dimensions off the sheet — precisely ADR
+        0018's "visually similar but semantically necessary view", reached by arithmetic. So
+        coverage reports the ids as INDETERMINATE and the view as not a candidate. Per-mark
+        identity (ADR 0019 §3) is what would let this be answered rather than declined.
+        """
+        from test_issue_1215_no_approved_tolerance_is_dropped import _PARTS
+
+        from draftwright.view_plan import view_coverage, views_carrying_nothing_exclusively
+
+        drawing = build_drawing(_PARTS["crowded_staircase"](), title="T", number="N")
+        assert "detail_a" in drawing.views, "precondition: this part no longer details"
+
+        cover = view_coverage(drawing)["detail_a"]
+        drawn_in_detail = [
+            name for name in drawing.registry.names() if drawing.view_of(name) == "detail_a"
+        ]
+        assert len(drawn_in_detail) >= 3, (
+            f"the detail draws {len(drawn_in_detail)} marks; fewer than three and it no longer "
+            "demonstrates several marks collapsing onto one id"
+        )
+        assert len(cover.carries) == 1, (
+            f"{len(drawn_in_detail)} marks no longer collapse to one id ({len(cover.carries)}), "
+            "so per-mark identity may have landed and this can become an exclusivity assertion"
+        )
+        assert cover.exclusive == frozenset(), "precondition: by id alone it looks droppable"
+        assert cover.indeterminate, "the collapse is not being reported as unanswerable"
+        assert not cover.carries_nothing_exclusively
+        assert "detail_a" not in views_carrying_nothing_exclusively(drawing)
