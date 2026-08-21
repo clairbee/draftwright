@@ -24,6 +24,16 @@ intentionally changed only the groove/pocket Leader bboxes to the shorter choice
 within-pass maximum-cardinality/minimum-length assignment; those two explicit re-baselines
 retain the same annotations and build-issue sets.
 
+#1130 re-baselined `chamfered`, `filleted` and `prismatic_ladder` for the same reason: ADR
+0018 §5 makes the sheet ARRANGEMENT part of the layout choice, and these three now compose
+under `stacked-iso` — the isometric sharing the title block's column — which fits them on A4
+at the SAME scale instead of A3. Checked against the standard this corpus polices: all three
+retain the identical annotation set, the identical labels and the identical build-issue set,
+and lint clean on the smaller sheet. Only the page and the coordinates move. A part that
+would have lost anything on the smaller sheet is rejected by the requirement gate before it
+gets here (`test_adr0018_arrangement_gate`), which is why `centered_rebate` and
+`scattered_plate` are untouched below.
+
 Re-bless intentionally (there should be NO unaccounted change during these refactors):
     DRAFTWRIGHT_UPDATE_GOLDEN=1 uv run pytest tests/test_refactor_golden.py
 """

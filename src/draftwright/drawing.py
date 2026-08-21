@@ -426,6 +426,10 @@ class Drawing:
         scale: drawing scale factor (e.g. ``2.0`` for 2:1).
         scale_decision: JSON-friendly resolution of an automatic or explicit scale request,
             including the requested/effective scales and any required placement blockers.
+        arrangement_decision: JSON-friendly record of how the sheet arrangement was resolved
+            (#1130) — ``chosen`` names the arrangement the sheet was composed under, and
+            ``attempts`` lists each one built, in order, with the required placement blockers
+            that rejected it. One entry means one compile.
         section_decision: JSON-friendly record of the section A-A outcome (#1190) —
             ``status`` is ``"placed"``, ``"skipped"``, ``"not_warranted"``, or
             ``"not_evaluated"`` when the section pass never ran (``auto_dims=False``),
@@ -476,6 +480,16 @@ class Drawing:
             "blockers": (),
             "attempted_scales": (),
             "attempts": (),
+        }
+        # Public, JSON-friendly record of how the sheet ARRANGEMENT was resolved — ADR 0018
+        # §5's fourth dimension and §6's "infeasibility is a first-class result" (#1130).
+        # Always present for the same reason as `section_decision`: a caller must not have to
+        # infer from a log line whether an alternative was tried and rejected. `attempts` is
+        # also the honest compile count, since proving an alternative preserves every
+        # requirement costs a real build (ADR 0014 Amdt 3 — measure, do not predict).
+        self.arrangement_decision = {
+            "chosen": "columns",
+            "attempts": ({"arrangement": "columns", "status": "chosen", "blockers": ()},),
         }
         # Public, JSON-friendly record of what happened to section A-A (#1190). Always
         # present, so a caller never has to infer the outcome from a log line that one

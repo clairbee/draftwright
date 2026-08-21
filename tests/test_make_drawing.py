@@ -1160,9 +1160,21 @@ class TestChooseScale:
     def test_ctc01_sized_part_gets_A2_not_A1(self):
         # 800×450×150 mm (NIST CTC-01) — iso sits above the title block so tb_w
         # is dropped from the width constraint. A2 fits; A1 is no longer chosen (#103).
-        scale, pw, ph, tbw = choose_scale(800, 450, 150)
+        # Pinned to the `columns` arrangement: #103 is an invariant about the layout this
+        # part is composed under, and letting the ADR 0018 alternatives answer would make it
+        # a different claim (see the assertion below for what they answer instead).
+        scale, pw, ph, tbw = choose_scale(800, 450, 150, arrangements=("columns",))
         assert scale == pytest.approx(0.2)
         assert int(pw) == 594  # A2 (594 mm), not A1 (841 mm)
+
+    def test_ctc01_compacts_further_when_the_iso_shares_the_title_block_column(self):
+        # ADR 0018 §5's fourth dimension on the part #103 was written about: reclaiming the
+        # iso's column takes the same 1:5 drawing down another sheet size. Whether a build
+        # KEEPS that is the requirement gate's call, not this one's — `choose_scale` only
+        # reports what fits.
+        scale, pw, _ph, _tbw = choose_scale(800, 450, 150)
+        assert scale == pytest.approx(0.2), "the arrangement must not change the scale"
+        assert int(pw) < 594
 
     def test_large_part_gets_bigger_page(self):
         scale, pw, ph, tbw = choose_scale(300, 300, 300)
@@ -2395,8 +2407,12 @@ class TestDynamicCorridors:
         # verdict rejects A3 and choose_scale returns A2.
         from draftwright.compose import choose_scale
 
-        _, page_w_flat, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=0)
-        _, page_w_deep, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=3)
+        # Pinned to `columns`: the corridor claim is about the layout whose width the
+        # corridor competes for. Under the ADR 0018 alternative the reclaimed iso column
+        # absorbs the corridor and both land on the same sheet, which is a fact about that
+        # arrangement rather than a refutation of this one.
+        _, page_w_flat, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=0, arrangements=("columns",))
+        _, page_w_deep, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=3, arrangements=("columns",))
         assert page_w_deep > page_w_flat, (
             "n_steps=3 corridor must force a larger page than n_steps=0"
         )

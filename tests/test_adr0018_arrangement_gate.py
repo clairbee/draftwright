@@ -1,27 +1,25 @@
-"""ADR 0018 §5: the arrangement works — what is missing is somewhere to keep the decision.
+"""ADR 0018 §5: the arrangement as the fourth dimension of one constrained choice.
 
-The ADR treats `view sets x scales x sheets x arrangements` as ONE constrained choice.
-`LayoutCandidate` models all four; `_layout_geometry` now implements two of the
-arrangements. This module is the measurement that says why the fourth dimension is not yet
-varied in production, because the reason is not the obvious one.
+The ADR treats `view sets x scales x sheets x arrangements` as a single choice, gated on four
+hard conditions of which the first is *preserve every supported requirement or reject the
+candidate*. This module covers the arrangement end of that: a second arrangement exists, the
+choice is made once and carried, and a candidate that fits geometrically is still rejected if
+compiling it loses a requirement.
 
-`stacked-iso` puts the isometric in the title block's column instead of giving it a column
-of its own, which wins back that column's width. It is not a stub and it is not harmful:
-the `chamfered` part moves from A3 to A4 under it and loses NOTHING — no dropped dimension,
-no new lint code. That is precisely ADR 0018 §5's "at that scale, the smallest standard
-sheet".
+`stacked-iso` puts the isometric in the title block's column instead of giving it a column of
+its own, which wins back that column's width. The engine will take it only when it costs
+nothing — three things measured during #1130 say why every part of that sentence is load
+bearing, and each has a test below:
 
-The blocker is that the arrangement has nowhere to live between the stage that decides it
-and the stages that apply it. `_layout_geometry` is the single layout authority, but its
-callers hand it different arguments — scale selection knows only ESTIMATED strip depths,
-placement and repack know MEASURED ones. Resolving `auto` inside the shared function
-therefore does not make the stages agree; it lets them disagree with more steps. The dense
-plate is that disagreement: resolving per call site loses two location requirements on a
-sheet whose size does not change. Note what is and is not claimed — that a per-call-site
-resolution is lossy is measured; WHY it is lossy is not isolated, and at the estimate the
-two arrangements barely differ for that part.
-
-Hence `arrangement="columns"` is the default and `"auto"` is reachable only by asking.
+* it must not change the SCALE. Left to compete freely the alternative reaches 2:1 on the
+  dense plate where `columns` reaches 1:1, and the enlarged views leave the location dims
+  nowhere to go. Packing is not allowed to bid up legibility.
+* it must not be re-derived per stage. `_layout_geometry` is one shared authority, but scale
+  selection passes it ESTIMATED strip depths and placement MEASURED ones, so resolving there
+  lets the stages disagree about the same sheet.
+* fitting is not preserving. Even at the same scale a smaller sheet has less free area, and
+  `centered_rebate` and `scattered_plate` lose dimensions on one. Only a real compile can
+  tell, so the gate measures rather than predicts (ADR 0014 Amdt 3).
 """
 
 import itertools
@@ -34,9 +32,11 @@ import draftwright.builder as builder_mod
 import draftwright.compose as compose_mod
 from draftwright import build_drawing
 from draftwright.compose import _layout_geometry, choose_scale
+from draftwright.view_plan import ARRANGEMENTS, ScalePick, arrangement_of
 
 A4 = (297.0, 210.0, 120.0)
 A3 = (420.0, 297.0, 150.0)
+ONLY_PREFERRED = (ARRANGEMENTS[0],)
 
 
 def _chamfered():
@@ -54,28 +54,20 @@ def _dense_plate():
     return part
 
 
+def _centered_rebate():
+    """The `centered_rebate` golden — a part the gate rejects the alternative for.
+
+    A central channel giving two shoulders, both positions dimensioned. It fits the smaller
+    sheet the alternative offers and loses a step position on it.
+    """
+    return Box(80, 60, 30) - Pos(0, 0, 7.5) * Box(80, 20, 15)
+
+
 def _geom(arrangement, page=A4, size=(90.0, 60.0, 20.0), n_steps=0):
     page_w, page_h, tb_w = page
     return _layout_geometry(
         *size, 1.0, page_w, page_h, tb_w, None, n_steps, arrangement=arrangement
     )
-
-
-def _resolve_arrangement_per_call_site(monkeypatch):
-    """Resolve the arrangement per call site, as production would if it selected on it.
-
-    Applied to all three importers — `compose` (scale selection via `_fits`), `analysis`
-    (placement) and `builder` (repack) each hold their own reference. Called INSIDE a test
-    rather than from a fixture so the unpatched baseline can be built first.
-    """
-    original = compose_mod._layout_geometry
-
-    def resolving(*args, **kwargs):
-        kwargs["arrangement"] = "auto"
-        return original(*args, **kwargs)
-
-    for module in (compose_mod, analysis_mod, builder_mod):
-        monkeypatch.setattr(module, "_layout_geometry", resolving)
 
 
 def _lint_codes(drawing):
@@ -84,13 +76,12 @@ def _lint_codes(drawing):
 
 class TestTheAlternativeArrangementIsRealGeometry:
     def test_columns_does_not_fit_a4_and_stacked_iso_does(self):
-        # The precondition the whole module rests on: a case where the two disagree.
-        # Without it everything below would pass vacuously.
+        # The precondition the module rests on: a case where the two disagree. Without it
+        # everything below would pass vacuously.
         assert _geom("columns").auto_fits is False
         assert _geom("stacked-iso").auto_fits is True
 
     def test_the_saving_is_exactly_the_reclaimed_iso_column(self):
-        # The mechanism, not merely the verdict.
         columns, stacked = _geom("columns"), _geom("stacked-iso")
         assert stacked.iso_natural > 0.0
         assert columns.auto_row_w - stacked.auto_row_w == pytest.approx(columns.iso_natural)
@@ -101,56 +92,142 @@ class TestTheAlternativeArrangementIsRealGeometry:
         # fallback that overlaps the views.
         assert _geom("stacked-iso").iso_fits is True
 
-    def test_the_resolved_arrangement_is_reported_not_guessed(self):
-        assert _geom("columns").arrangement == "columns"
-        assert _geom("auto").arrangement == "stacked-iso"
+    def test_an_unknown_arrangement_is_refused_rather_than_silently_composed(self):
+        with pytest.raises(ValueError, match="unknown arrangement"):
+            _geom("diagonal")
 
 
-class TestTheArrangementIsNotTheProblem:
-    """The sheet it wins is a real win, which is why the blocker is worth naming precisely."""
+class TestTheDecisionIsMadeOnceAndCarried:
+    """One choice, one answer — every stage composes under the arrangement that was proved."""
 
-    def test_the_shipped_default_puts_the_chamfered_part_on_a3(self):
-        _, page_w, page_h, _ = choose_scale(90.0, 60.0, 20.0)
-        assert (page_w, page_h) == A3[:2]
+    def test_the_pick_is_still_a_four_tuple(self):
+        # The whole reason the arrangement can ride along: callers unpack four values, and
+        # every one of them keeps working.
+        pick = ScalePick(1.0, 420.0, 297.0, 150.0, "stacked-iso")
+        scale, page_w, page_h, tb_w = pick
+        assert (scale, page_w, page_h, tb_w) == (1.0, 420.0, 297.0, 150.0)
+        assert pick == (1.0, 420.0, 297.0, 150.0)
+        assert pick.arrangement == "stacked-iso"
 
-    def test_resolving_the_arrangement_wins_a4_and_costs_nothing(self, monkeypatch):
-        baseline = _lint_codes(build_drawing(_chamfered()))
-        _resolve_arrangement_per_call_site(monkeypatch)
-        drawing = build_drawing(_chamfered())
-        assert (drawing.page_w, drawing.page_h) == A4[:2]
-        assert _lint_codes(drawing) == baseline, (
-            "the smaller sheet must lose no requirement — if it does, the cost of varying "
-            "arrangement is the sheet size and not the carried decision"
+    def test_a_plain_tuple_means_the_long_standing_arrangement(self):
+        # Hand-built picks and `_repack_candidates`' own alternatives are bare tuples; they
+        # mean "as the engine always composed", not "unknown".
+        assert arrangement_of((1.0, 420.0, 297.0, 150.0)) == ARRANGEMENTS[0]
+
+    def test_choose_scale_reports_the_arrangement_it_proved(self):
+        assert arrangement_of(choose_scale(90.0, 60.0, 20.0)) == "stacked-iso"
+        assert (
+            arrangement_of(choose_scale(90.0, 60.0, 20.0, arrangements=ONLY_PREFERRED))
+            == (ARRANGEMENTS[0])
         )
 
+    def test_placement_composes_under_the_carried_arrangement(self):
+        # The sheet is the evidence: A4 is only reachable under `stacked-iso`, so a placement
+        # that had re-derived `columns` could not have produced it.
+        drawing = build_drawing(_chamfered())
+        assert drawing.arrangement_decision["chosen"] == "stacked-iso"
+        assert (drawing.page_w, drawing.page_h) == A4[:2]
+        assert choose_scale(90.0, 60.0, 20.0, arrangements=ONLY_PREFERRED)[1:3] == A3[:2]
 
-class TestTheDecisionHasNowhereToLive:
-    """Selection and placement resolve `auto` from different inputs, so they disagree."""
-
-    def test_estimated_and_measured_strips_resolve_the_same_sheet_differently(self):
-        # Selection sees no measured strips and resolves `columns` for the 3-step corridor
-        # at A3 -> it escalates. Placement, seeing the real corridor, would resolve
-        # `stacked-iso` at that same A3 and never escalate at all.
-        corridor = {"size": (5.0, 90.0, 100.0), "page": A3}
-        assert _geom("columns", n_steps=0, **corridor).auto_fits is True
-        assert _geom("columns", n_steps=3, **corridor).auto_fits is False
-        assert _geom("stacked-iso", n_steps=3, **corridor).auto_fits is True
-
-        _, flat_page, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=0)
-        _, deep_page, _, _ = choose_scale(5.0, 90.0, 100.0, n_steps=3)
-        assert deep_page > flat_page, "the shipped default still escalates for the corridor"
-
-    def test_the_disagreement_loses_requirements_on_an_unchanged_sheet(self, monkeypatch):
-        # The dense plate is the disagreement made visible. The sheet does NOT change, so
-        # nothing here can be blamed on cramming a part onto a smaller page. Centring the
-        # ortho views rather than packing them left does not change this outcome either —
-        # mutating `x_offset` leaves every assertion in this module passing — so the loss is
-        # a property of resolving per call site, not of the stacked layout.
+    def test_re_deriving_per_stage_instead_loses_requirements_on_an_unchanged_sheet(
+        self, monkeypatch
+    ):
+        # Why the decision is carried rather than recomputed. `_layout_geometry` is a single
+        # shared authority, but sharing a function is not sharing an INPUT: selection resolves
+        # against estimated strip depths and placement against measured ones. Resolving at
+        # each call site costs the dense plate two location requirements on a sheet whose size
+        # does not change at all — so this is not a smaller-sheet effect.
         baseline = build_drawing(_dense_plate())
-        _resolve_arrangement_per_call_site(monkeypatch)
+
+        original = compose_mod._layout_geometry
+
+        def resolving(*args, **kwargs):
+            kwargs["arrangement"] = "auto"
+            return original(*args, **kwargs)
+
+        for module in (compose_mod, analysis_mod, builder_mod):
+            monkeypatch.setattr(module, "_layout_geometry", resolving)
+
         drawing = build_drawing(_dense_plate())
         assert (drawing.page_w, drawing.page_h) == (baseline.page_w, baseline.page_h)
         assert _lint_codes(drawing) - _lint_codes(baseline) == {
             "location_ref_dropped",
             "feature_not_located",
         }
+
+
+class TestPackingMayNotBidUpLegibility:
+    """The arrangement compacts a chosen scale; it never chooses one."""
+
+    def test_the_alternative_wins_a_sheet_at_the_same_scale(self):
+        preferred = choose_scale(90.0, 60.0, 20.0, arrangements=ONLY_PREFERRED)
+        chosen = choose_scale(90.0, 60.0, 20.0)
+        assert preferred[1:3] == A3[:2] and chosen[1:3] == A4[:2]
+        assert chosen[0] == preferred[0], "the arrangement must not change the scale"
+
+    def test_it_cannot_reach_a_scale_the_preferred_arrangement_could_not(self):
+        # The dense plate is the case: unconstrained, `stacked-iso` is feasible at 2:1 where
+        # `columns` reaches only 1:1, and the drawing at twice the size drops its location
+        # dims. Scale selection must therefore see only the preferred arrangement.
+        assert _geom("columns", page=A3, size=(70.0, 50.0, 12.0)).auto_fits is True
+        dense_scale = choose_scale(70.0, 50.0, 12.0)[0]
+        assert dense_scale == choose_scale(70.0, 50.0, 12.0, arrangements=ONLY_PREFERRED)[0]
+
+    def test_a_corridor_that_forces_a_larger_sheet_still_does(self):
+        flat = choose_scale(5.0, 90.0, 100.0, n_steps=0, arrangements=ONLY_PREFERRED)
+        deep = choose_scale(5.0, 90.0, 100.0, n_steps=3, arrangements=ONLY_PREFERRED)
+        assert deep[1] > flat[1]
+        assert deep[0] == choose_scale(5.0, 90.0, 100.0, n_steps=3)[0]
+
+
+class TestFittingIsNotPreserving:
+    """ADR 0018 §5's first hard gate, measured on the finished drawing."""
+
+    def test_an_alternative_that_costs_nothing_is_kept_in_one_compile(self):
+        drawing = build_drawing(_chamfered())
+        decision = drawing.arrangement_decision
+        assert decision["chosen"] == "stacked-iso"
+        assert [a["status"] for a in decision["attempts"]] == ["chosen"]
+        assert _lint_codes(drawing) == set()
+
+    def test_an_alternative_that_drops_a_requirement_is_rejected(self):
+        # The precondition first: the alternative really is geometrically feasible here, so
+        # the gate is what rejects it and not the fit.
+        assert arrangement_of(choose_scale(80.0, 60.0, 30.0, n_steps=2)) == "stacked-iso"
+
+        drawing = build_drawing(_centered_rebate())
+        decision = drawing.arrangement_decision
+        assert decision["chosen"] == ARRANGEMENTS[0]
+        statuses = [(a["arrangement"], a["status"]) for a in decision["attempts"]]
+        assert statuses == [("stacked-iso", "rejected"), ("columns", "chosen")]
+        rejected = next(a for a in decision["attempts"] if a["status"] == "rejected")
+        assert rejected["blockers"], "a rejection must say what it lost"
+        assert not [code for code in _lint_codes(drawing) if code.endswith("_dropped")]
+
+    def test_the_rejection_is_reported_rather_than_silent(self):
+        # ADR 0018 §6: infeasibility is a first-class result. A caller must not have to infer
+        # from a log line that an alternative was tried, or what it cost.
+        decision = build_drawing(_centered_rebate()).arrangement_decision
+        assert set(decision) == {"chosen", "attempts"}
+        for attempt in decision["attempts"]:
+            assert set(attempt) == {"arrangement", "status", "blockers"}
+            assert attempt["arrangement"] in ARRANGEMENTS
+
+    def test_a_drawing_composed_as_always_records_one_attempt(self):
+        decision = build_drawing(Box(80, 60, 25)).arrangement_decision
+        assert decision["chosen"] == ARRANGEMENTS[0]
+        assert [a["status"] for a in decision["attempts"]] == ["chosen"]
+
+
+class TestTheGateFailsClosed:
+    """Nothing measured means nothing proved."""
+
+    def test_a_build_with_no_automatic_dimensioning_keeps_the_preferred_arrangement(self):
+        # The gate establishes feasibility by compiling requirements and reading what failed
+        # to place. `auto_dims=False` compiles none, so an alternative would be accepted on an
+        # empty ledger — and annotations added afterwards through the deferred/`Sheet` seams
+        # would be the ones to lose. Measured: a mixed deferred batch loses its shoulder dim.
+        drawing = build_drawing(_chamfered(), auto_dims=False)
+        assert drawing.arrangement_decision["chosen"] == ARRANGEMENTS[0]
+        # And the sheet proves it reached layout: with dimensioning on, this part is on A4.
+        assert (drawing.page_w, drawing.page_h) == A3[:2]

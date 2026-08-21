@@ -204,7 +204,10 @@ def test_fallback_reports_exhaustion_at_the_hard_rendering_floor(monkeypatch):
             else drop
         )
         return SimpleNamespace(
-            scale=scale, lint=lambda: [candidate_drop], recognition=lambda: None, _analysis=None
+            scale=scale,
+            lint=lambda **_: [candidate_drop],
+            recognition=lambda: None,
+            _analysis=None,
         )
 
     monkeypatch.setattr(builder, "_SCALES", (1.0, 0.5, 0.2, 0.1))
@@ -244,7 +247,7 @@ def test_fallback_does_not_hide_an_unrelated_build_error(monkeypatch):
         if scale < 1.0:
             raise ValueError("invalid declared model")
         return SimpleNamespace(
-            scale=scale, lint=lambda: [drop], recognition=lambda: None, _analysis=None
+            scale=scale, lint=lambda **_: [drop], recognition=lambda: None, _analysis=None
         )
 
     monkeypatch.setattr(builder, "_SCALES", (1.0, 0.5))
@@ -267,7 +270,7 @@ def test_monotone_step_separation_failure_does_not_rebuild_smaller_scales(monkey
     def fake_build(*args, scale, **kwargs):
         calls.append(scale)
         return SimpleNamespace(
-            scale=scale, lint=lambda: [drop], recognition=lambda: None, _analysis=None
+            scale=scale, lint=lambda **_: [drop], recognition=lambda: None, _analysis=None
         )
 
     monkeypatch.setattr(builder, "_SCALES", (1.0, 0.5, 0.2, 0.1))

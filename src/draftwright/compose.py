@@ -55,7 +55,9 @@ from draftwright._core import (
 from draftwright.layout import fit_box
 from draftwright.model.callout import hole_callout_spec
 from draftwright.view_plan import (
+    ARRANGEMENTS,
     LayoutCandidate,
+    ScalePick,
     candidate_is_feasible,
     principal_placements,
     third_angle_view_names,
@@ -554,6 +556,7 @@ def choose_scale(
     table_sizes=(),
     required_tables=(),
     margin: float = _MARGIN,
+    arrangements: tuple[str, ...] | None = None,
 ) -> tuple:
     """Return (SCALE, PAGE_W, PAGE_H, TB_W) for a 4-view layout.
 
@@ -638,20 +641,62 @@ def choose_scale(
             table_sizes=table_sizes,
             required_tables=required_tables,
             margin=margin,
+            arrangement=candidate.arrangement,
         )
 
-    rejected: list = []
-    for cand in candidates:
-        candidate = LayoutCandidate(
+    def _candidate(cand, arrangement):
+        return LayoutCandidate(
             views=third_angle_view_names(),
             scale=float(cand[0]),
             page=(cand[1], cand[2]),
             title_block_width=cand[3],
+            arrangement=arrangement,
         )
-        verdict = candidate_is_feasible(candidate, _geometric_fit)
+
+    rejected: list = []
+    # `arrangements` restricts the fourth dimension of the choice. The requirement gate in
+    # `builder` uses it to re-run a build under the preferred arrangement alone, so that a
+    # candidate which lost a requirement can be compared against one that could not have.
+    allowed = ARRANGEMENTS if arrangements is None else tuple(arrangements)
+    preferred, alternatives = allowed[0], allowed[1:]
+
+    # Pass 1 — the scale. Only the preferred arrangement may decide it.
+    #
+    # ADR 0018 §5 asks for the largest preferred scale admitted by a feasible candidate, and
+    # the ladder is ordered so the first fit is that scale. Letting the alternatives compete
+    # here lets a PACKING choice bid up a LEGIBILITY one, and #1130 measured what that buys:
+    # the dense plate reaches 2:1 under `stacked-iso` where `columns` reaches only 1:1, and
+    # the drawing at twice the size then drops `location_ref_dropped` + `feature_not_located`
+    # because the enlarged views leave its location dims nowhere to go. The candidate was
+    # geometrically feasible and lost requirements anyway — ADR 0018's first hard gate, which
+    # `candidate_is_feasible` still cannot evaluate (#1250).
+    #
+    # So the alternatives are confined below to what they can support without that gate:
+    # composing the SAME scale more compactly. Scale is chosen exactly as it always was.
+    chosen = None
+    for cand in candidates:
+        verdict = candidate_is_feasible(_candidate(cand, preferred), _geometric_fit)
         if verdict is None:
-            return cand
+            chosen = cand
+            break
         rejected.append(verdict)
+
+    if chosen is not None:
+        # Pass 2 — the sheet, at that scale. Candidates are ordered smallest sheet first, so
+        # every candidate BEFORE the winner at the same scale is a smaller sheet that the
+        # preferred arrangement could not fit. An alternative that fits one of them yields
+        # the same drawing at the same scale on less paper, which is ADR 0018 §5's "at that
+        # scale, the smallest standard sheet" — and cannot cost a requirement the preferred
+        # arrangement would have kept, because the views are identically sized.
+        for cand in candidates:
+            if cand is chosen:
+                break
+            if cand[0] != chosen[0]:
+                continue
+            for arrangement in alternatives:
+                if candidate_is_feasible(_candidate(cand, arrangement), _geometric_fit) is None:
+                    return ScalePick(*cand, arrangement=arrangement)
+        return ScalePick(*chosen, arrangement=preferred)
     # The ISO 5455 ladder exhausted with no standard fit (a part too large even for
     # A0 1:10000). Rather than return a layout that overflows (#350), bisect for the
     # largest scale that genuinely fits on the largest candidate sheet — the layout is
@@ -963,6 +1008,11 @@ def _layout_geometry(
         # decision that `LayoutCandidate` already models to the value the pipeline carries.
         columns_row_w = ortho_row_w + iso_row_budget + 2 * margin + _tb_col_w
         arrangement = "columns" if columns_row_w <= page_w + 0.5 else "stacked-iso"
+
+    if arrangement not in ARRANGEMENTS:
+        # Fail closed. The branch below is an `else`, so an unrecognised name would quietly
+        # compose as the alternative — a typo would change every sheet it reached.
+        raise ValueError(f"unknown arrangement {arrangement!r}; expected one of {ARRANGEMENTS}")
 
     if arrangement == "columns":
         # [front][side][iso][title block] — one row, iso reserves its own column.

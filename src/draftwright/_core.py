@@ -1090,6 +1090,14 @@ class Analysis:
     # declared a model (ADR 0011) or on a manually-built Analysis — consumers fall
     # back to build_model(a).
     model: object | None = None
+    #: The relational arrangement the sheet was composed under — ADR 0018 §5's fourth
+    #: dimension, decided once by `compose.choose_scale` and carried here so that placement
+    #: and the repack loop compose under the arrangement whose feasibility was actually
+    #: established. They call `_layout_geometry` with MEASURED strip depths where selection
+    #: passed estimates, so a stage that re-derives this instead of reading it can reach a
+    #: different answer for the same sheet and lose dimensions to the mismatch (#1130).
+    #: Defaulted for hand-built `Analysis` objects, which mean the long-standing arrangement.
+    arrangement: str = "columns"
 
     @property
     def pmi(self) -> list:

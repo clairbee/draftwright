@@ -319,10 +319,9 @@ class LayoutCandidate:
     is carry the other two, because an anonymous tuple has nowhere to put them — so the view set
     stayed fixed in three modules and the arrangement stayed a sentence in a docstring.
 
-    This is that tuple as a value, with all four dimensions present. Today `views` is always the
-    third-angle three and `arrangement` is always `"columns"`, so nothing varies and nothing
-    changes; the point is that varying them is now an addition to a generator rather than a
-    rewrite of the loop.
+    This is that tuple as a value, with all four dimensions present. Today `views` is always
+    the third-angle three; `arrangement` varies over :data:`ARRANGEMENTS`, and the one that
+    wins is carried to placement in a :class:`ScalePick` rather than re-derived there.
     """
 
     views: tuple[str, ...]
@@ -334,6 +333,12 @@ class LayoutCandidate:
     #: and title block to the right. Named rather than assumed so a second one can be proposed
     #: without the first becoming a special case.
     arrangement: str = "columns"
+
+    def __post_init__(self) -> None:
+        if self.arrangement not in ARRANGEMENTS:
+            raise ValueError(
+                f"unknown arrangement {self.arrangement!r}; expected one of {ARRANGEMENTS}"
+            )
 
     @property
     def legacy_tuple(self) -> tuple[float, float, float, float]:
@@ -386,3 +391,63 @@ def candidate_is_feasible(candidate: LayoutCandidate, fits) -> Infeasible | None
             ),
         )
     return None
+
+
+#: The relational arrangements the layout may be composed under — ADR 0018 §5's fourth
+#: dimension, ordered by preference. `columns` gives the isometric a column of its own;
+#: `stacked-iso` puts it in the title block's column instead, which wins back that column's
+#: width at the cost of the height the title block does not use. Preference order matters:
+#: the candidate loop returns the FIRST feasible candidate, so `columns` — the arrangement
+#: every existing drawing is composed under — is only departed from when it does not fit.
+ARRANGEMENTS: tuple[str, ...] = ("columns", "stacked-iso")
+
+
+class ScalePick(tuple):
+    """`(scale, page_w, page_h, tb_w)` — plus the arrangement it was chosen under.
+
+    ADR 0018 §5 makes scale, sheet, view set and arrangement ONE choice. Returning only the
+    first three of those leaves the fourth to be re-derived downstream, and #1130 measured
+    what that costs: `_layout_geometry` is a single shared authority, but scale selection
+    calls it with ESTIMATED strip depths and placement with MEASURED ones, so resolving the
+    arrangement inside it lets the two stages reach different answers for the same sheet —
+    and the drawing silently loses dimensions to the mismatch.
+
+    So the arrangement rides with the rest of the decision. This is a 4-tuple by
+    construction, which is what keeps that possible: every existing
+    `scale, page_w, page_h, tb_w = choose_scale(...)` unpack, every `pick[0]`, and every
+    comparison against a plain tuple keeps working unchanged, while the stages that need
+    the fourth dimension read it off the attribute.
+    """
+
+    # No `__slots__`: CPython rejects a nonempty one on a tuple subtype, so the attribute
+    # lives in the instance dict. Picks are made a handful of times per build.
+    arrangement: str
+
+    def __new__(
+        cls,
+        scale: float,
+        page_w: float,
+        page_h: float,
+        tb_w: float,
+        arrangement: str = "columns",
+    ) -> ScalePick:
+        if arrangement not in ARRANGEMENTS:
+            raise ValueError(
+                f"unknown arrangement {arrangement!r}; expected one of {ARRANGEMENTS}"
+            )
+        pick = super().__new__(cls, (scale, page_w, page_h, tb_w))
+        pick.arrangement = arrangement
+        return pick
+
+    def __repr__(self) -> str:
+        return f"ScalePick({tuple(self)!r}, arrangement={self.arrangement!r})"
+
+
+def arrangement_of(pick) -> str:
+    """The arrangement `pick` was chosen under, defaulting for a plain tuple.
+
+    Callers may hand back a bare 4-tuple — `_repack_candidates` builds its own alternatives,
+    and tests construct picks by hand. Those mean "the arrangement the engine has always
+    used", which is the first of :data:`ARRANGEMENTS`, not "unknown".
+    """
+    return getattr(pick, "arrangement", ARRANGEMENTS[0])
