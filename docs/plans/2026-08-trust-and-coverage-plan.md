@@ -1,42 +1,41 @@
-# Trust and coverage delivery plan
+# Semantic fidelity and honest failure delivery plan
 
-- **Window:** 2026-08-03 to 2026-10-02
+- **Window:** 2026-08-17 to 2026-10-01
 - **Status:** Active
-- **Live execution:** [Draftwright: Trustworthy Manufacturing Drawings](https://github.com/users/pzfreo/projects/3)
-- **Outcome milestone:** [Trustworthy manufacturing drawings](https://github.com/pzfreo/draftwright/milestone/4)
+- **Live execution:** [Draftwright: Semantic Fidelity and Honest Failure](https://github.com/users/pzfreo/projects/3)
+- **Outcome milestone:** [Semantic fidelity and honest failure](https://github.com/pzfreo/draftwright/milestone/5)
 - **Strategy:** [Product backlog roadmap](product-backlog-roadmap.md)
 
 ## Objective
 
-Make draftwright trustworthy before making it broader: prevent known silent
-incompleteness, prove the fixes with independent evidence, then expand
-manufacturing coverage through the same compiler and lint contracts.
+Preserve one semantic owner for every authored or imported manufacturing fact,
+reject invalid declarations explicitly, and make view planning preserve supported
+requirements before projection and placement.
 
-By 2 October, the selected real and synthetic fixtures should either produce a
-complete drawing or a specific diagnostic for every known unsupported defining
-feature. A clean lint result must never be the consequence of failed recognition.
+By 1 October, the selected real and synthetic fixtures must either retain their
+requirement multiset through lowering, view selection and placement, or report a
+specific diagnostic naming where and why the requirement could not be satisfied.
 
 ## Product outcomes
 
-1. The current duplicate, missing, and unlocated-dimension defects are fixed and
-   mutation-guarded.
-2. Polygonal bosses reach recognition, drafting IR, annotation, and independent
-   coverage lint without claiming unsupported manufacturing semantics.
-3. AP242 PMI records are reconciled from source through lowering and rendering;
-   missing or fragmented output is diagnosed independently.
-4. The editable declared surface preserves source identity where it can do so
-   unambiguously.
-5. Users can find current API documentation, and accumulated releasable work does
-   not sit on `main` without an explicit weekly release decision.
+1. View eligibility and assignment are computed against the selected view set,
+   before rendering.
+2. Removing a view re-homes every eligible requirement or fails closed; it never
+   silently deletes manufacturing information.
+3. The `Sheet` surface exposes typed authored view constraints without annotation
+   coordinates or silently relaxed constraints.
+4. AP242 tolerances lower into one canonical declarative owner, with ambiguous or
+   unsupported records preserved explicitly.
+5. Invalid declarations become inspectable omissions rather than crashes.
 
 ## Non-goals
 
-- Do not turn ADR 0017's unproven later phases into a programme without a driving
-  defect or experiment.
-- Do not infer gear standards, intent, or parameters from suggestive geometry.
-- Do not expand annotation placement or declaration APIs by bypassing the shared
-  solve.
-- Do not use the milestone as a container for unrelated cleanup.
+- Do not infer manufacturing requirements from view availability.
+- Do not expose raw feature-annotation coordinates; whole-view constraints remain
+  distinct from the shared annotation solve.
+- Do not accept a smaller sheet or different arrangement by trading one missing
+  requirement for another.
+- Do not use the milestone as a container for unrelated architecture or cleanup.
 
 ## Delivery sequence
 
@@ -46,29 +45,24 @@ before implementation.
 
 | Iteration | Primary outcome | Planned issues | Exit evidence |
 | --- | --- | --- | --- |
-| W1, 3-9 Aug | Stabilise and release | [#1067](https://github.com/pzfreo/draftwright/issues/1067) | Full local and hosted tiers green; v0.4.1 installed from the registry |
-| W2, 10-16 Aug | Remove known false/duplicate completeness output | [#958](https://github.com/pzfreo/draftwright/issues/958), [#1000](https://github.com/pzfreo/draftwright/issues/1000) | Reduced fixtures and adversarial mutations fail before each fix and pass after it |
-| W3, 17-23 Aug | Make turned-height placement truthful | [#955](https://github.com/pzfreo/draftwright/issues/955), [#1004](https://github.com/pzfreo/draftwright/issues/1004) | Overall height is suppressed only when the surviving chain measures it |
-| W4, 24-30 Aug | Establish polygonal-boss evidence | [#676](https://github.com/pzfreo/draftwright/issues/676) | Recognition record and rejection mutations prove what geometry establishes |
-| W5, 31 Aug-6 Sep | Complete polygonal-boss vertical slice | [#676](https://github.com/pzfreo/draftwright/issues/676); discovery [#1062](https://github.com/pzfreo/draftwright/issues/1062) | Across-flats/corners definition renders and missing output lints independently; gear discovery ends in a decision |
-| W6, 7-13 Sep | Reconcile source PMI | [#623](https://github.com/pzfreo/draftwright/issues/623) | Source, lowered, rendered, missing, and suppressed outcomes are distinguishable |
-| W7, 14-20 Sep | Lower selected AP242 PMI | [#62](https://github.com/pzfreo/draftwright/issues/62), [#675](https://github.com/pzfreo/draftwright/issues/675) | Values and references lower to shared IR; paired tolerances render as one semantic requirement |
-| W8, 21-27 Sep | Preserve declared source identity | [#1041](https://github.com/pzfreo/draftwright/issues/1041) | Unique matches emit references; ambiguous matches fail safe to numeric declarations |
-| W9, 28 Sep-2 Oct | Document and release the outcome | [#846](https://github.com/pzfreo/draftwright/issues/846) | Browsable API reference is published; milestone evidence and release decision recorded |
+| W3, 17-23 Aug | Make dimension planning view-set aware | [#1259](https://github.com/pzfreo/draftwright/issues/1259) | Requirements are assigned to the selected set or rejected before rendering |
+| W4, 24-30 Aug | Close queued semantic-safety defects | [#924](https://github.com/pzfreo/draftwright/issues/924), [#1116](https://github.com/pzfreo/draftwright/issues/1116) | Zero-length declarations omit explicitly; AP242 hole tolerances have one owner |
+| W5, 31 Aug-6 Sep | Expose authored view constraints | [#1260](https://github.com/pzfreo/draftwright/issues/1260) | `Sheet` verbs build typed constraints and never relax them silently |
+| W6, 7-13 Sep | Preserve requirements across view removal | [#1261](https://github.com/pzfreo/draftwright/issues/1261) | The three-view A2 candidate retains the four-view requirement multiset |
+| W7, 14-20 Sep | Select semantic view sets automatically | [#1262](https://github.com/pzfreo/draftwright/issues/1262) | Rotational, asymmetric, GRM-01 and GRM-04 fixtures choose or refuse complete plans |
+| W8-W9, 21 Sep-1 Oct | Close evidence gaps and release | Pull only after the W7 gate | Milestone evidence and an explicit release decision are recorded |
 
 ## Control points
 
-Continue from trust fixes into coverage only when:
+Advance from one child to the next only when:
 
-- the fast and slow tiers are green on `main`;
-- the selected defect mutations prove each guard is load-bearing;
-- no known fixture receives a clean lint result after recognition loses a defining
-  feature; and
-- release v0.4.1 has either shipped or has a recorded blocker and owner.
-
-Continue from polygonal bosses into AP242 PMI only when the new feature has one
-owned recognition path, semantic measurement identity, and independent coverage
-critique. Do not accept emitted text or an empty recognition result as evidence.
+- the selected requirement multiset is stable and independently compared;
+- ambiguity fails closed using semantic identity, never labels or page geometry;
+- targeted mutations prove assignment, omission and placement guards are
+  load-bearing;
+- the applicable fast, slow and hosted tiers are green; and
+- the completed child is closed with linked acceptance evidence and reconciled
+  Project state.
 
 ## Project operating model
 
@@ -86,11 +80,11 @@ changes only when outcomes, sequence, gates, or operating rules change.
 
 ### Views
 
-- **Current Delivery:** Now and Next, board by status.
+- **Current Delivery:** open Now and Next work, board by status.
 - **Eight-Week Roadmap:** committed items on the iteration timeline.
 - **Triage:** items missing a horizon.
 - **Trust Bugs:** open correctness work in `stream:trust`.
-- **Coverage Milestone:** the active outcome milestone.
+- **Outcome Milestone:** the active semantic-fidelity outcome milestone.
 - **Parked:** explicitly deferred product expansion.
 
 ### WIP and entry rules
@@ -121,9 +115,10 @@ repository `GITHUB_TOKEN`, so the audit is a named weekly maintainer control rat
 than a scheduled Action that would silently skip or require a broad stored token.
 
 GitHub's native Project workflows set newly added items to Backlog, move closed
-items to Done, add linked issues, and complete merged PRs. Initial backlog import
-is complete. New top-level issues still require triage into the Project; the Triage
-view and weekly audit make omissions visible.
+items to Done, add linked sub-issues, and complete merged PRs. The complete open
+backlog was reconciled on 2026-08-21. Until repository-wide top-level auto-add is
+enabled in the Project UI, new top-level issues still require explicit addition;
+the weekly audit fails if any are omitted.
 
 ## Risks and responses
 
@@ -143,3 +138,10 @@ view and weekly audit make omissions visible.
   Repository plans retain strategy, outcome gates, and durable decisions.
 - **2026-08-07:** The former Coverage expansion milestone is consolidated into one
   time-bound trust-and-coverage outcome so correctness remains ahead of breadth.
+- **2026-08-10:** Trustworthy manufacturing drawings closed early with all 17
+  scoped issues complete. Semantic fidelity and honest failure became the active
+  outcome.
+- **2026-08-21:** Reconciled every open issue into Project 3, retired the stale W2
+  queue, split ADR 0018 delivery into #1259-#1262, and made #1259 the sole W3 Now
+  item. Current Delivery now excludes closed cards and the milestone view targets
+  milestone 5.
