@@ -23,6 +23,7 @@ from b123d_recognisers import (
     RecognitionResult,
     analyse_cylinders,
     build_recognition_result,
+    recognise_angled_steps,
     recognise_bosses,
     recognise_chamfers,
     recognise_channels,
@@ -33,11 +34,13 @@ from b123d_recognisers import (
     recognise_grooves,
     recognise_hole_patterns,
     recognise_holes,
+    recognise_passages,
     recognise_plates,
     recognise_pocket_patterns,
     recognise_pockets,
     recognise_polygonal_bosses,
     recognise_polygonal_stock,
+    recognise_prismatic_pockets,
     recognise_rectangular_pads,
     recognise_repeating_radial_profiles,
     recognise_risers,
@@ -47,7 +50,21 @@ from b123d_recognisers import (
     step_level_records,
 )
 from b123d_recognisers.result import DEFERRED, MIGRATED, Deferral
-from build123d import Align, Box, Cone, Cylinder, Pos, RegularPolygon, extrude, import_step
+from build123d import (
+    Align,
+    Box,
+    BuildPart,
+    BuildSketch,
+    Cone,
+    Cylinder,
+    Plane,
+    Polygon,
+    Pos,
+    RegularPolygon,
+    Rot,
+    extrude,
+    import_step,
+)
 from conftest import counting_calls
 
 import draftwright.model.detect as detect_module
@@ -155,8 +172,59 @@ def _repeating_wheel():
 #: Built lazily, not at import: a module-level list of solids pays five OCC builds during
 #: *collection*, in every pytest process that imports this file — smoke tier and every xdist
 #: worker included.
+def _angled_blind_step():
+    """A partial-width ramp whose blind ends close as TRIANGLES, plus a full-length 45 degree
+    bevel on the far top edge.
+
+    The construction is the package's own `tests/golden/angled_blind_step` fixture, reproduced
+    because it is the only shape that pins the boundary between the two families rather than
+    just the new one: both a chamfer and an angled step appear on one part, each claimed by
+    exactly one recogniser. It also exercises the reconciliation directly — called on their own
+    the recognisers report 2 chamfers and 1 angled step, and the aggregate keeps 1 chamfer,
+    because `_reconcile.chamfers_that_are_not_angled_steps` drops the chamfer whose face the
+    step owns (#1244).
+    """
+    align_min = (Align.MIN, Align.MIN, Align.MIN)
+    base = Box(50, 50, 25, align=align_min)
+    with BuildPart() as ramp:
+        with BuildSketch(Plane.XZ):
+            Polygon((0, 15), (15, 25), (0, 25))
+        extrude(amount=12)
+    edge_break = Pos(25, 50, 25) * Rot(45, 0, 0) * Box(60, 4.243, 4.243)
+    return base - Pos(0, 12, 0) * ramp.part - edge_break
+
+
+def _hexagonal_passage_plate():
+    """A hexagonal THROUGH opening — a passage, the internal counterpart to polygonal stock."""
+    plate = Box(120, 80, 20)
+    with BuildPart() as tool:
+        with BuildSketch(Plane.XY.offset(-20)):
+            RegularPolygon(12, 6)
+        extrude(amount=60)
+    return plate - Pos(-30, 0, 0) * tool.part
+
+
+def _hexagonal_pocket_plate():
+    """A hexagonal BLIND recess (prismatic pocket) beside a rectangular one.
+
+    The rectangular recess is deliberate: both `recognise_pockets` and
+    `recognise_prismatic_pockets` claim it when called directly, and the aggregate keeps the
+    `Pocket` — so this fixture carries the prismatic-pocket reconciliation as well as a
+    non-empty inventory.
+    """
+    plate = Box(120, 80, 20)
+    with BuildPart() as tool:
+        with BuildSketch(Plane.XY.offset(4)):
+            RegularPolygon(12, 6)
+        extrude(amount=20)
+    return plate - Pos(-30, 0, 0) * tool.part - Pos(30, 0, 4) * Box(30, 24, 20)
+
+
 _ORACLE_FIXTURES = [
     ("bolt circle with countersinks", _bolt_circle_with_countersinks),
+    ("angled blind step", _angled_blind_step),
+    ("hexagonal passage", _hexagonal_passage_plate),
+    ("hexagonal pocket", _hexagonal_pocket_plate),
     ("slot grid", _slot_grid_plate),
     ("pocket grid", _pocket_grid_plate),
     ("stepped shaft", _stepped_shaft),
@@ -265,7 +333,15 @@ def test_no_deferred_family_is_reachable_from_the_orchestration():
 #: *and* gated, which is the distinction #1028 established — owning a family and always
 #: running it are different things. Turned parts are the excluded class for all three:
 #: chamfers and fillets on ``rotational``, plates additionally on a turned profile.
-_CLASSIFICATION_GATED = ("recognise_chamfers", "recognise_fillets", "recognise_plates")
+#: Families the orchestration does not run for a rotational part. `recognise_angled_steps`
+#: joined them in 0.2.6: it is the chamfer family's sibling — 0.2.5 split the two apart — and
+#: measured on a turned shaft the aggregate calls neither (#1244).
+_CLASSIFICATION_GATED = (
+    "recognise_angled_steps",
+    "recognise_chamfers",
+    "recognise_fillets",
+    "recognise_plates",
+)
 
 
 def test_a_classification_gated_family_does_not_run_for_the_excluded_class():
@@ -389,7 +465,31 @@ def _expected_inventory(part, *, rotational: bool = False) -> dict:
             if not rotational and not recognise_turned_steps(part, cyls=cyls)
             else ()
         ),
+        # Recognised and carried, consumed by nothing yet — draftwright has taken no position
+        # on these three (#1245/#1246/#1247, declared `unsupported` in the capability
+        # contract). The aggregate must still hold what its recognisers produced: an inventory
+        # nobody converts is exactly where an empty tuple would go unnoticed (#1244).
+        "angled_steps": tuple(recognise_angled_steps(part)) if not rotational else (),
+        "passages": tuple(recognise_passages(part)),
+        "prismatic_pockets": tuple(recognise_prismatic_pockets(part)),
     }
+
+
+#: Fields where a DIRECT recogniser call is not a valid oracle for the aggregate, because the
+#: aggregate applies a cross-family reconciliation the direct call deliberately precedes:
+#:
+#:   "Calling `recognise_passages` directly returns candidates BEFORE that aggregate policy,
+#:    consistently with the other reconciled families."  — b123d-recognisers 0.2.6 notes
+#:
+#: A four-wall passage yields to the more directly dimensioned `Slot`;
+#: `_reconcile.prismatic_pockets_that_are_not_pockets` keeps the `Pocket`; and
+#: `_reconcile.chamfers_that_are_not_angled_steps` drops a chamfer whose face a step owns —
+#: which is why `chamfers` is here too, latent until a fixture carries an angled step (#1244).
+#:
+#: For these the assertion is SUBSET, not equality: the aggregate may drop a candidate to
+#: another family, and may never invent one. Equality is still demanded everywhere else, so the
+#: "ran it and stored ()" failure this test exists for is still caught for 19 of 22 fields.
+_RECONCILED_FIELDS = frozenset({"angled_steps", "chamfers", "passages", "prismatic_pockets"})
 
 
 def test_the_aggregate_carries_what_its_recognisers_returned():
@@ -418,10 +518,17 @@ def test_the_aggregate_carries_what_its_recognisers_returned():
         )
         result = build_recognition_result(part, rotational=rotational)
         for field, want in expected.items():
-            assert getattr(result, field) == want, (
-                f"{name}: the aggregate's {field} is not what its recogniser returned"
-            )
-            if want:
+            got = getattr(result, field)
+            if field in _RECONCILED_FIELDS:
+                assert set(got) <= set(want), (
+                    f"{name}: the aggregate's {field} contains records its recogniser never "
+                    f"produced — reconciliation may only DROP candidates, never invent them"
+                )
+            else:
+                assert got == want, (
+                    f"{name}: the aggregate's {field} is not what its recogniser returned"
+                )
+            if got:
                 covered.add(field)
 
     unexercised = {f.name for f in fields(RecognitionResult)} - covered

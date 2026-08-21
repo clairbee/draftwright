@@ -26,6 +26,7 @@ from draftwright.model.detect import (
     _CONVERTERS,
     _DERIVED_CONVERTERS,
     _ORCHESTRATED_RECORDS,
+    _UNCONSUMED_RECORDS,
     ConvContext,
     build_part_model,
     convert,
@@ -101,8 +102,13 @@ def test_registry_tiers_partition_every_record_type():
     expected = _recogniser_record_universe()
     assert expected, "mechanical record-type derivation found nothing — check recognition surface"
 
-    tiers = [set(_CONVERTERS), set(_DERIVED_CONVERTERS), set(_ORCHESTRATED_RECORDS)]
-    homed = tiers[0] | tiers[1] | tiers[2]
+    tiers = [
+        set(_CONVERTERS),
+        set(_DERIVED_CONVERTERS),
+        set(_ORCHESTRATED_RECORDS),
+        set(_UNCONSUMED_RECORDS),
+    ]
+    homed = set().union(*tiers)
 
     missing = expected - homed
     assert not missing, (
@@ -123,6 +129,34 @@ def test_orchestrated_records_document_their_residual_reason():
     """Tier 3 is the ADR 0013 Phase 1 accepted residual — each entry states why."""
     for rec_type, reason in _ORCHESTRATED_RECORDS.items():
         assert isinstance(reason, str) and reason.strip(), f"{rec_type.__name__} needs a reason"
+
+
+def test_unconsumed_records_name_the_issue_deciding_them():
+    """Tier 4 is a WAITING ROOM, not a bin: each entry cites the issue that will empty it.
+
+    Tier 3 entries have design reasons that will not change; these are open questions, and the
+    difference has to survive in the register or the two collapse into "we do not convert this"
+    (#1244). The issue reference is the thing that expires — when it closes, the record either
+    moves to a converter or its reason has to be rewritten as a permanent one.
+    """
+    import re
+
+    from draftwright.recogniser_contract import _UNSUPPORTED
+
+    tracked = {
+        reference
+        for _records, tracking, _rationale in _UNSUPPORTED.values()
+        for reference in [tracking.rsplit("/", 1)[-1]]
+    }
+    for rec_type, reason in _UNCONSUMED_RECORDS.items():
+        assert isinstance(reason, str) and reason.strip(), f"{rec_type.__name__} needs a reason"
+        cited = set(re.findall(r"#(\d+)", reason))
+        assert cited, f"{rec_type.__name__} names no deciding issue"
+        assert cited <= tracked, (
+            f"{rec_type.__name__} cites {sorted(cited)}, which is not among the issues the "
+            f"capability declaration tracks ({sorted(tracked)}) — the two registers disagree "
+            "about why this record is unconsumed"
+        )
 
 
 def test_uniform_converters_are_callable():

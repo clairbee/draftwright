@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from b123d_recognisers import (
+    AngledStep,
     BoltCircle,
     BossRecord,
     Chamfer,
@@ -32,12 +33,14 @@ from b123d_recognisers import (
     HoleRecord,
     HoleSpec,
     LinearArray,
+    Passage,
     Plate,
     Pocket,
     PocketArray,
     PocketGrid,
     PolygonalBoss,
     PolygonalStock,
+    PrismaticPocket,
     RaisedPad,
     RectGrid,
     RepeatingRadialProfile,
@@ -687,6 +690,29 @@ _ORCHESTRATED_RECORDS: dict[type, str] = {
     RepeatingRadialProfile: (
         "geometry-only critique evidence (#1087) — validates a separately authored gear "
         "declaration and must never become an inferred IR feature"
+    ),
+}
+
+
+# Tier 4 — records the installed package proves and this consumer has NOT decided about. Not
+# "orchestrated": these are not nested sub-records or aggregated evidence, they are families
+# whose drafting meaning is an open question, declared `unsupported` in
+# `recogniser_contract._UNSUPPORTED` against the issue deciding each. Kept as its own tier so the
+# partition below stays honest — folding them into tier 3 would claim a design reason that does
+# not exist, and would hide them the day one is decided (#1244).
+_UNCONSUMED_RECORDS: dict[type, str] = {
+    AngledStep: (
+        "a step's slanted wall, split out of `chamfers` by 0.2.5 to stop it being reported as a "
+        "chamfer; whether draftwright dimensions it is open (#1247)"
+    ),
+    Passage: (
+        "a prismatic through-opening — the internal counterpart to polygonal stock; whether it "
+        "is an IR kind or refines `hole`, and what it draws, is open (#1245)"
+    ),
+    PrismaticPocket: (
+        "a non-rectangular blind recess that OVERLAPS the supported `pockets` family — measured, "
+        "both recognisers claim a rectangular recess — so IR ownership must be settled before a "
+        "converter exists (#1246)"
     ),
 }
 

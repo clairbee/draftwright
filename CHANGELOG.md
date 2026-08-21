@@ -47,6 +47,10 @@
 
 ### Changed
 
+- Updated the exact `b123d-recognisers` production lock from 0.2.4 to 0.2.6.
+  The immutable PyPI wheel/sdist hashes and capability-manifest digest `aa52bc04216cd1eccc05796d2262547c7f476b80a3ec77334a77b9d8e3241a58` are
+  recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
+  normal consumer gates run on the generated PR.
 - `HoleRequirementOutcome` gains `members` and `features`, `ClaimOutcome` gains `measurement`,
   and `linting.hole_coverage.canonical_hole_sites` is public (#1217). A consumer attributing a
   requirement outcome to a specific recognised hole needs the evidence the outcome accounts

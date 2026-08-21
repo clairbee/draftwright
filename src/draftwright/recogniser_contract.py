@@ -19,7 +19,7 @@ from b123d_recognisers import capability_manifest
 
 CONSUMER_CAPABILITY_FORMAT = "draftwright-recogniser-capabilities"
 CONSUMER_CAPABILITY_FORMAT_VERSION = 1
-_PACKAGE_VERSION = "0.2.4"
+_PACKAGE_VERSION = "0.2.6"
 _BOUNDARIES = (
     "ir_adapter",
     "dsl_declaration",
@@ -195,9 +195,74 @@ def _geometry_only_declaration() -> dict[str, Any]:
     }
 
 
+#: Families the installed package proves and Draftwright has taken NO position on yet, each with
+#: the issue where that position is being decided. Not a parking bay: a family sits here only
+#: while a decision is genuinely open, and `pending_family_declarations` still reports anything
+#: absent from BOTH this map and `_FAMILIES`, so the next new family fails closed exactly as
+#: these three did (#1244).
+_UNSUPPORTED: dict[str, tuple[tuple[str, ...], str, str]] = {
+    "passages": (
+        ("Passage",),
+        "https://github.com/pzfreo/draftwright/issues/1245",
+        "A prismatic through-opening — the internal counterpart to polygonal stock. Whether it "
+        "becomes an IR kind or refines `hole`, and what a passage draws (across-flats + THRU, or "
+        "a section), are drafting decisions this consumer has not made.",
+    ),
+    "prismatic-pockets": (
+        ("PrismaticPocket",),
+        "https://github.com/pzfreo/draftwright/issues/1246",
+        "Overlaps the supported `pockets` family: measured on a plate with one hexagonal and one "
+        "rectangular recess, `recognise_prismatic_pockets` claims BOTH and `recognise_pockets` "
+        "claims the rectangular one as well. Wiring it to a converter would double-count every "
+        "rectangular pocket in completeness, so ownership must be decided at the IR first.",
+    ),
+    "angled-steps": (
+        ("AngledStep",),
+        "https://github.com/pzfreo/draftwright/issues/1247",
+        "Introduced by 0.2.5 to stop `recognise_chamfers` reporting step slants as chamfers "
+        "(precision 44% -> 78%). Draftwright consumes the corrected chamfer inventory today; "
+        "whether an angled step is itself dimensioned — and how — is undecided.",
+    ),
+}
+
+
+def _unsupported_declaration(family_id: str) -> dict[str, Any]:
+    """A family the package proves and this consumer has not decided about.
+
+    Every boundary is `unsupported` with the same rationale, and `completeness` is `deferred`
+    with the tracking issue — so the inventory is visible (`RecognitionResult` carries it, the
+    manifest joins) while nothing scores it. That is the honest position: scoring a family whose
+    drafting meaning is undecided would either invent a requirement or, for `prismatic-pockets`,
+    count one physical recess twice.
+    """
+    records, tracking, rationale = _UNSUPPORTED[family_id]
+    unsupported = {"state": "unsupported", "rationale": rationale}
+    return {
+        "id": family_id,
+        "record_schemas": {name: 1 for name in records},
+        "disposition": "unsupported",
+        "rationale": rationale,
+        "tracking": tracking,
+        "ir_adapter": copy.deepcopy(unsupported),
+        "dsl_declaration": copy.deepcopy(unsupported),
+        "generated_code": copy.deepcopy(unsupported),
+        "drawing_consumer": copy.deepcopy(unsupported),
+        "completeness": {
+            "state": "deferred",
+            "rationale": rationale,
+            "tracking": tracking,
+        },
+        "documentation": {
+            "state": "supported",
+            "evidence": ["docs/reference/recogniser-capabilities.md"],
+        },
+    }
+
+
 def consumer_capability_declaration() -> dict[str, Any]:
     """Return an isolated format-1 declaration for the released package contract."""
     families = [_family_declaration(key, value) for key, value in sorted(_FAMILIES.items())]
+    families.extend(_unsupported_declaration(key) for key in sorted(_UNSUPPORTED))
     families.append(_geometry_only_declaration())
     families.sort(key=lambda family: family["id"])
     return {

@@ -82,16 +82,25 @@ def test_compound_traversal_order_does_not_change_body_correspondence():
     assert recognise_slot_patterns(recognise_slots(reverse)) == []
 
 
-def test_ambiguous_body_signature_fails_closed(monkeypatch):
-    # `_body_signature` moved to `_recess_core` in 0.2.2's seam decomposition. The
-    # patch target follows it; the guarded behaviour — Draftwright failing closed when
-    # the recogniser cannot tell two bodies apart — is unchanged.
-    from b123d_recognisers import _recess_core as recess_module
+def test_ambiguous_body_signature_fails_closed():
+    """A recess whose owning body could not be identified must never join a pattern.
 
-    monkeypatch.setattr(recess_module, "_body_signature", lambda _solid: (1.0,))
-    slots = recognise_slots(_separate_bodies(_slotted_body()))
-    pockets = recognise_pockets(_separate_bodies(_pocketed_body()))
+    The condition is constructed on the public records rather than by patching an internal.
+    Previously this monkeypatched `_recess_core._body_signature`, which 0.2.6 removed — the
+    third of three private reaches that broke on a patch bump (#1244) — and it cannot be
+    induced through geometry either, since a body key embeds the bounding box and separated
+    bodies therefore always differ. `Slot` and `Pocket` are public dataclasses, so setting
+    `body_key=None` states the ambiguous case directly and asserts the same rule.
+    """
+    slots = [
+        replace(slot, body_key=None) for slot in recognise_slots(_separate_bodies(_slotted_body()))
+    ]
+    pockets = [
+        replace(pocket, body_key=None)
+        for pocket in recognise_pockets(_separate_bodies(_pocketed_body()))
+    ]
 
+    # The precondition: three real recesses, every one of them body-ambiguous.
     assert len(slots) == 3 and all(slot.body_key is None for slot in slots)
     assert len(pockets) == 3 and all(pocket.body_key is None for pocket in pockets)
     assert recognise_slot_patterns(slots) == []

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from b123d_recognisers import PolygonalBoss, recognise_polygonal_bosses
-from b123d_recognisers.polygonal_bosses import _normal
 from build123d import Box, Compound, Polygon, Pos, RegularPolygon, Rot, extrude, import_step
 
 from draftwright import build_drawing
@@ -50,12 +49,17 @@ def _polygon_from_supports(
     return Polygon(*points)
 
 
-def test_a_face_with_no_usable_normal_cannot_supply_boss_evidence():
-    class UnusableFace:
-        def center(self):
-            raise ValueError("degenerate face")
-
-    assert _normal(UnusableFace()) is None
+# `test_a_face_with_no_usable_normal_cannot_supply_boss_evidence` was here until #1244. It
+# asserted that `b123d_recognisers.polygonal_bosses._normal` returns None for a face whose
+# `center()` raises — a PRIVATE helper, which 0.2.6 removed, and one of two private reaches
+# that broke on a patch bump with no announced API removals.
+#
+# Not retargeted, because there is nothing here to retarget: the assertion was about the
+# dependency's internal defensiveness, not about anything draftwright does with the result, and
+# the public surface takes a `Shape` rather than a stand-in object with a raising `center()`.
+# The package carries its own held-out and golden evidence for the family (0.2.6 release
+# baseline). What draftwright needs from this module is that a real bounded hex boss yields the
+# right record, which the tests below assert through `recognise_polygonal_bosses`.
 
 
 def test_a_bounded_fused_hex_boss_carries_manufacturing_evidence():
