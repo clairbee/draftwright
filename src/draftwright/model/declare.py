@@ -29,7 +29,13 @@ from __future__ import annotations
 import math
 import warnings
 
-from draftwright._geometry import _EDGE_ON, _END_ON, _solids_body, plane_axes
+from draftwright._geometry import (
+    _EDGE_ON,
+    _END_ON,
+    _radial_axis_in_view,
+    _solids_body,
+    plane_axes,
+)
 from draftwright.model.ir import (
     AUTHORED_DIMENSION_KINDS,
     AuthoredDimension,
@@ -531,12 +537,22 @@ def _read_chamfer_face(face) -> tuple[str, float, float, Point]:
 
 
 def chamfer(
-    obj=None, *, axis=None, leg=None, leg1=None, leg2=None, angle=None, at=None
+    obj=None,
+    *,
+    axis=None,
+    leg=None,
+    leg1=None,
+    leg2=None,
+    angle=None,
+    at=None,
+    turned=False,
 ) -> ChamferFeature:
     """A chamfer (bevelled edge, #560/#576). Either ``chamfer(bevel_face)`` — the oblique
     chamfer face supplies axis, both legs and a leader point **on the bevel** — or explicit
     ``chamfer(axis="z", leg=6, at=(x, y, z))``. ``leg`` is an equal-leg 45° chamfer (callout
     ``C{leg}``); give **both** ``leg1``/``leg2`` for an asymmetric one (``{leg} × {angle}°``).
+    Set ``turned=True`` when ``axis`` is the shaft axis rather than a prismatic bevel-edge
+    direction; this routes the physical ``at`` site through a profile view (#1276).
     The angle is always derived from the legs; an explicit ``angle=`` is only *validated*
     against them (a one-leg-plus-angle spec is not yet supported — #581). An object supplies
     *defaults*; any explicit keyword overrides (#451)."""
@@ -568,7 +584,12 @@ def chamfer(
             f"chamfer angle {angle}° contradicts legs {leg1}/{leg2} (which imply {derived}°)"
         )
     return ChamferFeature(
-        frame=Frame(origin=at, axis=axis), axis=axis, leg1=hi, leg2=lo, angle=angle
+        frame=Frame(origin=at, axis=axis),
+        axis=axis,
+        leg1=hi,
+        leg2=lo,
+        angle=angle,
+        turned=bool(turned),
     )
 
 
@@ -610,11 +631,13 @@ def _read_fillet_face(face) -> tuple[str, float, Point]:
     )
 
 
-def fillet(obj=None, *, axis=None, radius=None, at=None) -> FilletFeature:
+def fillet(obj=None, *, axis=None, radius=None, at=None, turned=False) -> FilletFeature:
     """A fillet (rounded edge, #561). Either ``fillet(round_face)`` — the cylindrical blend
     face supplies axis, radius and a leader point **on the round** — or explicit
     ``fillet(axis="z", radius=3, at=(x, y, z))``. Called out ``R{radius}`` (grouped ``n× R``
-    for equal radii). An object supplies *defaults*; any explicit keyword overrides (#451)."""
+    for equal radii). Set ``turned=True`` when ``axis`` is the shaft axis rather than a
+    prismatic rounded-edge direction; this routes the physical ``at`` site through a profile
+    view (#1276). An object supplies *defaults*; any explicit keyword overrides (#451)."""
     if obj is not None:
         r_axis, r_radius, r_at = _read_fillet_face(obj)
         axis = r_axis if axis is None else axis
@@ -625,7 +648,12 @@ def fillet(obj=None, *, axis=None, radius=None, at=None) -> FilletFeature:
     axis = _norm_axis(axis)
     _require_positive(radius=radius)
     _require_point("at", at)
-    return FilletFeature(frame=Frame(origin=at, axis=axis), axis=axis, radius=round(radius, 3))
+    return FilletFeature(
+        frame=Frame(origin=at, axis=axis),
+        axis=axis,
+        radius=round(radius, 3),
+        turned=bool(turned),
+    )
 
 
 def _read_flat_face(face) -> Point:
@@ -1830,6 +1858,8 @@ _EDGE_ON_VIEW = _EDGE_ON
 _FEATURE_SIDE = {"plan": "above", "front": "below", "side": "below"}
 # The model-space axis a view stacks its above/below strips along (its vertical).
 _VERTICAL_MODEL_AXIS = {"plan": 1, "front": 2, "side": 2}
+# The model-space axis a view lays out left/right along (its horizontal).
+_HORIZONTAL_MODEL_AXIS = {"plan": 0, "front": 0, "side": 1}
 _VALID_SIDES = ("above", "below", "left", "right")
 
 
@@ -1885,6 +1915,72 @@ def gdt_target(ref, part=None, *, view=None, side=None) -> tuple[str, str, Point
     return v, s, site, axis
 
 
+def _surface_target(ref, part=None, *, view=None, side=None) -> tuple[str, str, Point, str]:
+    """Resolve a surface-bound finish/note target without changing datum/control semantics.
+
+    Cylindrical OD and groove aspects describe a longitudinal surface, so they read in profile
+    and point at a derived model-space surface site rather than the feature frame on the axis.
+    Turned edge treatments already carry a physical surface point; they only need their profile
+    view. Everything else retains :func:`gdt_target`'s established face-on rule.
+
+    This is semantic geometry at the IR boundary, not annotation placement: the returned site
+    still enters the common GD&T corridor solve, which alone chooses page coordinates (#1276).
+    """
+    surface_diameter = None
+    if isinstance(ref, BossFeature | StepFeature | RotationalFeature):
+        axis = _norm_axis(ref.frame.axis)
+        d_view = _EDGE_ON_VIEW[axis]
+        v = view or d_view
+        if v not in ("plan", "front", "side"):
+            raise ValueError(f"view must be 'plan'/'front'/'side' (got {v!r})")
+        diameter = ref.od if isinstance(ref, RotationalFeature) else ref.diameter
+        span = getattr(ref, "span", None)
+        if span is not None:
+            site = [sum(pair) / 2 for pair in zip(*span, strict=True)]
+        else:
+            site = list(ref.frame.origin)
+        # The profile plane contains the shaft axis and one principal radial direction.
+        # Choosing its positive side gives a deterministic point on the cylindrical surface;
+        # the corridor solve remains free to place the label on any sanctioned tier.
+        d_site = (site[0], site[1], site[2])
+        surface_diameter = diameter
+    elif isinstance(ref, GrooveFeature):
+        axis = _norm_axis(ref.frame.axis)
+        d_view = _EDGE_ON_VIEW[axis]
+        v = view or d_view
+        if v not in ("plan", "front", "side"):
+            raise ValueError(f"view must be 'plan'/'front'/'side' (got {v!r})")
+        site = list(ref.frame.origin)
+        d_site = (site[0], site[1], site[2])
+        surface_diameter = ref.diameter
+    elif isinstance(ref, ChamferFeature | FilletFeature) and ref.turned:
+        axis = _norm_axis(ref.frame.axis)
+        d_view = _EDGE_ON_VIEW[axis]
+        v = view or d_view
+        d_site = ref.frame.origin
+    else:
+        return gdt_target(ref, part, view=view, side=side)
+
+    if v not in ("plan", "front", "side"):
+        raise ValueError(f"view must be 'plan'/'front'/'side' (got {v!r})")
+    d_side = _FEATURE_SIDE[v]
+    s = side or d_side
+    if s not in _VALID_SIDES:
+        raise ValueError(f"side must be one of {_VALID_SIDES} (got {s!r})")
+    if surface_diameter is not None:
+        radial_axis = _radial_axis_in_view(axis, v)
+        radial_i = "xyz".index(radial_axis)
+        sign = 1.0
+        if radial_i == _VERTICAL_MODEL_AXIS[v] and s in ("above", "below"):
+            sign = 1.0 if s == "above" else -1.0
+        elif radial_i == _HORIZONTAL_MODEL_AXIS[v] and s in ("left", "right"):
+            sign = 1.0 if s == "right" else -1.0
+        site = list(d_site)
+        site[radial_i] += sign * surface_diameter / 2
+        d_site = (site[0], site[1], site[2])
+    return v, s, d_site, axis
+
+
 def datum(letter: str, ref, part=None, *, view=None, side=None) -> DatumRef:
     """A datum feature symbol (ISO 5459) on *ref* — a feature or a planar face (ADR 0011 P2c)."""
     if not (isinstance(letter, str) and letter.strip()):
@@ -1899,7 +1995,7 @@ def finish(ra, ref, part=None, *, view=None, side=None) -> Finish:
     ra = str(ra).strip()
     if not ra:
         raise ValueError("finish needs a roughness value (e.g. '3.2')")
-    v, s, site, axis = gdt_target(ref, part, view=view, side=side)
+    v, s, site, axis = _surface_target(ref, part, view=view, side=side)
     origin = ref if isinstance(ref, Feature) else None
     return Finish(frame=Frame(site, axis), ra=ra, view=v, side=s, origin=origin)
 
@@ -1912,7 +2008,7 @@ def note(text, ref, part=None, *, view=None, side=None) -> Note:
     text = str(text).strip()
     if not text:
         raise ValueError("note needs text (e.g. 'M3x0.5 TAP')")
-    v, s, site, axis = gdt_target(ref, part, view=view, side=side)
+    v, s, site, axis = _surface_target(ref, part, view=view, side=side)
     origin = ref if isinstance(ref, Feature) else None
     return Note(frame=Frame(site, axis), text=text, view=v, side=s, origin=origin)
 

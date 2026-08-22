@@ -98,9 +98,18 @@ records in `RecognitionResult`. Plates and angled prismatic steps remain classif
 This widens the shared geometry inventory; it does not move drafting policy into the package.
 Draftwright's separate record-to-IR, Sheet emission, placement, provenance, and completeness
 work landed one family at a time: #1254 consumes turned chamfers and #1281 consumes turned
-fillets. Profile-view routing for turned edge-treatment leaders remains Draftwright policy and
-is tracked separately by #1276. The ownership rule is unchanged: consumers reuse the aggregate
-records and must not rescan the solid when they add support.
+fillets. Profile-view routing for turned edge-treatment leaders remains Draftwright policy:
+#1276 carries that presentation state through IR and emitted Sheet declarations, then lets the
+shared placement solve choose the page position. The ownership rule is unchanged: consumers
+reuse the aggregate records and must not rescan the solid when they add support.
+
+Because the package records intentionally share one type across planar/conical chamfers and
+cylindrical/toroidal fillets, schema-2 records carry the surface-family discriminator on each
+record as ``turned``. Standalone model detection applies the same rotational family filters
+itself. Draftwright never guesses the surface subtype from a matching axis letter; for a turned
+record it may rotate the physical circumferential anchor about the nearest external-cylinder
+axis from the shared substrate onto the selected profile plane, preserving its axial station
+and radius.
 
 ## Accepted Contract
 

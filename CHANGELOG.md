@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Updated the exact `b123d-recognisers` production lock from 0.2.9 to 0.3.0.
+  The immutable PyPI wheel/sdist hashes and capability-manifest digest `6645def94cbabaca7b9676fdb029b02e467266d1f020ea536e903b7d86b52685` are
+  recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
+  normal consumer gates run on the generated PR.
 - Accept the additive Chamfer and Fillet schema-2 recognizer contract alongside schema 1 ahead of
   the `b123d-recognisers` 0.3.0 cutover; all other record schemas remain fail-closed at version 1
   (#1276).
@@ -16,6 +20,12 @@
   strict xfail.
 
 ### Fixed
+
+- Turned chamfer and fillet leaders now read in a shaft profile view and land on their physical
+  edge-treatment sites instead of collapsing axial stations in the end view. Cylindrical
+  feature notes, knurl callouts, and surface finishes likewise derive a model-space surface
+  target rather than pointing at the shaft axis; all continue through the shared placement
+  solves, with X/Y/Z parity and declared Sheet round-trip (#1276).
 
 - Toroidal fillets returned for turned parts by the shared recognition inventory now lower into
   the existing one-feature-per-round IR and render through the common leader solve. Equal radii

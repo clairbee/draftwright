@@ -15,6 +15,7 @@ import logging
 import math
 from dataclasses import dataclass
 
+from b123d_recognisers import full_cylinders
 from build123d import Compound
 
 _log = logging.getLogger(__name__)
@@ -35,6 +36,111 @@ _END_ON = {"x": "side", "y": "front", "z": "plan"}
 # `planner._PROFILE`, the last of which documented the duplication in a comment rather than
 # resolving it. Same reasoning as above: route through it, never re-spell it (#1130).
 _EDGE_ON = {"x": "front", "y": "side", "z": "front"}
+
+# Model axes retained by each orthographic projection.  Besides documenting the projection
+# convention once, this lets surface-bound annotations choose a radial direction that the
+# requested view can actually show (#1276).
+_VIEW_AXES = {"plan": ("x", "y"), "front": ("x", "z"), "side": ("y", "z")}
+
+
+def _radial_axis_in_view(axis: str, view: str) -> str:
+    """Return a principal radial axis visible in *view* for a shaft along *axis*.
+
+    Profile views contain the shaft axis and exactly one radial axis.  A caller may also
+    explicitly choose the face-on view, where both projected axes are radial; the first is a
+    deterministic, equally physical surface direction.
+    """
+    try:
+        return next(candidate for candidate in _VIEW_AXES[view] if candidate != axis)
+    except (KeyError, StopIteration) as e:
+        raise ValueError(f"no radial axis for shaft axis {axis!r} in view {view!r}") from e
+
+
+def _canonical_profile_site(site, centre, axis: str, view: str) -> tuple[float, float, float]:
+    """Rotate a turned surface *site* about its shaft onto the selected profile plane.
+
+    Conical and toroidal recognisers may return any circumferential point on the same physical
+    edge treatment.  Orthographic projection can discard that point's sole radial component
+    (notably an X-offset site viewed in the Y-Z side view).  Preserve its axial station and
+    radial distance while rotating it to the radial axis visible in *view*.
+    """
+    values = [float(value) for value in site]
+    centre_values = [float(value) for value in centre]
+    axis_i = "xyz".index(axis)
+    radial = [i for i in (0, 1, 2) if i != axis_i]
+    visible_i = "xyz".index(_radial_axis_in_view(axis, view))
+    if visible_i not in radial:
+        raise ValueError(f"view {view!r} is not a profile view of axis {axis!r}")
+    hidden_i = next(i for i in radial if i != visible_i)
+    visible_delta = values[visible_i] - centre_values[visible_i]
+    hidden_delta = values[hidden_i] - centre_values[hidden_i]
+    radius = math.hypot(visible_delta, hidden_delta)
+    direction = visible_delta if abs(visible_delta) > 1e-12 else hidden_delta
+    values[visible_i] = centre_values[visible_i] + math.copysign(radius, direction or 1.0)
+    values[hidden_i] = centre_values[hidden_i]
+    return (values[0], values[1], values[2])
+
+
+def _turned_profile_site(site, axis: str, view: str, cylinders) -> tuple[float, float, float]:
+    """Return *site* rotated onto *view* about its nearest external shaft axis.
+
+    A part may contain several parallel shafts, so the part bounding-box centre is not an
+    axis. Rank the shared cylinder substrate by the site's distance from each finite cylinder
+    patch (radial surface gap plus axial-span gap), then rotate about that cylinder's own
+    ``axis_xyz``.  The finite span matters for compounds: an unrelated cylinder at a remote
+    axial station can coincidentally have the exact radial distance (#1276 review).
+    When no matching external cylinder exists, preserve the physical site: inventing an axis
+    would be worse than retaining a possibly edge-on circumferential anchor.
+    """
+    values = (float(site[0]), float(site[1]), float(site[2]))
+    axis_i = "xyz".index(axis)
+    radial = tuple(i for i in (0, 1, 2) if i != axis_i)
+    candidates = []
+    # ``analyse_cylinders`` is deliberately a complete face inventory: longitudinal blends
+    # and slot caps are cylindrical too.  Only its public substrate filter proves which
+    # records collectively describe a shaft, including an OD split by a keyway/slot.
+    substrates = (full_cylinders(list(group)) for group in cylinders)
+    for cylinder in (item for group in substrates for item in group):
+        if not cylinder.get("external") or cylinder.get("axis") != axis:
+            continue
+        centre = tuple(float(value) for value in cylinder["axis_xyz"])
+        radial_distance = math.hypot(
+            values[radial[0]] - centre[radial[0]],
+            values[radial[1]] - centre[radial[1]],
+        )
+        surface_gap = abs(radial_distance - float(cylinder["diameter"]) / 2)
+        direction = tuple(float(value) for value in cylinder["dir_xyz"])
+        axial_station = sum(value * component for value, component in zip(values, direction))
+        s_lo = float(cylinder["s_lo"])
+        s_hi = float(cylinder["s_hi"])
+        axial_gap = max(s_lo - axial_station, 0.0, axial_station - s_hi)
+        patch_distance = math.hypot(surface_gap, axial_gap)
+        # A complete cylinder elsewhere in a compound is not evidence for this feature.  If
+        # the recogniser's physical point is more than one radius from the finite patch, keep
+        # that point rather than rotating it around an invented remote axis.  This also keeps
+        # a chamfer on a partial OD (for example a D-shaft) safe when ``full_cylinders`` quite
+        # correctly declines to call the partial wall a complete shaft substrate.
+        radius = float(cylinder["diameter"]) / 2
+        if patch_distance > radius:
+            continue
+        candidates.append(
+            (
+                (
+                    patch_distance,
+                    axial_gap,
+                    surface_gap,
+                    radial_distance,
+                    int(cylinder["solid_idx"]),
+                    centre[radial[0]],
+                    centre[radial[1]],
+                ),
+                centre,
+            )
+        )
+    if not candidates:
+        return values
+    _score, centre = min(candidates, key=lambda candidate: candidate[0])
+    return _canonical_profile_site(values, centre, axis, view)
 
 
 def _xyz(loc) -> tuple[float, float, float]:
