@@ -82,7 +82,8 @@ def _grooved_flatted_shaft():
 
 
 def _chamfered_filleted_block():
-    """One chamfered edge and one filleted edge — the #1028 gated inventories, with content."""
+    """One chamfered edge and one filleted edge — both edge-treatment inventories, with
+    content (#1028/#1254)."""
     box = Box(60, 40, 30)
     box = chamfer(box.edges().filter_by(Axis.Z).sort_by(Axis.X)[-1], 4)
     return fillet(box.edges().filter_by(Axis.Z).sort_by(Axis.X)[0], 5)

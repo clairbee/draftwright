@@ -619,8 +619,8 @@ def test_an_automatic_build_runs_each_family_exactly_once_and_lint_runs_no_migra
             drawing.lint()
             after_lint = dict(counts)
 
-        # The gated three are excluded for a turned part BY DESIGN (#1028) — owning a family
-        # and always running it are different things, and
+        # The remaining prismatic-only families are excluded for a turned part BY DESIGN
+        # (#1028/#1254) — owning a family and always running it are different things, and
         # `test_a_classification_gated_family_does_not_run_for_the_excluded_class` owns that
         # claim. Everything else must run exactly once whatever the part class.
         expected_once = MIGRATED - (set(_CLASSIFICATION_GATED) if label == "turned" else set())
