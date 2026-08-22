@@ -288,7 +288,7 @@ def consumer_capability_declaration() -> dict[str, Any]:
     return {
         "format": CONSUMER_CAPABILITY_FORMAT,
         "format_version": CONSUMER_CAPABILITY_FORMAT_VERSION,
-        "consumer": {"name": "draftwright", "version": "0.4.10.dev0"},
+        "consumer": {"name": "draftwright", "version": "0.4.11.dev0"},
         "package_compatibility": {
             "distribution": "b123d-recognisers",
             "version": f"=={_PACKAGE_VERSION}",
