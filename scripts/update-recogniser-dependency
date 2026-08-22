@@ -105,7 +105,14 @@ def _add_changelog(root: Path, old: str, new: str, manifest_hash: str) -> None:
     )
     heading = re.search(r"^## (?:Unreleased|\[Unreleased\])$", text, re.MULTILINE)
     if heading is None:
-        raise RuntimeError("CHANGELOG.md has no Unreleased section")
+        prefix = "# Changelog\n\n"
+        if not text.startswith(prefix):
+            raise RuntimeError("CHANGELOG.md has no canonical title")
+        path.write_text(
+            prefix + "## Unreleased\n\n### Changed\n\n" + bullet + "\n" + text[len(prefix) :],
+            encoding="utf-8",
+        )
+        return
     unreleased_start = heading.start()
     next_heading = re.search(r"^## ", text[heading.end() :], re.MULTILINE)
     unreleased_end = (

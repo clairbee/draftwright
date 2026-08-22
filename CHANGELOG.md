@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Recogniser dependency automation now starts a fresh `Unreleased` section when the previous
+  Draftwright release has finalized the changelog, so a published recogniser can enter through
+  the documented immutable update workflow instead of failing before it opens a PR (#1279).
+
 ## v0.4.9 — 2026-08-21
 
 ### Added
