@@ -1,7 +1,6 @@
-"""End-to-end tests: build a drawing from STEP or a build123d object and assert
-it meets the mechanically-checkable drawing standards.
+"""End-to-end tests: build and export drawings, then inspect their honest result.
 
-These check the parts of "meets standards" a machine can verify:
+The small representative parts check the parts of "meets standards" a machine can verify:
 
 - no error-severity lint violations (axis swaps, label mismatches, page bounds,
   view overlaps) — warnings are tolerated;
@@ -13,8 +12,10 @@ These check the parts of "meets standards" a machine can verify:
 - the standard four views and a title block are present, with at least one
   dimension.
 
-Subjective aspects (ISO 7200 field completeness, ISO 128 line-type judgement) are
-out of scope — they are not machine-checkable.
+The larger CTC corpus also contains automatic plans that are currently diagnostic rather than
+complete. Those cases must remain exportable while failing the lint/quality gate explicitly;
+calling them standards-clean would undo #1250. Subjective aspects (ISO 7200 field completeness,
+ISO 128 line-type judgement) are out of scope — they are not machine-checkable.
 """
 
 import xml.etree.ElementTree as ET
@@ -36,8 +37,8 @@ def _make_parts():
     }
 
 
-def _assert_meets_standards(dwg, svg_path, dxf_path):
-    """Assert a built+exported drawing satisfies the checkable standards."""
+def _assert_export_contract(dwg, svg_path, dxf_path):
+    """Assert the structural contract shared by complete and diagnostic drawings."""
     # Both files written.
     assert Path(svg_path).exists(), "SVG not written"
     assert Path(dxf_path).exists(), "DXF not written"
@@ -46,13 +47,6 @@ def _assert_meets_standards(dwg, svg_path, dxf_path):
     assert set(dwg.views) >= {"front", "plan", "side", "iso"}
     assert any(isinstance(a, TitleBlock) for a in dwg.items), "no title block"
     assert len(dwg.items) >= 2, "expected dimensions + title block"
-
-    # Lint: no error-severity issues (warnings tolerated). This briefly carried a named
-    # quarantine for #1236 — CTC-01/04's overall width starved out of the below corridor by a
-    # feature leader — removed when the opposite-strip fallthrough landed and all ten CTC
-    # fixtures drew both extents again.
-    errors = [i for i in dwg.lint() if i.severity == "error"]
-    assert not errors, f"lint errors: {[(i.code, i.message) for i in errors]}"
 
     data = Path(svg_path).read_text(encoding="utf-8")
 
@@ -65,6 +59,30 @@ def _assert_meets_standards(dwg, svg_path, dxf_path):
 
     # Well-formed XML.
     ET.fromstring(data)
+
+
+def _assert_meets_standards(dwg, svg_path, dxf_path):
+    """Assert a built+exported drawing satisfies the checkable standards."""
+    _assert_export_contract(dwg, svg_path, dxf_path)
+
+    errors = [i for i in dwg.lint() if i.severity == "error"]
+    assert not errors, f"lint errors: {[(i.code, i.message) for i in errors]}"
+
+
+def _assert_ctc_diagnostic_contract(dwg, svg_path, dxf_path, *, expect_incomplete):
+    """Keep diagnostic CTC exports usable without ever certifying them as complete."""
+    _assert_export_contract(dwg, svg_path, dxf_path)
+
+    errors = [i for i in dwg.lint() if i.severity == "error"]
+    if expect_incomplete:
+        assert [i.code for i in errors] == ["plan_incomplete"], (
+            f"expected the known incomplete plan, got {[(i.code, i.message) for i in errors]}"
+        )
+        assert dwg.scale_decision["status"] == "incomplete"
+        assert dwg.lint_summary()["passed"] is False
+    else:
+        assert not errors, f"lint errors: {[(i.code, i.message) for i in errors]}"
+        assert dwg.lint_summary()["passed"] is True
 
 
 @pytest.mark.smoke  # representative full build → annotate → export → lint → standards
@@ -113,7 +131,7 @@ _MAX_BALLOON_RING_EXTENT_MM = 60.0
 @pytest.mark.slow
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("n", _CTC_AP203_OK)
-def test_ctc_ap203_meets_standards_no_degenerate_arcs(tmp_path, n):
+def test_ctc_ap203_exports_honest_diagnostic_no_degenerate_arcs(tmp_path, n):
     from draftwright.export import _MIN_ARC_RADIUS, _SVG_ARC_RE
 
     step = FIXTURES / f"nist_ctc_{n}_asme1_ap203.stp"
@@ -122,7 +140,7 @@ def test_ctc_ap203_meets_standards_no_degenerate_arcs(tmp_path, n):
     _p = dwg.export(stem, formats=("svg", "dxf"))
     svg = _p["svg"]
     dxf = _p["dxf"]
-    _assert_meets_standards(dwg, svg, dxf)
+    _assert_ctc_diagnostic_contract(dwg, svg, dxf, expect_incomplete=True)
     # The #19 fix: no circle-edge-on degenerate arcs leak into the SVG.
     data = Path(svg).read_text(encoding="utf-8")
     degenerate = [
@@ -135,15 +153,15 @@ def test_ctc_ap203_meets_standards_no_degenerate_arcs(tmp_path, n):
 
 @pytest.mark.slow
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize("n", _CTC_AP242_OK)
-def test_ctc_ap242_meets_standards(tmp_path, n):
+@pytest.mark.parametrize(("n", "expect_incomplete"), [(n, n != "01") for n in _CTC_AP242_OK])
+def test_ctc_ap242_exports_honest_result(tmp_path, n, expect_incomplete):
     step = FIXTURES / f"nist_ctc_{n}_asme1_ap242.stp"
     stem = str(tmp_path / f"ctc{n}_ap242")
     dwg = build_drawing(str(step), out=stem)
     _p = dwg.export(stem, formats=("svg", "dxf"))
     svg = _p["svg"]
     dxf = _p["dxf"]
-    _assert_meets_standards(dwg, svg, dxf)
+    _assert_ctc_diagnostic_contract(dwg, svg, dxf, expect_incomplete=expect_incomplete)
 
 
 @pytest.mark.slow
