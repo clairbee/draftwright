@@ -174,6 +174,33 @@ def test_dependency_updater_reuses_existing_unreleased_changed_heading(heading: 
         assert updated.index("0.2.0 to 0.2.1") < updated.index("### Fixed")
 
 
+def test_dependency_updater_starts_the_next_unreleased_section_after_a_release() -> None:
+    loader = SourceFileLoader(
+        "draftwright_recogniser_dependency_update_after_release",
+        str(ROOT / "scripts/update-recogniser-dependency"),
+    )
+    spec = spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n## v0.4.9 — 2026-08-21\n\n### Fixed\n\n- Released fix.\n",
+            encoding="utf-8",
+        )
+
+        module._add_changelog(root, "0.2.6", "0.2.8", "a" * 64)
+        module._add_changelog(root, "0.2.6", "0.2.8", "a" * 64)
+
+        updated = changelog.read_text(encoding="utf-8")
+        assert updated.count("## Unreleased") == 1
+        assert updated.count("0.2.6 to 0.2.8") == 1
+        assert updated.index("## Unreleased") < updated.index("## v0.4.9")
+        assert updated.index("0.2.6 to 0.2.8") < updated.index("## v0.4.9")
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
