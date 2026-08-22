@@ -8174,17 +8174,6 @@ class TestFindSlots:
         (p,) = recognise_pockets(part)
         assert p.length == 22.0
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "b123d-recognisers 0.2.6 regression: a slot with a coaxial post at its own depth is "
-            "not recognised AT ALL, where 0.2.4 reported the flat span. Upstream "
-            "pzfreo/b123d-recognisers#140; draftwright #1244. STRICT so this flips the day the "
-            "fix lands and the marker has to be removed rather than outliving the defect. The "
-            "cost is real and measured: this part's drawing loses m_slot0_length, m_slot0_pos "
-            "and m_slot0_width."
-        ),
-    )
     def test_coaxial_posts_at_both_ends_do_not_extend_length(self):
         # Symmetric coaxial POSTS (added material, radius = width/2) protruding into both slot
         # ends at the slot's own depth pass the radius/axis/centreline/depth checks — but they

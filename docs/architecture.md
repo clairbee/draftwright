@@ -488,14 +488,17 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
   `unrecognised_defining_geometry`). #1026 then migrated the three `BUILD_MODEL_ONLY`
   families once #1022 had removed their cost, and #1028 migrated the last three by moving
   their classification gate *into* the orchestration — the distinction that made it possible
-  being that **owning a family and always running it are different things**: the aggregate
-  owns `recognise_chamfers` and still does not run it for a turned part.
+  being that **owning a family and always running it are different things**. In
+  b123d-recognisers 0.2.9 chamfers and fillets became unconditional because the package now
+  recognises their conical/toroidal turned forms; plates and angled prismatic steps remain
+  classification-gated (#1254/#1281).
   **`DEFERRED` is now empty** — every public `recognise_*` family is owned by the one
   orchestration. The mechanism stays fail-closed (a new family must still be classified, and
   every `Deferral` member survives for a future one); what went was each deferral, as its
-  stated constraint stopped being true. Measured per family: a prismatic build runs 17 once
-  each, a turned build 14 (the gated three excluded by design), a declared build/render
-  **zero**. Physical critique or export may then obtain one cached aggregate.
+  stated constraint stopped being true. Measured per family after 0.2.9: a prismatic build
+  runs 25 once each, a turned build 23 (the remaining prismatic-only families excluded), a
+  declared build/render **zero**. Physical critique or export may then obtain one cached
+  aggregate.
   The accepted contract stops there. `BuildState` proves result-to-build provenance; it does
   **not** yet provide recognition-record→IR-feature→requirement correspondence. The original
   four-type identity taxonomy, shared requirements module, general outcome ledger,
@@ -532,4 +535,3 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
   Accepted on converging evidence from #1187 (leaders that cut the part have no clear
   route because the SHEET is full — every remedy is compositional) and #1190 (the
   section is placed into leftover space, so its presence tracks room rather than need).
-
