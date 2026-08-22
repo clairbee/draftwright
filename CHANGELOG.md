@@ -1,14 +1,41 @@
 # Changelog
 
-## Unreleased
+## v0.4.10 — 2026-08-22
+
+**A view-set-aware planning and turned-edge-treatment patch.** Authored view constraints now
+compile into an explicit resolved plan, automatic drawings fail closed when required content is
+lost, AP242 hole tolerances reach their semantic feature owners, and the exact
+`b123d-recognisers` 0.3.0 release supplies turned chamfer and fillet evidence through truthful
+profile-view callouts.
+
+### Added
+
+- `Sheet` can now author a complete or augmenting semantic view set with `authored_views()`,
+  `auto_views()`, `view()`, `section_view()`, `detail_view()`, and their `add_*` forms. Fluent
+  view handles declare relationships, alignment, scale, and whole-view pins without exposing
+  annotation coordinates; unsupported or infeasible constraints fail at their declaration
+  source instead of being silently relaxed. `sheet.view_constraints` exposes the immutable
+  request and `drawing.view_plan` the distinct resolved result (#1260).
+- Drawings now retain their resolved view topology, per-view requirement coverage, and
+  arrangement decision as inspectable values. The engine can build and semantically compare
+  alternative arrangements and requested view sets while keeping projection and page placement
+  derived from the same plan (#1130).
 
 ### Changed
 
+- Dimension planning is now aware of the selected principal view set. Requirements supported by
+  another planned view are re-homed before projection; an unsupported set raises one aggregated
+  `ViewPlanIncomplete` naming every unmet requirement rather than failing late or producing a
+  plausible-looking drawing with missing dimensions (#1259).
+- Three sparse corpus drawings now use a `stacked-iso` arrangement and fit A4 instead of A3 at
+  the same scale, with identical annotations, labels, and build issues. An alternative may only
+  compact the scale already selected by the default arrangement and must survive a real compile
+  without semantic loss; otherwise the default is retained (#1130).
 - Updated the exact `b123d-recognisers` production lock from 0.2.9 to 0.3.0.
   The immutable PyPI wheel/sdist hashes and capability-manifest digest `6645def94cbabaca7b9676fdb029b02e467266d1f020ea536e903b7d86b52685` are
   recorded in `.github/recogniser-release.json`; focused compatibility evidence and the
   normal consumer gates run on the generated PR.
-- Accept the additive Chamfer and Fillet schema-2 recognizer contract alongside schema 1 ahead of
+- Accepted the additive Chamfer and Fillet schema-2 recogniser contract alongside schema 1 for
   the `b123d-recognisers` 0.3.0 cutover; all other record schemas remain fail-closed at version 1
   (#1276).
 
@@ -20,6 +47,22 @@
   strict xfail.
 
 ### Fixed
+
+- Automatic builds now apply the same required-outcome gate as explicit-scale builds. A settled
+  drawing that lost required placement outcomes records `plan_incomplete`, reports an
+  `incomplete` scale decision, preserves measurement/hole/source provenance, and fails lint
+  rather than presenting a diagnostic drawing as complete (#1250).
+
+- Supported AP242 diameter tolerances now correlate with their canonical hole or pattern owner at
+  the completed IR boundary and round-trip through emitted `Sheet` declarations with source
+  provenance. Unmatched, ambiguous, conflicting, partial-pattern, and unsupported requirements
+  fail closed to provenance-preserving measured dimensions rather than being duplicated or lost
+  (#1116).
+
+- A declared step shoulder coincident with its datum is now pruned before rendering instead of
+  sending identical endpoints to the border-dimension helper and raising `ValueError`. Valid
+  siblings remain, while the omission is recorded in `Drawing.suppressions()` and reported as
+  `step_position_coincident_with_datum` (#924).
 
 - Turned chamfer and fillet leaders now read in a shaft profile view and land on their physical
   edge-treatment sites instead of collapsing axial stations in the end view. Cylindrical
