@@ -173,11 +173,10 @@ def test_injecting_the_aggregate_builds_the_same_model_as_detecting(name, build)
 def test_the_gate_is_the_orchestrations_not_the_call_sites():
     """#1028's actual claim: a family can be MIGRATED *and* not always run.
 
-    The three classification-gated families were deferred because hoisting them
-    unconditionally would scan every turned build for a result `build_part_model` discards.
-    The resolution was not to keep them out of the aggregate but to let the aggregate decide
-    once — so the gate must live in `build_recognition_result` itself, and be visible in what
-    it returns rather than inferred from who called it.
+    Plates remain classification-gated because hoisting them unconditionally would scan every
+    turned build for a prismatic-only result `build_part_model` discards. Chamfers and fillets
+    deliberately stopped sharing this gate in b123d-recognisers 0.2.9, which recognises their
+    conical/toroidal turned forms (#1254/#1281).
     """
     # An L-bracket: a base slab plus an upright wall, which is what `recognise_plates` looks
     # for. A plain box has no plates, so it would make the gate assertion below vacuous.
@@ -187,15 +186,12 @@ def test_the_gate_is_the_orchestrations_not_the_call_sites():
     assert build_recognition_result(prismatic, rotational=False).rotational is False
     assert build_recognition_result(turned, rotational=True).rotational is True
 
-    # Same solid, both classifications: only the gate differs, so any difference in the three
-    # inventories is the gate's doing and not the geometry's.
+    # Same solid, both classifications: only the gate differs, so the plate inventory change
+    # is the gate's doing and not the geometry's.
     ungated = build_recognition_result(prismatic, rotational=False)
     gated = build_recognition_result(prismatic, rotational=True)
 
-    assert gated.chamfers == () and gated.fillets == () and gated.plates == (), (
-        "a rotational classification must gate all three away — otherwise migrating them "
-        "reintroduced the scan the deferral existed to avoid"
-    )
+    assert gated.plates == (), "a rotational classification must gate prismatic plates away"
     assert ungated.plates, "fixture stopped producing plates, so the gate proves nothing here"
     # And nothing else moved: the gate is narrow, not a blanket suppression.
     assert ungated.holes == gated.holes
