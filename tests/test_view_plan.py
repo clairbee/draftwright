@@ -165,6 +165,7 @@ class TestTheRepresentationChangedNothing:
 
 
 @pytest.mark.slow  # a CTC fixture build, twice (#153)
+@pytest.mark.timeout(600)  # Two OCC builds exceed the global 300 s cap under xdist load (#1266).
 def test_the_repack_loop_really_consumes_the_plan():
     """The one consumer whose re-routing the golden corpus does NOT cover.
 
