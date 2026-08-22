@@ -1,7 +1,8 @@
 # ADR 0017 — One recognition result per run; correspondence is evidence-gated
 
 - **Status:** Accepted; narrowed after phase 1 (Amendment 1, 2026-08-05), with
-  external-package/cache ownership clarified by Amendment 2 (2026-08-15)
+  external-package/cache ownership clarified by Amendment 2 (2026-08-15) and turned
+  edge-treatment applicability widened by Amendment 3 (2026-08-22)
 - **Date:** 2026-08-03
 - **Deciders:** Paul Fremantle (pzfreo)
 
@@ -87,6 +88,19 @@ record→IR conversion. A declared render remains recognition-free, while later 
 may fill it lazily once. This preserves every landed guard below without a second recogniser
 implementation or package-level global cache.
 
+## Amendment 3 — turned edge treatments are applicable recognition families
+
+`b123d-recognisers` 0.2.9 recognises conical chamfers and toroidal fillets on turned parts.
+Those two families therefore no longer share the rotational applicability gate: the one
+orchestration runs them for both prismatic and turned solids and carries their immutable
+records in `RecognitionResult`. Plates and angled prismatic steps remain classification-gated.
+
+This widens the shared geometry inventory; it does not move drafting policy into the package
+or claim that the consumer already renders every returned record. Draftwright's separate
+record-to-IR, Sheet emission, placement, provenance, and completeness work is tracked by
+#1254 and #1281. The ownership rule is unchanged: consumers reuse the aggregate records and
+must not rescan the solid when they add support.
+
 ## Accepted Contract
 
 ### 1. One orchestration owns the recognition universe
@@ -104,8 +118,8 @@ manifest. A new family cannot appear without an ownership decision. A deferral c
 reason code and, where applicable, the issue that removes its constraint.
 
 Owning a family is distinct from always running it. Applicability gates live inside the one
-orchestration, so it owns chamfers, fillets, and plates while deliberately skipping them for
-part classes that do not consume them.
+orchestration. Since Amendment 3, chamfers and fillets run for both prismatic and turned
+solids; plates and angled prismatic steps remain gated away from turned parts.
 
 ### 2. Consumers reuse the result; they do not rescan per concern
 
@@ -176,8 +190,8 @@ critique because it logs its diagnostics. Therefore the observable call contract
 
 | path | recognition calls |
 |---|---|
-| automatic prismatic build | 18 families, once each |
-| automatic turned build | 15 families; three gated out by design |
+| automatic prismatic build | 25 families, once each |
+| automatic turned build | 23 families; two prismatic-only families gated out by design |
 | declared build/render | zero |
 | first physical critique/export of a declared drawing | at most one aggregate |
 | subsequent lint of the same drawing | zero additional calls |
@@ -351,7 +365,8 @@ completeness slice. The remaining abstractions are evaluated separately after Ga
 - [x] Declared build/render performs no recognition.
 - [x] Physical critique of a declared drawing obtains at most one cached aggregate.
 - [x] Repeated lint returns equivalent results without rerunning recognition.
-- [x] Classification-gated families are owned but skipped for inapplicable part classes.
+- [x] Remaining classification-gated families are owned but skipped for inapplicable part
+  classes.
 - [x] A counterexample/mutation fails when the cache, gate, manifest, or shared-evidence contract
   it protects is broken.
 - [x] Complete-wire repeating radial-profile evidence is scanned once by the orchestration;
