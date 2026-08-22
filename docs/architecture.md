@@ -496,7 +496,7 @@ policy) live in `CLAUDE.md`. This is the per-ADR status trail; each ADR's
   orchestration. The mechanism stays fail-closed (a new family must still be classified, and
   every `Deferral` member survives for a future one); what went was each deferral, as its
   stated constraint stopped being true. Measured per family after 0.2.9: a prismatic build
-  runs 17 once each, a turned build 16 (the remaining prismatic-only families excluded), a
+  runs 25 once each, a turned build 23 (the remaining prismatic-only families excluded), a
   declared build/render **zero**. Physical critique or export may then obtain one cached
   aggregate.
   The accepted contract stops there. `BuildState` proves result-to-build provenance; it does
