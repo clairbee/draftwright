@@ -1794,14 +1794,16 @@ def build_drawing(
                     candidate=candidate_drawing,
                 )
 
-        # #443: a pictorial view is useful context, but it cannot outrank the
-        # dimensions needed to manufacture a turned profile.  GRM-03 selected 2:1
-        # with ISO, collapsed its 0.5 + 2 mm head steps into an unowned 2.5 mm
-        # block, then had no room for the recovery detail.  Re-plan once without
-        # the optional ISO; scale selection reaches 5:1 and the two truthful step
-        # dimensions fit inline.  This is deliberately a coverage comparison, not
-        # suppression of ``axial_length_missing``: the candidate wins only after
-        # the same read-back check confirms every shoulder is located.
+        # #443/#1299: a pictorial view is useful context, but it cannot outrank the
+        # dimensions or other required annotations needed to manufacture a part.
+        # GRM-03 originally selected 2:1 with ISO, collapsed its 0.5 + 2 mm head
+        # steps into an unowned 2.5 mm block, then had no room for the recovery
+        # detail.  Typed PMI can reach the same correction for the complementary
+        # reason: all shoulders are covered, but a required feature callout has no
+        # route.  Re-plan once without the optional ISO in either case.  This is
+        # deliberately a measured semantic comparison, not suppression of lint:
+        # the candidate wins only after the same read-back and required-outcome
+        # gates prove it complete.
         if (
             dimensions_are_automatic
             and _include_iso
@@ -1816,10 +1818,17 @@ def build_drawing(
                     prof=latest_analysis.prof,
                 )
             )
-            if original_has_axial_gap:
+            original_issues, original_blockers = _automatic_assessment(drawing)
+            settled_issues = original_issues
+            if original_has_axial_gap or original_blockers:
                 _record_attempt(
                     drawing.scale,
-                    "axial_coverage_incomplete",
+                    (
+                        "axial_coverage_incomplete"
+                        if original_has_axial_gap
+                        else "required_outcome_dropped"
+                    ),
+                    original_blockers,
                     reason="remove_optional_iso",
                     candidate=drawing,
                 )

@@ -9,6 +9,7 @@ from build123d import Align, Cylinder, Pos, Rotation
 
 import draftwright.builder as builder
 from draftwright import build_drawing
+from draftwright.linting import LintIssue
 
 GRM03 = Path("/Users/paul/steps/GRM-03_thumbwheel_drive_screw_AP242_PMI.step")
 GRM03_SHA256 = "4b6462b9cc9f0d419250933bd77fb305f9cfebb7ec2b3f377008732876010a21"
@@ -139,6 +140,78 @@ def test_no_iso_proposal_on_different_page_reselects_scale_for_original_page(mon
         ("axial_coverage_incomplete", "remove_optional_iso", None),
         ("scale_proposal", "remove_optional_iso", None),
         ("complete", "remove_optional_iso", None),
+    ]
+
+
+def test_required_drop_without_axial_gap_uses_the_same_bounded_page_recovery(monkeypatch):
+    """Complete shoulders do not make a sheet complete when a callout was lost."""
+
+    dropped = LintIssue(
+        severity="warning",
+        code="callout_dropped",
+        message="required typed-PMI callout has no route",
+        source_ids=("manufacturing_requirement:#2000",),
+        outcome_stage="placement",
+    )
+
+    class FakeDrawing:
+        def __init__(self, *, page, include_iso, issues=()):
+            self.page_w, self.page_h = page
+            self.scale = 2.0
+            self.views = {"front": object()}
+            if include_iso:
+                self.views["iso"] = object()
+            self.solve_trace = None
+            self._issues = tuple(issues)
+
+        def model(self):
+            return SimpleNamespace(authored_dimensions=None)
+
+        def lint(self, *, physical=False):
+            return self._issues
+
+    def fake_one_pass(
+        _step_file,
+        *,
+        page,
+        _include_iso,
+        _analysis_sink,
+        **_kwargs,
+    ):
+        _analysis_sink(
+            SimpleNamespace(
+                arrangement=builder.ARRANGEMENTS[0],
+                part=object(),
+                prof=object(),
+            )
+        )
+        dimensions = {
+            None: (297.0, 210.0),
+            (297.0, 210.0): (297.0, 210.0),
+            "A3": (420.0, 297.0),
+        }[page]
+        issues = () if page == "A3" else (dropped,)
+        return FakeDrawing(page=dimensions, include_iso=_include_iso, issues=issues)
+
+    monkeypatch.setattr(builder, "_build_drawing_once", fake_one_pass)
+    monkeypatch.setattr(builder, "lint_axial_coverage", lambda *_args, **_kwargs: ())
+
+    drawing = builder.build_drawing(object())
+
+    assert (drawing.page_w, drawing.page_h) == (420.0, 297.0)
+    assert "iso" not in drawing.views
+    assert [
+        (
+            attempt["page"],
+            attempt["status"],
+            attempt["reason"],
+            attempt.get("rejection"),
+        )
+        for attempt in drawing.scale_decision["attempts"]
+    ] == [
+        ((297.0, 210.0), "required_outcome_dropped", "remove_optional_iso", None),
+        ((297.0, 210.0), "rejected", "remove_optional_iso", "required_outcome_dropped"),
+        ((420.0, 297.0), "complete", "page_escalation_after_optional_iso", None),
     ]
 
 
