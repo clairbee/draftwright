@@ -118,6 +118,37 @@ class TestTraceRecording:
         assert not target.exists()
         assert any("trace: could not write" in r.getMessage() for r in caplog.records)
 
+    def test_rejected_corrective_candidates_cannot_own_the_final_trace(self, monkeypatch):
+        """The returned drawing reclaims a shared path after speculative builds (#1294)."""
+        import draftwright.builder as builder
+
+        writes = []
+        detected_model = SimpleNamespace(authored_dimensions=None)
+
+        def fake_build(*_args, scale, **_kwargs):
+            label = "original" if scale is None else f"candidate:{scale:g}"
+            recorder = SimpleNamespace(write=lambda: writes.append(label))
+            drawing = SimpleNamespace(
+                scale=1.0 if scale is None else scale,
+                page_w=297.0,
+                page_h=210.0,
+                views=("front", "detail_A"),
+                solve_trace=recorder,
+                model=lambda: detected_model,
+                lint=lambda **_kwargs: [],
+            )
+            # Mirror _build_drawing_once: each speculative build writes the shared path.
+            recorder.write()
+            return drawing
+
+        monkeypatch.setattr(builder, "_SCALES", (1.0, 2.0, 5.0))
+        monkeypatch.setattr(builder, "_build_drawing_once", fake_build)
+
+        drawing = builder.build_drawing(Box(10, 10, 10), trace=True)
+
+        assert drawing.scale == 1.0
+        assert writes == ["original", "candidate:2", "candidate:5", "original"]
+
 
 class TestPassEvents:
     """Finding-#733 coverage: the immediate placers — post-drain machined-feature leader
