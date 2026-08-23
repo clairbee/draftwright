@@ -350,7 +350,7 @@ def test_typed_internal_thread_and_knurl_render_manufacturing_complete_labels_on
     assert not [issue for issue in knurled.lint() if issue.code == "pmi_not_rendered"]
 
 
-def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_solve():
+def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_solve(monkeypatch):
     align = (Align.CENTER, Align.CENTER, Align.MIN)
     segments = [
         Pos(lo, 0, 0) * Cylinder(diameter / 2, hi - lo, align=align).rotate(Axis.Y, 90)
@@ -386,6 +386,17 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
     ]
     model = lower_ap242_manufacturing_requirements(PartModel(part.bounding_box(), "x", features))
 
+    import draftwright.annotations.from_model as from_model
+
+    original_leader_pass = from_model._leader_callout_pass
+    typed_source_ids = {}
+
+    def capture_sources(*args, **kwargs):
+        if kwargs.get("noun") == "typed manufacturing diameter":
+            typed_source_ids.update(kwargs.get("source_ids_by_name", {}))
+        return original_leader_pass(*args, **kwargs)
+
+    monkeypatch.setattr(from_model, "_leader_callout_pass", capture_sources)
     drawing = build_drawing(part, model=model, pmi="annotate", page="A1")
 
     assert {
@@ -401,6 +412,10 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         ),
         "m_dia_x3": "ø5",
         "m_dia_x4": "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
+    }
+    assert typed_source_ids == {
+        "m_dia_x2": ("manufacturing_requirement:#2008",),
+        "m_dia_x4": ("manufacturing_requirement:#2000",),
     }
     knurl_owner = next(
         feature
@@ -439,6 +454,47 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
     }.items():
         tip_y = drawing.get_annotation(name).tip[1]
         assert abs(tip_y - axis_y) == pytest.approx(diameter / 2 * drawing.scale)
+
+
+def test_shared_typed_diameter_drop_records_its_exact_source():
+    from types import SimpleNamespace
+
+    from build123d_drafting.helpers import Draft
+
+    from draftwright.annotations._common import PlacementContext
+    from draftwright.annotations.from_model import _leader_callout_pass
+    from draftwright.linting.coverage import CoverageState
+    from draftwright.registry import AnnotationRegistry
+
+    ctx = PlacementContext(
+        registry=AnnotationRegistry(),
+        coverage=CoverageState(),
+        feature_leaders=[],
+    )
+    source_id = "manufacturing_requirement:#2000"
+    assert (
+        _leader_callout_pass(
+            SimpleNamespace(draft=Draft()),
+            SimpleNamespace(),
+            [("m_dia_x0", "front", (0.0, 0.0, 100.0, 100.0), "ø3 M3", (), ())],
+            noun="typed manufacturing diameter",
+            drop_code="diameter_dropped",
+            ctx=ctx,
+            geom_clear=True,
+            joint=True,
+            source_ids_by_name={"m_dia_x0": (source_id,)},
+        )
+        == 0
+    )
+    assert ctx.feature_leaders is not None
+    assert len(ctx.feature_leaders) == 1
+    assert ctx.feature_leaders[0].on_drop is not None
+    ctx.feature_leaders[0].on_drop("no_clear_room")
+
+    issue = ctx.registry.issues[0]
+    assert issue.code == "diameter_dropped"
+    assert issue.source_ids == (source_id,)
+    assert issue.outcome_stage == "placement"
 
 
 def test_known_unsupported_manufacturing_intent_is_explicit_without_error_lint():
@@ -725,6 +781,38 @@ def test_single_member_pattern_receives_internal_thread_and_rejects_a_second_one
     owner = lowered.features[0]
     assert isinstance(owner, PatternFeature)
     assert isinstance(owner.member.thread, ThreadRequirement)
+
+    from build123d_drafting.helpers import Draft
+
+    from draftwright.annotations._common import PlacementContext
+    from draftwright.annotations.from_model import callout_from_spec
+    from draftwright.annotations.holes import _record_callout_drop
+    from draftwright.linting.coverage import CoverageState
+    from draftwright.model.callout import hole_callout_spec
+    from draftwright.model.planner import plan_dimensions
+    from draftwright.registry import AnnotationRegistry
+
+    group = next(group for group in plan_dimensions(lowered) if group.feature is owner)
+    spec = hole_callout_spec(group)
+    assert spec is not None
+    assert spec["source_ids"] == ("manufacturing_requirement:#2004",)
+    callout = callout_from_spec(spec, Draft(), spec["count"])
+    assert callout is not None
+    assert callout.source_ids == ("manufacturing_requirement:#2004",)
+    ctx = PlacementContext(registry=AnnotationRegistry(), coverage=CoverageState())
+    _record_callout_drop(
+        ctx,
+        object(),
+        "side",
+        1.6,
+        "shared leader inventory full",
+        owner,
+        callout=callout,
+        outcome_stage="placement",
+    )
+    issue = ctx.registry.issues[0]
+    assert issue.source_ids == ("manufacturing_requirement:#2004",)
+    assert all(measurement.feature is owner for measurement in issue.measurement_ids)
 
     repeated = lower_ap242_manufacturing_requirements(_model(owner, raw))
     fallback = next(feature for feature in repeated.features if isinstance(feature, PmiFeature))

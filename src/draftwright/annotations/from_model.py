@@ -202,6 +202,7 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
         terms.append(suffix)
     callout.label = " ".join(terms)
     callout.measurements = tuple(spec.get("measurements", ()))
+    callout.source_ids = tuple(spec.get("source_ids", ()))
     callout.covers_hole_requirements = tuple(
         requirement
         for requirement, covered in (
@@ -1421,6 +1422,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
         return 0
     reach = _leader_callout_reach(dwg.draft)
     jobs = []
+    source_ids_by_name = {}
     for index, (_anchor, dia, refs, dtol, suffix, groups) in indexed_buckets:
         owner = next(iter(refs)) if len(refs) == 1 else None
         representative = groups[0].facts
@@ -1457,9 +1459,20 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
                     )
 
         candidates = _wide_lanes()
+        name = f"{prefix}{start + index}"
+        source_ids_by_name[name] = tuple(
+            dict.fromkeys(
+                source_id
+                for aspect in (
+                    getattr(representative, "thread", None),
+                    getattr(representative, "knurl", None),
+                )
+                for source_id in getattr(aspect, "source_ids", ())
+            )
+        )
         jobs.append(
             (
-                f"{prefix}{start + index}",
+                name,
                 "front",
                 vb,
                 f"ø{_fmt(dia)}{_tol_suffix(dtol, dwg.draft)}" + (f" {suffix}" if suffix else ""),
@@ -1481,6 +1494,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
         ctx=ctx,
         geom_clear=True,
         joint=True,
+        source_ids_by_name=source_ids_by_name,
     )
 
 
@@ -2004,6 +2018,7 @@ def _leader_callout_pass(
     ctx,
     geom_clear=False,
     joint=False,
+    source_ids_by_name=None,
 ) -> int:
     """Place one machined-feature leader callout per job (#637/#740). A *job* is
     ``(name, view, vb, label, candidates, measurement)`` where *candidates* yields ``(tip,
@@ -2030,6 +2045,7 @@ def _leader_callout_pass(
     tried, obstacle count, placed tip/elbow or the drop reason. Post-#734 these
     callouts place after the drain, so without this the #733 story ("why did this
     pocket callout land here / drop") would be invisible to the trace."""
+    source_ids_by_name = source_ids_by_name or {}
     # Keep alternatives lazy until the bounded joint tier is known to be usable.
     # This matters for one grouped job with many members: counting jobs or
     # cross-job pairs alone cannot protect its collect-all OCC construction.
@@ -2095,6 +2111,31 @@ def _leader_callout_pass(
                     geom_clear=_geom_clear,
                 )
 
+            source_ids = tuple(source_ids_by_name.get(name, ()))
+
+            def _on_drop(
+                reason,
+                *,
+                _source_ids=source_ids,
+                _label=label,
+                _measurement=measurement,
+            ):
+                detail = (
+                    "rendered geometry validation failed"
+                    if reason == "geometry_validation"
+                    else "no clear room"
+                )
+                ctx.record_issue(
+                    "warning",
+                    drop_code,
+                    f"{noun} callout {_label} not placed ({detail})",
+                    measurement=_measurement,
+                    source=_source_ids,
+                    outcome_stage=(
+                        "validation" if reason == "geometry_validation" else "placement"
+                    ),
+                )
+
             collect_feature_leader(
                 ctx,
                 FeatureLeaderJob(
@@ -2115,6 +2156,7 @@ def _leader_callout_pass(
                     # Policy B: the solver penalises the crossing and the
                     # emitter records a machine-readable warning (#1166).
                     allow_policy_b_fixed=True,
+                    on_drop=_on_drop if source_ids else None,
                 ),
             )
         return 0
@@ -2230,6 +2272,8 @@ def _leader_callout_pass(
                     drop_code,
                     f"{noun} callout {label} not placed (no clear room)",
                     measurement=measurement,
+                    source=source_ids_by_name.get(name, ()),
+                    outcome_stage="placement",
                 )
                 trace_item(name, view, label, tried, len(obstacles))
         return placed_count
@@ -2365,6 +2409,8 @@ def _leader_callout_pass(
             drop_code,
             f"{noun} callout {label} not placed (no clear room)",
             measurement=measurement,
+            source=source_ids_by_name.get(name, ()),
+            outcome_stage="placement",
         )
         trace_item(
             name,
