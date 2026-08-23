@@ -1212,30 +1212,6 @@ def _is_required_scale_drop(issue) -> bool:
     return True
 
 
-def _scale_issue_source_ids(issue) -> tuple[str, ...]:
-    """External sources represented by one placement outcome.
-
-    A compound hole callout is registered against its compiler measurements.  When that
-    callout also renders a typed imported thread/tap requirement, the placement diagnostic
-    therefore carries ``measurement_ids`` while the source provenance remains on the
-    measurement's owning feature aspect.  Recover that exact relationship here; do not infer
-    ownership from a nominal value or from an unowned drop.
-    """
-    source_ids = list(getattr(issue, "source_ids", ()))
-    owners = [
-        getattr(measurement, "feature", None)
-        for measurement in getattr(issue, "measurement_ids", ())
-    ]
-    owners.extend(
-        requirement[0] for requirement in getattr(issue, "hole_requirement_ids", ()) if requirement
-    )
-    for owner in owners:
-        for aspect_name in ("thread", "knurl"):
-            aspect = getattr(owner, aspect_name, None)
-            source_ids.extend(getattr(aspect, "source_ids", ()))
-    return tuple(dict.fromkeys(source_ids))
-
-
 def _scale_blockers_from_issues(issues) -> tuple[dict, ...]:
     """Required placement failures from one already-materialised lint pass."""
     blockers = []
@@ -1254,7 +1230,7 @@ def _scale_blockers_from_issues(issues) -> tuple[dict, ...]:
                     _hole_scale_requirement(req)
                     for req in getattr(issue, "hole_requirement_ids", ())
                 ),
-                "source_ids": _scale_issue_source_ids(issue),
+                "source_ids": tuple(getattr(issue, "source_ids", ())),
             }
         )
     return tuple(blockers)
