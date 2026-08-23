@@ -910,7 +910,19 @@ def test_exact_grm03_lowers_all_three_supported_manufacturing_requirements():
 @pytest.mark.skipif(not GRM03.exists(), reason="local exact GRM-03 AP242 file absent")
 def test_exact_grm03_renders_complete_source_owned_manufacturing_drawing_once():
     assert hashlib.sha256(GRM03.read_bytes()).hexdigest() == GRM03_SHA256
-    drawing = build_drawing(GRM03, pmi="annotate", page="A1")
+    drawing = build_drawing(GRM03, pmi="annotate")
+
+    assert (drawing.page_w, drawing.page_h, drawing.scale) == (841.0, 594.0, 10.0)
+    assert set(drawing.views) == {"front", "plan", "side"}
+    assert drawing.scale_decision["status"] == "automatic_replanned"
+    attempts = drawing.scale_decision["attempts"]
+    assert attempts[-1]["status"] == "complete"
+    assert {
+        source_id
+        for attempt in attempts[:-1]
+        for blocker in attempt.get("blockers", ())
+        for source_id in blocker.get("source_ids", ())
+    } == {"manufacturing_requirement:#2004"}
 
     expected_manufacturing = {
         "manufacturing_requirement:#2000": (
