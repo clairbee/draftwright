@@ -275,6 +275,8 @@ def build_pmi_features(
             datum_contexts=r.datum_contexts,
             reference_item_ids=r.reference_item_ids,
             reference_axis=r.reference_axis,
+            semantic_name=r.semantic_name,
+            shape_aspect_ids=r.shape_aspect_ids,
         )
         if r.source_category == "geometric_tolerance" and not r.lowering_blockers:
             item = control_frame(

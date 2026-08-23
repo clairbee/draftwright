@@ -7,10 +7,12 @@ import pytest
 from draftwright._pmi_part21 import (
     DatumOccurrenceFact,
     GeometricToleranceFact,
+    ManufacturingRequirementFact,
     match_datum_occurrence,
     match_geometric_tolerance,
     read_datum_occurrences,
     read_geometric_tolerances,
+    read_manufacturing_requirements,
 )
 
 CTC01 = Path(__file__).parent / "fixtures" / "nist_ctc_01_asme1_ap242.stp"
@@ -43,6 +45,12 @@ def _read_datums(tmp_path, name: str, *instances: str):
     step = tmp_path / f"{name}.step"
     step.write_text(_step(*instances), encoding="utf-8")
     return read_datum_occurrences(step)
+
+
+def _read_requirements(tmp_path, name: str, *instances: str):
+    step = tmp_path / f"{name}.step"
+    step.write_text(_step(*instances), encoding="utf-8")
+    return read_manufacturing_requirements(step)
 
 
 def test_ctc01_geometric_tolerance_facts_are_exact():
@@ -136,6 +144,159 @@ def test_ctc01_datum_occurrences_preserve_context_and_feature_identity():
         ),
     ]
     assert {fact.datum_feature_id for fact in facts} == {"#34", "#35", "#36"}
+
+
+def test_ctc01_has_no_custom_manufacturing_requirement_properties():
+    assert read_manufacturing_requirements(CTC01) == ()
+
+
+def test_manufacturing_requirement_preserves_authoritative_text_and_geometry_chain(tmp_path):
+    facts = _read_requirements(
+        tmp_path,
+        "associated-requirement",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('knurl','Straight knurl, 1.0 mm pitch');",
+        "#2=REPRESENTATION('knurl requirement',(#1),#99);",
+        "#3=PROPERTY_DEFINITION('manufacturing requirement','knurl',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+        "#5=SHAPE_ASPECT('KNURL, 1.0 PITCH','',#98,.T.);",
+        "#6=GEOMETRIC_ITEM_SPECIFIC_USAGE('KNURL, 1.0 PITCH','',#5,#97,#96);",
+        "#7=DRAUGHTING_MODEL_ITEM_ASSOCIATION('semantic link','',#5,#95,#8);",
+        "#8=DRAUGHTING_CALLOUT('Straight knurl requirement',(#94));",
+    )
+
+    assert facts == (
+        ManufacturingRequirementFact(
+            entity_id="#3",
+            semantic_name="knurl",
+            text="Straight knurl, 1.0 mm pitch",
+            representation_id="#2",
+            descriptive_item_id="#1",
+            callout_ids=("#8",),
+            shape_aspect_ids=("#5",),
+            reference_item_ids=("#96",),
+        ),
+    )
+
+
+def test_escaped_part21_requirement_category_cannot_bypass_the_inventory_guard(tmp_path):
+    encoded_category = (
+        r"\X2\006D0061006E00750066006100630074007500720069006E006700200072006500710075006900720065006D0065006E0074\X0"
+        + "\\"
+    )
+    facts = _read_requirements(
+        tmp_path,
+        "encoded-requirement-category",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('thread','M3 x 0.5-6g RH');",
+        "#2=REPRESENTATION('external thread requirement',(#1),#99);",
+        f"#3=PROPERTY_DEFINITION('{encoded_category}','external thread',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+    )
+
+    assert [(fact.entity_id, fact.semantic_name, fact.text) for fact in facts] == [
+        ("#3", "external thread", "M3 x 0.5-6g RH")
+    ]
+
+
+def test_comment_between_entity_name_and_parameters_cannot_bypass_inventory_guard(tmp_path):
+    facts = _read_requirements(
+        tmp_path,
+        "commented-property-definition",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('thread','M3 x 0.5-6g RH');",
+        "#2=REPRESENTATION('external thread requirement',(#1),#99);",
+        "#3=PROPERTY_DEFINITION/* valid Part 21 comment */('manufacturing requirement','external thread',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+    )
+
+    assert [(fact.entity_id, fact.semantic_name, fact.text) for fact in facts] == [
+        ("#3", "external thread", "M3 x 0.5-6g RH")
+    ]
+
+
+def test_unassociated_general_requirement_remains_authoritative_source_intent(tmp_path):
+    facts = _read_requirements(
+        tmp_path,
+        "general-requirement",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('general tolerances','ISO 2768-m');",
+        "#2=REPRESENTATION('general tolerances requirement',(#1),#99);",
+        "#3=PROPERTY_DEFINITION('manufacturing requirement','general tolerances',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+    )
+
+    assert facts == (
+        ManufacturingRequirementFact(
+            entity_id="#3",
+            semantic_name="general tolerances",
+            text="ISO 2768-m",
+            representation_id="#2",
+            descriptive_item_id="#1",
+        ),
+    )
+
+
+def test_each_matched_callout_and_shape_aspect_must_have_a_complete_association(tmp_path):
+    (fact,) = _read_requirements(
+        tmp_path,
+        "partially-associated-requirement",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('knurl','Straight knurl');",
+        "#2=REPRESENTATION('knurl requirement',(#1),#99);",
+        "#3=PROPERTY_DEFINITION('manufacturing requirement','knurl',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+        "#5=SHAPE_ASPECT('first','',#98,.T.);",
+        "#6=GEOMETRIC_ITEM_SPECIFIC_USAGE('first','',#5,#97,#96);",
+        "#7=DRAUGHTING_MODEL_ITEM_ASSOCIATION('first','',#5,#95,#8);",
+        "#8=DRAUGHTING_CALLOUT('Head knurl requirement',(#94));",
+        "#9=DRAUGHTING_CALLOUT('Shaft knurl requirement',(#93));",
+        "#10=DRAUGHTING_MODEL_ITEM_ASSOCIATION('third','',#12,#95,#11);",
+        "#11=DRAUGHTING_CALLOUT('Backup knurl requirement',(#92));",
+        "#12=SHAPE_ASPECT('third','',#98,.T.);",
+    )
+
+    assert fact.callout_ids == ("#8", "#9", "#11")
+    assert fact.shape_aspect_ids == ("#5", "#12")
+    assert fact.reference_item_ids == ("#96",)
+    assert fact.reason == (
+        "matched semantic callout(s) have no shape-aspect association: #9; "
+        "associated shape aspect(s) have no representation items: #12"
+    )
+
+
+def test_dangling_representation_keeps_its_identity_without_hiding_valid_siblings(tmp_path):
+    facts = _read_requirements(
+        tmp_path,
+        "dangling-representation",
+        "#1=DESCRIPTIVE_REPRESENTATION_ITEM('thread','M3 x 0.5-6g RH');",
+        "#2=REPRESENTATION('external thread requirement',(#1),#99);",
+        "#3=PROPERTY_DEFINITION('manufacturing requirement','external thread',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+        "#5=PROPERTY_DEFINITION('manufacturing requirement','knurl',#98);",
+        "#6=PROPERTY_DEFINITION_REPRESENTATION(#5,#404);",
+    )
+
+    assert [(fact.entity_id, fact.text) for fact in facts] == [
+        ("#3", "M3 x 0.5-6g RH"),
+        ("#5", ""),
+    ]
+    assert facts[1].reason == (
+        "linked representation #404 is unavailable or malformed; "
+        "linked representation has 0 descriptive items"
+    )
+
+
+def test_malformed_manufacturing_requirement_is_retained_with_explicit_reason(tmp_path):
+    (fact,) = _read_requirements(
+        tmp_path,
+        "ambiguous-requirement",
+        "#1=REPRESENTATION('first',(),#99);",
+        "#2=REPRESENTATION('second',(),#99);",
+        "#3=PROPERTY_DEFINITION('manufacturing requirement','thread',#98);",
+        "#4=PROPERTY_DEFINITION_REPRESENTATION(#3,#1);",
+        "#5=PROPERTY_DEFINITION_REPRESENTATION(#3,#2);",
+    )
+
+    assert fact.entity_id == "#3"
+    assert fact.semantic_name == "thread"
+    assert fact.text == ""
+    assert fact.reason == "manufacturing requirement has 2 linked representations"
 
 
 def test_datum_correspondence_requires_exact_context_and_letter():

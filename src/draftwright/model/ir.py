@@ -1400,6 +1400,8 @@ class PmiFeature:
     datum_contexts: tuple[str, ...] = ()
     reference_item_ids: tuple[str, ...] = ()
     reference_axis: str = ""
+    semantic_name: str = ""
+    shape_aspect_ids: tuple[str, ...] = ()
     kind: ClassVar[str] = "pmi"
 
     def parameters(self) -> list[DimParameter]:

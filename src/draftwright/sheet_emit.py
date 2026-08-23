@@ -395,6 +395,12 @@ def _raw_pmi_expr(f) -> str:
     reference_axis = (
         f", reference_axis={f.reference_axis!r}" if getattr(f, "reference_axis", "") else ""
     )
+    semantic_name = (
+        f", semantic_name={f.semantic_name!r}" if getattr(f, "semantic_name", "") else ""
+    )
+    shape_aspect_ids = (
+        f", shape_aspect_ids={f.shape_aspect_ids!r}" if getattr(f, "shape_aspect_ids", ()) else ""
+    )
     return (
         "PmiFeature("
         f"frame=Frame({_pt(f.frame.origin)}, {f.frame.axis!r}), "
@@ -402,7 +408,7 @@ def _raw_pmi_expr(f) -> str:
         f"dominant_axis={f.dominant_axis!r}, ref_bbox={_bbox_arg(f.ref_bbox)}, "
         f"ref_pts=tuple({_pts_arg(f.ref_pts)}){source_id}{datum_refs}{part21_id}"
         f"{source_category}{gtol_modifiers}{lowering_blockers}{source_ids}{datum_contexts}"
-        f"{reference_item_ids}{reference_axis}"
+        f"{reference_item_ids}{reference_axis}{semantic_name}{shape_aspect_ids}"
         ")"
     )
 

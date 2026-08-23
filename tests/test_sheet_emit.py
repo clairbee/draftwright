@@ -455,6 +455,8 @@ class TestEmit:
             source_category="geometric_tolerance",
             gtol_modifiers=("common_zone",),
             lowering_blockers=("geometric-tolerance modifier 'common_zone' is not supported",),
+            semantic_name="probe requirement",
+            shape_aspect_ids=("#456",),
         )
         model = dataclasses.replace(model, features=[*model.features, source])
 
@@ -475,6 +477,8 @@ class TestEmit:
         assert restored.lowering_blockers == (
             "geometric-tolerance modifier 'common_zone' is not supported",
         )
+        assert restored.semantic_name == "probe requirement"
+        assert restored.shape_aspect_ids == ("#456",)
 
     def test_measured_dimension_rejects_unrenderable_kind(self):
         from draftwright import Sheet

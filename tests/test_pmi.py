@@ -8,7 +8,7 @@ import pytest
 from build123d import Box, export_step
 
 from draftwright import build_drawing, extract_pmi, extract_pmi_report
-from draftwright._pmi_part21 import GeometricToleranceFact
+from draftwright._pmi_part21 import GeometricToleranceFact, ManufacturingRequirementFact
 from draftwright.pmi import _PMI_AVAILABLE, PmiExtractionReport, PmiRecord
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -254,6 +254,97 @@ class TestExtractPmi:
             for source in report.sources
             if source.outcome in ("extracted", "partially_extracted")
         }
+
+    def test_report_inventories_semantic_manufacturing_requirements(self, monkeypatch):
+        import draftwright.pmi as pmi_module
+
+        fact = ManufacturingRequirementFact(
+            entity_id="#probe",
+            semantic_name="external thread",
+            text="M3 x 0.5-6g RH",
+            representation_id="#representation",
+            descriptive_item_id="#description",
+            callout_ids=("#callout",),
+            shape_aspect_ids=("#aspect",),
+            reference_item_ids=("#face",),
+        )
+        monkeypatch.setattr(
+            pmi_module, "read_manufacturing_requirements", lambda _step_file: (fact,)
+        )
+
+        report = extract_pmi_report(CTC01)
+        source = next(
+            item for item in report.sources if item.source_id == "manufacturing_requirement:#probe"
+        )
+        record = next(
+            item for item in report.records if item.source_id == "manufacturing_requirement:#probe"
+        )
+
+        assert (source.category, source.outcome, source.reason) == (
+            "manufacturing_requirement",
+            "extracted",
+            "",
+        )
+        assert (
+            record.kind,
+            record.label,
+            record.part21_id,
+            record.source_category,
+            record.semantic_name,
+            record.shape_aspect_ids,
+            record.reference_item_ids,
+        ) == (
+            "external_thread",
+            "M3 x 0.5-6g RH",
+            "#probe",
+            "manufacturing_requirement",
+            "external thread",
+            ("#aspect",),
+            ("#face",),
+        )
+
+    def test_requirement_part21_failure_is_a_fail_closed_source_outcome(self, monkeypatch):
+        import draftwright.pmi as pmi_module
+
+        def fail(_step_file):
+            raise RuntimeError("mutation: requirement parser failed")
+
+        monkeypatch.setattr(pmi_module, "read_manufacturing_requirements", fail)
+
+        report = extract_pmi_report(CTC01)
+        source = next(
+            item for item in report.sources if item.source_id == "manufacturing_requirement:part21"
+        )
+
+        assert source.category == "manufacturing_requirement"
+        assert source.outcome == "not_extracted"
+        assert source.reason == (
+            "Part21 manufacturing-requirement read failed: "
+            "RuntimeError: mutation: requirement parser failed"
+        )
+
+    def test_part21_requirements_survive_when_xcaf_is_unavailable(self, monkeypatch):
+        import draftwright.pmi as pmi_module
+
+        fact = ManufacturingRequirementFact(
+            entity_id="#probe",
+            semantic_name="knurl",
+            text="Straight knurl, 1.0 mm pitch",
+        )
+        monkeypatch.setattr(
+            pmi_module, "read_manufacturing_requirements", lambda _step_file: (fact,)
+        )
+        monkeypatch.setattr(pmi_module, "_PMI_AVAILABLE", False)
+
+        report = extract_pmi_report(CTC01)
+
+        assert report.error == "OCP SetGDTMode is unavailable"
+        assert [source.source_id for source in report.sources] == [
+            "manufacturing_requirement:#probe"
+        ]
+        assert [(record.source_id, record.label) for record in report.records] == [
+            ("manufacturing_requirement:#probe", "Straight knurl, 1.0 mm pitch")
+        ]
 
     def test_ctc01_datum_occurrences_project_to_three_feature_definitions(
         self, ctc01_extraction_report

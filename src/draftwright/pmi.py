@@ -31,6 +31,7 @@ from draftwright._pmi_part21 import (
     match_geometric_tolerance,
     read_datum_occurrences,
     read_geometric_tolerances,
+    read_manufacturing_requirements,
 )
 
 _log = logging.getLogger(__name__)
@@ -156,7 +157,9 @@ _SUPPORTED_GTOL_SCOPE_MODIFIERS = frozenset(("all_around", "all_over"))
 # Data classes
 # ---------------------------------------------------------------------------
 
-PmiSourceCategory = Literal["dimension", "geometric_tolerance", "datum"]
+PmiSourceCategory = Literal[
+    "dimension", "geometric_tolerance", "datum", "manufacturing_requirement"
+]
 
 
 @dataclass(frozen=True)
@@ -165,7 +168,7 @@ class PmiRecord:
 
     Attributes:
         kind:           Human-readable category (``"linear"``, ``"diameter"``,
-                        ``"angular"``, ``"gtol"``, ``"datum"``).
+                        ``"angular"``, ``"gtol"``, ``"datum"``, ``"external_thread"``).
         type_code:      Raw OCCT enum integer.
         value:          Nominal value in mm (or degrees for angular).
         upper_tol:      Upper tolerance in mm, or ``None``.
@@ -192,6 +195,8 @@ class PmiRecord:
         datum_contexts: Tolerance semantic names in which a datum definition is referenced.
         reference_item_ids: Exact Part21 representation items bound to a datum feature.
         reference_axis: Axis normal to a proven datum reference plane.
+        semantic_name: Stable source name for a semantic manufacturing requirement.
+        shape_aspect_ids: Part21 shape aspects associating a semantic requirement to geometry.
     """
 
     kind: str
@@ -220,6 +225,8 @@ class PmiRecord:
     datum_contexts: tuple[str, ...] = ()
     reference_item_ids: tuple[str, ...] = ()
     reference_axis: str = ""
+    semantic_name: str = ""
+    shape_aspect_ids: tuple[str, ...] = ()
 
 
 PmiExtractionOutcome = Literal[
@@ -878,26 +885,101 @@ def _geometric_tolerance_record(
 # ---------------------------------------------------------------------------
 
 
+def _manufacturing_requirement_projection(
+    step_file: str | Path,
+) -> tuple[tuple[PmiSourceEntity, ...], tuple[PmiRecord, ...]]:
+    """Build the Part21-only source/record projection independently of XCAF availability."""
+    sources: list[PmiSourceEntity] = []
+    records: list[PmiRecord] = []
+    try:
+        requirement_facts = read_manufacturing_requirements(step_file)
+    except Exception as exc:
+        reason = f"Part21 manufacturing-requirement read failed: {_failure_reason(exc)}"
+        sources.append(
+            PmiSourceEntity(
+                source_id="manufacturing_requirement:part21",
+                category="manufacturing_requirement",
+                type_code=None,
+                outcome="not_extracted",
+                reason=reason,
+            )
+        )
+        _log.debug("PMI manufacturing-requirement inventory unavailable: %s", exc)
+        return tuple(sources), ()
+
+    for requirement in requirement_facts:
+        source_id = f"manufacturing_requirement:{requirement.entity_id}"
+        if requirement.text:
+            kind = (
+                "_".join(requirement.semantic_name.lower().split()) or "manufacturing_requirement"
+            )
+            blockers = (requirement.reason,) if requirement.reason else ()
+            records.append(
+                PmiRecord(
+                    kind=kind,
+                    type_code=None,
+                    value=0.0,
+                    label=requirement.text,
+                    source_id=source_id,
+                    part21_id=requirement.entity_id,
+                    source_category="manufacturing_requirement",
+                    lowering_blockers=blockers,
+                    reference_item_ids=requirement.reference_item_ids,
+                    semantic_name=requirement.semantic_name,
+                    shape_aspect_ids=requirement.shape_aspect_ids,
+                )
+            )
+        sources.append(
+            PmiSourceEntity(
+                source_id=source_id,
+                category="manufacturing_requirement",
+                type_code=None,
+                outcome=(
+                    "partially_extracted"
+                    if requirement.text and requirement.reason
+                    else "extracted"
+                    if requirement.text
+                    else "not_extracted"
+                ),
+                reason=requirement.reason,
+            )
+        )
+    return tuple(sources), tuple(records)
+
+
 def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
     """Inventory and extract semantic PMI from an AP242 STEP file in one XCAF pass.
 
-    The report retains one source outcome for every dimension, geometric tolerance and
-    datum-reference occurrence. Graphical presentation-only dimension labels are inventoried
-    but are not manufacturing requirements. Repeated datum occurrences project onto their
-    authored datum-feature definition without shrinking the source denominator.
+    The report retains one source outcome for every dimension, geometric tolerance,
+    datum-reference occurrence and semantic manufacturing requirement. Graphical
+    presentation-only dimension labels are inventoried but are not manufacturing requirements.
+    Repeated datum occurrences project onto their authored datum-feature definition without
+    shrinking the source denominator.
 
-    Returns an empty report (with a report-level error where applicable) when:
+    Returns an empty report (with a report-level error where applicable) when no source
+    identities can be recovered and:
 
-    - the file contains no GDT data;
-    - OCP's GDT support is unavailable (``_PMI_AVAILABLE`` is False);
+    - the file contains neither XCAF GDT data nor semantic manufacturing requirements;
     - the file uses AP203/AP214 which carry no semantic PMI.
+
+    Part21-only manufacturing requirements remain inventoried even when OCP's GDT support is
+    unavailable or the XCAF transfer fails; the report also retains that global XCAF error.
 
     Does **not** modify the solid geometry — purely a read-only second pass.
     """
+    requirement_sources, requirement_records = _manufacturing_requirement_projection(step_file)
+
+    def failed(reason: str) -> PmiExtractionReport:
+        return PmiExtractionReport(
+            sources=requirement_sources,
+            records=requirement_records,
+            error=reason,
+        )
+
     if not _PMI_AVAILABLE:
         reason = "OCP SetGDTMode is unavailable"
         _log.debug("PMI extraction unavailable (%s)", reason)
-        return PmiExtractionReport(error=reason)
+        return failed(reason)
 
     path = str(step_file)
     doc = TDocStd_Document(TCollection_ExtendedString("XCAF"))
@@ -909,21 +991,21 @@ def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
     except Exception as exc:
         reason = f"ReadFile failed: {_failure_reason(exc)}"
         _log.warning("PMI extraction: %s for %s", reason, Path(step_file).name)
-        return PmiExtractionReport(error=reason)
+        return failed(reason)
     if status != IFSelect_RetDone:
         reason = f"ReadFile failed with status {status}"
         _log.warning("PMI extraction: %s for %s", reason, Path(step_file).name)
-        return PmiExtractionReport(error=reason)
+        return failed(reason)
     try:
         transferred = reader.Transfer(doc)
     except Exception as exc:
         reason = f"Transfer failed: {_failure_reason(exc)}"
         _log.warning("PMI extraction: %s for %s", reason, Path(step_file).name)
-        return PmiExtractionReport(error=reason)
+        return failed(reason)
     if transferred is False:
         reason = "Transfer failed"
         _log.warning("PMI extraction: %s for %s", reason, Path(step_file).name)
-        return PmiExtractionReport(error=reason)
+        return failed(reason)
 
     main = doc.Main()
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(main)
@@ -1128,6 +1210,12 @@ def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
             )
     records.extend(_coalesce_datum_records(datum_records))
 
+    # XCAF exposes neither authoritative descriptive text nor its shape-aspect association.
+    # The independent Part21 projection was collected before XCAF so it survives every early
+    # transfer failure; append it after XCAF categories to keep the established report order.
+    sources.extend(requirement_sources)
+    records.extend(requirement_records)
+
     semantic_dimensions = sum(
         source.category == "dimension" and source.outcome != "presentation_only"
         for source in sources
@@ -1158,11 +1246,23 @@ def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
         source.category == "datum" and source.outcome == "partially_extracted"
         for source in sources
     )
+    extracted_requirements = sum(
+        source.category == "manufacturing_requirement" and source.outcome == "extracted"
+        for source in sources
+    )
+    partial_requirements = sum(
+        source.category == "manufacturing_requirement" and source.outcome == "partially_extracted"
+        for source in sources
+    )
+    requirement_source_count = sum(
+        source.category == "manufacturing_requirement" for source in sources
+    )
 
     _log.info(
         "PMI extracted from %s: %d/%d complete semantic dims (%d partial, "
         "%d presentation-only), "
-        "%d/%d complete gtols (%d partial), %d/%d datum occurrences (%d partial)",
+        "%d/%d complete gtols (%d partial), %d/%d datum occurrences (%d partial), "
+        "%d/%d manufacturing requirements (%d partial)",
         Path(step_file).name,
         extracted_dimensions,
         semantic_dimensions,
@@ -1174,6 +1274,9 @@ def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
         extracted_datums,
         datums.Length(),
         partial_datums,
+        extracted_requirements,
+        requirement_source_count,
+        partial_requirements,
     )
     return PmiExtractionReport(sources=tuple(sources), records=tuple(records))
 
