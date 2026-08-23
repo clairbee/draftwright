@@ -1728,6 +1728,75 @@ def build_drawing(
                 return issues, blockers, "required_outcome_dropped"
             return issues, blockers, None
 
+        def _try_larger_standard_pages(
+            starting_page,
+            *,
+            include_iso,
+            reason,
+            fallback_views,
+            require_axial_coverage,
+        ):
+            """Try the bounded standard-page tail under one settled correction policy."""
+            standard_pages = tuple(_PAGE_SIZES.items())
+            original_index = next(
+                (
+                    index
+                    for index, (_name, dimensions) in enumerate(standard_pages)
+                    if tuple(dimensions) == starting_page
+                ),
+                None,
+            )
+            larger_pages = (
+                standard_pages[original_index + 1 :] if original_index is not None else ()
+            )
+            for page_name, page_dimensions in larger_pages:
+                try:
+                    larger = _build(
+                        None,
+                        arrangements=(settled_arrangement,),
+                        include_iso=include_iso,
+                        page_override=page_name,
+                    )
+                except (ValueError, Standard_Failure) as exc:
+                    if not _is_expected_candidate_build_failure(exc):
+                        raise
+                    _log.info(
+                        "automatic page escalation to %s rejected (candidate build failed: %s)",
+                        page_name,
+                        exc,
+                    )
+                    _record_attempt(
+                        None,
+                        "error",
+                        reason=reason,
+                        views=fallback_views,
+                        page=page_dimensions,
+                        error=str(exc),
+                    )
+                    continue
+                larger = _retain_arrangement(larger)
+                issues, blockers, rejection = _qualify_candidate(
+                    larger,
+                    require_axial_coverage=require_axial_coverage,
+                )
+                if rejection is None:
+                    _record_attempt(
+                        larger.scale,
+                        "complete",
+                        reason=reason,
+                        candidate=larger,
+                    )
+                    return larger, issues
+                _record_attempt(
+                    larger.scale,
+                    "rejected",
+                    blockers,
+                    reason=reason,
+                    rejection=rejection,
+                    candidate=larger,
+                )
+            return None, None
+
         # #1155: the compose-time estimate conservatively reserves an enlarged
         # detail for a crowded run.  Some larger preferred scales make that run
         # readable inline, so the detail reservation disappears and the same page
@@ -1793,6 +1862,24 @@ def build_drawing(
                     rejection=rejection,
                     candidate=candidate_drawing,
                 )
+
+            # A conservative detail reservation may be truthful yet still dominate the
+            # sheet after every same-page measured upscale is rejected.  Page preference is
+            # subordinate to a complete primary-view drawing here too: use the same bounded
+            # standard-page tail as the optional-ISO correction, retaining ISO because this
+            # branch is correcting the detail reservation alone.
+            if _has_detail_view(drawing.views) and page is None:
+                larger, issues = _try_larger_standard_pages(
+                    original_page,
+                    include_iso=_include_iso,
+                    reason="page_escalation_after_detail",
+                    fallback_views=drawing.views,
+                    require_axial_coverage=True,
+                )
+                if larger is not None:
+                    drawing = larger
+                    settled_issues = issues
+                    replanned = True
 
         # #443/#1299: a pictorial view is useful context, but it cannot outrank the
         # dimensions or other required annotations needed to manufacture a part.
@@ -1921,72 +2008,19 @@ def build_drawing(
                             # through the established fixed-page policy and must pass the
                             # same axial, structural, and required-outcome gates above.
                             if page is None:
-                                standard_pages = tuple(_PAGE_SIZES.items())
-                                original_index = next(
-                                    (
-                                        index
-                                        for index, (_name, dimensions) in enumerate(standard_pages)
-                                        if tuple(dimensions) == original_page
+                                larger, issues = _try_larger_standard_pages(
+                                    original_page,
+                                    include_iso=False,
+                                    reason="page_escalation_after_optional_iso",
+                                    fallback_views=tuple(
+                                        name for name in drawing.views if name != "iso"
                                     ),
-                                    None,
+                                    require_axial_coverage=True,
                                 )
-                                larger_pages = (
-                                    standard_pages[original_index + 1 :]
-                                    if original_index is not None
-                                    else ()
-                                )
-                                for page_name, page_dimensions in larger_pages:
-                                    try:
-                                        larger = _build(
-                                            None,
-                                            arrangements=(settled_arrangement,),
-                                            include_iso=False,
-                                            page_override=page_name,
-                                        )
-                                    except (ValueError, Standard_Failure) as exc:
-                                        if not _is_expected_candidate_build_failure(exc):
-                                            raise
-                                        _log.info(
-                                            "optional-ISO page escalation to %s rejected "
-                                            "(candidate build failed: %s)",
-                                            page_name,
-                                            exc,
-                                        )
-                                        _record_attempt(
-                                            None,
-                                            "error",
-                                            reason="page_escalation_after_optional_iso",
-                                            views=tuple(
-                                                name for name in drawing.views if name != "iso"
-                                            ),
-                                            page=page_dimensions,
-                                            error=str(exc),
-                                        )
-                                        continue
-                                    larger = _retain_arrangement(larger)
-                                    issues, blockers, page_rejection = _qualify_candidate(
-                                        larger,
-                                        require_axial_coverage=True,
-                                    )
-                                    if page_rejection is None:
-                                        _record_attempt(
-                                            larger.scale,
-                                            "complete",
-                                            reason="page_escalation_after_optional_iso",
-                                            candidate=larger,
-                                        )
-                                        drawing = larger
-                                        settled_issues = issues
-                                        replanned = True
-                                        break
-                                    _record_attempt(
-                                        larger.scale,
-                                        "rejected",
-                                        blockers,
-                                        reason="page_escalation_after_optional_iso",
-                                        rejection=page_rejection,
-                                        candidate=larger,
-                                    )
+                                if larger is not None:
+                                    drawing = larger
+                                    settled_issues = issues
+                                    replanned = True
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.

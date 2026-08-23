@@ -215,6 +215,87 @@ def test_required_drop_without_axial_gap_uses_the_same_bounded_page_recovery(mon
     ]
 
 
+def test_conservative_detail_recovery_uses_a_larger_complete_primary_view(monkeypatch):
+    """A truthful but dominant detail is not preferred over a bounded clean sheet."""
+
+    class FakeDrawing:
+        def __init__(self, *, page, scale, include_iso, detail):
+            self.page_w, self.page_h = page
+            self.scale = scale
+            self.views = {"front": object()}
+            if include_iso:
+                self.views["iso"] = object()
+            if detail:
+                self.views["detail_a"] = object()
+            self.solve_trace = None
+
+        def model(self):
+            return SimpleNamespace(authored_dimensions=None)
+
+        def lint(self, *, physical=False):
+            return ()
+
+    def fake_one_pass(
+        _step_file,
+        *,
+        scale,
+        page,
+        _include_iso,
+        _analysis_sink,
+        **_kwargs,
+    ):
+        _analysis_sink(
+            SimpleNamespace(
+                arrangement=builder.ARRANGEMENTS[0],
+                part=object(),
+                prof=object(),
+            )
+        )
+        if page == "A3":
+            return FakeDrawing(
+                page=(420.0, 297.0),
+                scale=5.0,
+                include_iso=_include_iso,
+                detail=False,
+            )
+        assert page in {None, (297.0, 210.0)}
+        return FakeDrawing(
+            page=(297.0, 210.0),
+            scale=2.0 if scale is None else scale,
+            include_iso=_include_iso,
+            detail=True,
+        )
+
+    monkeypatch.setattr(builder, "_build_drawing_once", fake_one_pass)
+    monkeypatch.setattr(builder, "lint_axial_coverage", lambda *_args, **_kwargs: ())
+
+    drawing = builder.build_drawing(object())
+
+    assert (drawing.page_w, drawing.page_h, drawing.scale) == (420.0, 297.0, 5.0)
+    assert "detail_a" not in drawing.views
+    assert [
+        (
+            attempt["page"],
+            attempt["scale"],
+            attempt["status"],
+            attempt["reason"],
+            attempt.get("rejection"),
+        )
+        for attempt in drawing.scale_decision["attempts"]
+    ] == [
+        (
+            (297.0, 210.0),
+            2.0,
+            "detail_reservation_conservative",
+            "measured_upscale",
+            None,
+        ),
+        ((297.0, 210.0), 5.0, "rejected", "measured_upscale", "recovery_detail_retained"),
+        ((297.0, 210.0), 10.0, "rejected", "measured_upscale", "recovery_detail_retained"),
+        ((420.0, 297.0), 5.0, "complete", "page_escalation_after_detail", None),
+    ]
+
+
 def test_expected_larger_page_build_failure_is_recorded_before_next_page(monkeypatch):
     class FakeDrawing:
         def __init__(self, *, page, include_iso):
