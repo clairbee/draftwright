@@ -10,6 +10,8 @@ from build123d import Align, Cylinder, Pos, Rotation
 import draftwright.builder as builder
 from draftwright import build_drawing
 from draftwright.linting import LintIssue
+from draftwright.model.ir import Frame, HoleFeature
+from draftwright.model.planner import DimensionId
 
 GRM03 = Path("/Users/paul/steps/GRM-03_thumbwheel_drive_screw_AP242_PMI.step")
 GRM03_SHA256 = "4b6462b9cc9f0d419250933bd77fb305f9cfebb7ec2b3f377008732876010a21"
@@ -146,11 +148,19 @@ def test_no_iso_proposal_on_different_page_reselects_scale_for_original_page(mon
 def test_required_drop_without_axial_gap_uses_the_same_bounded_page_recovery(monkeypatch):
     """Complete shoulders do not make a sheet complete when a callout was lost."""
 
+    source_id = "manufacturing_requirement:#2004"
+    tapped_hole = HoleFeature(
+        Frame((0.0, 0.0, 0.0), "x"),
+        1.6,
+        8.0,
+        False,
+        thread=SimpleNamespace(source_ids=(source_id,)),
+    )
     dropped = LintIssue(
         severity="warning",
         code="callout_dropped",
         message="required typed-PMI callout has no route",
-        source_ids=("manufacturing_requirement:#2000",),
+        measurement_ids=(DimensionId(tapped_hole, "bore.diameter"),),
         outcome_stage="placement",
     )
 
@@ -213,6 +223,7 @@ def test_required_drop_without_axial_gap_uses_the_same_bounded_page_recovery(mon
         ((297.0, 210.0), "rejected", "remove_optional_iso", "required_outcome_dropped"),
         ((420.0, 297.0), "complete", "page_escalation_after_optional_iso", None),
     ]
+    assert drawing.scale_decision["attempts"][0]["blockers"][0]["source_ids"] == (source_id,)
 
 
 def test_complete_detail_drawing_stays_on_its_original_page(monkeypatch):
