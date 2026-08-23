@@ -14,7 +14,7 @@ import collections
 import json
 import os
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -1442,7 +1442,7 @@ def _scale_attempt(
     *,
     error: str | None = None,
     reason: str | None = None,
-    views: Sequence[str] | None = None,
+    views: Iterable[str] | None = None,
     page: tuple[float, float] | None = None,
 ) -> dict:
     """One plain-data trial in an explicit-scale decision."""
@@ -1639,7 +1639,9 @@ def build_drawing(
         replan_attempts = []
         arrangement_decision = getattr(drawing, "arrangement_decision", None)
         settled_arrangement = (
-            arrangement_decision["chosen"] if arrangement_decision is not None else built_arrangement
+            arrangement_decision["chosen"]
+            if arrangement_decision is not None
+            else built_arrangement
         )
 
         def _retain_arrangement(candidate):

@@ -886,7 +886,7 @@ def _locate_across(dwg, ctx, a: Analysis, off):
         def _retry():
             # A fallback is never allowed to create an annotation in a view the
             # resolved plan omitted.  It also runs only after every shared corridor
-            # has drained, so its solitary carve cannot pre-empt a later candidate.
+            # has drained, so its solitary carve cannot preempt a later candidate.
             if "plan" not in dwg.views:
                 _off_axis_drop(
                     dwg,
