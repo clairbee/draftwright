@@ -14,6 +14,7 @@ from typing import Literal
 
 from b123d_recognisers import HoleSpec, RecognitionResult, countersink_matches_hole
 
+from draftwright._core import _decode_hole_location_fact
 from draftwright._geometry import _END_ON, _is_principal_axis
 from draftwright.linting.issues import LintIssue, is_placement_drop
 
@@ -579,13 +580,11 @@ def _index_hole_evidence(registry) -> _HoleEvidence:
             )
             record_representation(feature, "grouping.count")
         for fact in getattr(annotation, "covers_hole_locations", ()):
-            if len(fact) == 3:
-                feature, parameter, point = fact
-            else:  # compatibility with legacy/external structured facts
-                measurement, point = fact
-                feature = getattr(measurement, "feature", None)
-                parameter = getattr(measurement, "parameter", None)
-            if getattr(feature, "kind", None) in {"hole", "pattern"} and parameter is not None:
+            decoded = _decode_hole_location_fact(fact)
+            if decoded is None:
+                continue
+            feature, parameter, point = decoded
+            if getattr(feature, "kind", None) in {"hole", "pattern"}:
                 locations[(feature, parameter)].add(_normalised_location(feature, point))
                 record_representation(feature, parameter)
         for feature, point, view in getattr(annotation, "covers_hole_centers", ()):

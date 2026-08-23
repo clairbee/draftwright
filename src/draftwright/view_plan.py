@@ -243,6 +243,26 @@ class ViewConstraints:
             )
         )
 
+    @property
+    def is_automatic_only(self) -> bool:
+        """Whether this is the unmodified automatic view source.
+
+        An explicit ``auto_views()`` states the same source as the legacy default,
+        so it must not disable automatic corrective planning merely because
+        ``principal_source`` is non-``None``. Any authored/added view, relation, or
+        pin makes the result caller-constrained and therefore ineligible.
+        """
+        return (
+            self.principal_source in (None, "automatic")
+            and self.derived_source in (None, "automatic")
+            and not self.principals
+            and not self.added_principals
+            and not self.derived
+            and not self.added_derived
+            and not self.relations
+            and not self.pins
+        )
+
 
 @dataclass(frozen=True)
 class ViewPlacement:

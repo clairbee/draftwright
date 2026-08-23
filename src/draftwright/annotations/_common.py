@@ -20,6 +20,7 @@ from build123d_drafting.helpers import DEFAULT_FONT_PATH, Dimension, Note, SafeD
 
 from draftwright._core import (  # noqa: F401 — _anno_box re-exported (#700)
     _anno_box,
+    _decode_hole_location_fact,
     _text_size,
     place_annotation,
 )
@@ -129,7 +130,10 @@ def _annotation_hole_features(registry, name, annotation) -> frozenset:
         if getattr(feature, "kind", None) in {"hole", "pattern"}:
             features.add(feature)
     for fact in getattr(annotation, "covers_hole_locations", ()):
-        feature = fact[0] if len(fact) == 3 else getattr(fact[0], "feature", None)
+        decoded = _decode_hole_location_fact(fact)
+        if decoded is None:
+            continue
+        feature, _parameter, _point = decoded
         if getattr(feature, "kind", None) in {"hole", "pattern"}:
             features.add(feature)
     for feature, _requirement, _count in getattr(

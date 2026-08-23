@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from draftwright import build_drawing
+import pytest
+from build123d import import_step
+
+from draftwright import Sheet, SoftDeprecationWarning, build_drawing
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "grm03_thumbwheel_drive_screw.step"
 
@@ -13,15 +16,13 @@ def test_grm03_replans_optional_iso_for_truthful_step_lengths():
     assert "iso" not in drawing.views
     assert drawing.scale == 5.0
     assert drawing.scale_decision["status"] == "automatic_replanned"
-    assert drawing.scale_decision["attempted_scales"] == (2.0, 5.0, 5.0)
+    assert drawing.scale_decision["attempted_scales"] == (2.0, 5.0)
     assert [item["views"] for item in drawing.scale_decision["attempts"]] == [
         ("front", "plan", "side", "iso"),
-        ("front", "plan", "side"),
         ("front", "plan", "side"),
     ]
     assert [item["status"] for item in drawing.scale_decision["attempts"]] == [
         "axial_coverage_incomplete",
-        "scale_proposal",
         "complete",
     ]
     assert all(item["page"] == (297.0, 210.0) for item in drawing.scale_decision["attempts"])
@@ -36,6 +37,23 @@ def test_grm03_replans_optional_iso_for_truthful_step_lengths():
 
 def test_axial_replan_is_disabled_without_automatic_dimensions():
     drawing = build_drawing(_FIXTURE, title="PART", auto_dims=False)
+
+    assert "iso" in drawing.views
+    assert drawing.scale_decision["attempts"] == ()
+
+
+def test_plain_sheet_auto_views_keeps_the_automatic_replan():
+    with pytest.warns(SoftDeprecationWarning):
+        drawing = Sheet.from_part(import_step(_FIXTURE)).auto_views().build()
+
+    assert "iso" not in drawing.views
+    assert drawing.scale == 5.0
+    assert not [issue for issue in drawing.lint() if issue.code == "axial_length_missing"]
+
+
+def test_authored_dimensions_disable_the_automatic_replan():
+    with pytest.warns(SoftDeprecationWarning):
+        drawing = Sheet.from_part(import_step(_FIXTURE)).authored_dimensions().auto_views().build()
 
     assert "iso" in drawing.views
     assert drawing.scale_decision["attempts"] == ()

@@ -338,11 +338,11 @@ This is post-build verification, not a second occupancy-based fitness function:
    ordinary compose/placement pipeline;
 3. a candidate wins only if the recovery detail disappears and a single lint pass proves no
    structural error or required placement loss;
-4. a fixed-page fit `ValueError` terminates the larger-scale ladder because that failure is
-   monotone as scale increases; and
+4. the ladder has a hard two-candidate work budget. Only the known geometry-degeneration floor
+   and OCC failures reject a speculative candidate; unrelated `ValueError`s remain visible; and
 5. every attempted scale, page, view set, reason, rejection, and winner is recorded in the
    structured scale decision. If no candidate passes, the original drawing remains the result.
 
 The box-math search and bounded measured-repack loop remain the layout authorities. This
-amendment permits one semantic corrective trial around a known conservative recovery artifact;
+amendment permits a bounded semantic corrective trial around a known conservative recovery artifact;
 it does not license arbitrary post-build bbox optimisation.

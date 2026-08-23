@@ -58,6 +58,9 @@ def test_automatic_incomplete_summary_preserves_every_provenance_channel():
     registry = Registry()
     drawing = SimpleNamespace(
         scale=1.0,
+        page_w=297.0,
+        page_h=210.0,
+        views={"front": object()},
         registry=registry,
         lint=lambda physical=False: tuple(registry.issues),
         scale_decision={
@@ -309,6 +312,16 @@ def test_fallback_does_not_hide_an_unrelated_build_error(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid declared model"):
         builder.build_drawing(Box(10, 10, 10), scale=1.0)
+
+
+def test_corrective_candidate_failure_filter_is_narrow():
+    import draftwright.builder as builder
+
+    assert builder._is_expected_candidate_build_failure(
+        ValueError("drawing geometry degenerates below the renderable floor")
+    )
+    assert not builder._is_expected_candidate_build_failure(ValueError("invalid declared model"))
+    assert builder._AUTOMATIC_UPSCALE_TRIAL_LIMIT == 2
 
 
 def test_monotone_step_separation_failure_does_not_rebuild_smaller_scales(monkeypatch):

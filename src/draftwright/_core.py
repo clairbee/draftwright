@@ -57,6 +57,35 @@ from draftwright.layout import _greedy_strip_1d, _solve_strip_1d
 _log = logging.getLogger(__name__)
 
 
+def _decode_hole_location_fact(fact):
+    """Decode a current or legacy ``covers_hole_locations`` fact.
+
+    Current facts carry ``(feature, parameter, point)``. Legacy/external facts
+    carry ``(measurement, point)`` and derive ownership from the measurement.
+    Invalid or incomplete riders return ``None`` so consumers can retain their
+    geometric fallback instead of treating malformed metadata as authoritative.
+    """
+    try:
+        size = len(fact)
+    except TypeError:
+        return None
+    if size == 3:
+        feature, parameter, point = fact
+    elif size == 2:
+        measurement, point = fact
+        feature = getattr(measurement, "feature", None)
+        parameter = getattr(measurement, "parameter", None)
+    else:
+        return None
+    if feature is None or not isinstance(parameter, str):
+        return None
+    try:
+        HoleRef.of(point)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return feature, parameter, point
+
+
 def place_annotation(registry, items, obj, name=None, view=None, feature=None, measurement=None):
     """The annotation-placement primitive (#817): register *obj* under *name* — replacing any
     prior object of that name (dropped from the render list *items*) so a name maps to one

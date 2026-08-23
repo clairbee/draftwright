@@ -4356,6 +4356,15 @@ class TestLintLocationCoverage:
         dwg = build_drawing(part, number="X")
         assert lint_location_coverage(part, dwg) == []
 
+        class ExternalDrawing:
+            """The documented lint duck contract deliberately has no model()."""
+
+            at = dwg.at
+            iter_annotations = dwg.iter_annotations
+            view_of = dwg.view_of
+
+        assert lint_location_coverage(part, ExternalDrawing()) == []
+
     @pytest.mark.timeout(60)
     def test_bare_scaffold_flags_missing_marks_and_location(self):
         from draftwright.linting import lint_location_coverage
@@ -4416,6 +4425,11 @@ class TestLintLocationCoverage:
         dwg.registry.add(dim, "wrong_axis", "plan", feature=feature)
 
         assert any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
+        # Malformed structured evidence is not authoritative. External producers
+        # retain the documented geometric fallback when no fact can be decoded.
+        dim.covers_hole_locations = ((SimpleNamespace(feature=feature), point),)
+        assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
 
         # The legacy two-tuple carries the same ownership through its measurement object.
         dim.covers_hole_locations = (

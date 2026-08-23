@@ -51,6 +51,7 @@ from draftwright._core import (
     HoleRef,
     _annotation_diameter_sources,
     _axis_letter,
+    _decode_hole_location_fact,
     _fmt,
     _xyz,
 )
@@ -65,6 +66,7 @@ _UNSET = object()  # sentinel: distinguishes "not supplied" from a valid prof=No
 # sits below sheet in the DAG, so the literals cannot be shared by import.
 _RECON_DIA_TOL = 0.2
 _RECON_POS_TOL = 0.5
+_LOCATION_AXIS_TOL = 1.0
 
 # Declared feature kinds with a single defining cylinder to confirm against geometry, mapped to the
 # cylinder polarity that confirms them: a hole is a bore (external=False); a boss / turned step is
@@ -407,32 +409,28 @@ def lint_location_coverage(
             # Structured compiler evidence is authoritative.  Letting the same
             # annotation fall back to its witness geometry would allow a wrong
             # feature/axis tag to self-certify merely by sharing an ordinate.
-            if not facts:
+            decoded = tuple(
+                parsed
+                for fact in facts
+                if (parsed := _decode_hole_location_fact(fact)) is not None
+            )
+            if not decoded:
                 dim_verts.setdefault(view, []).extend(_dim_vertices(ann))
-            for fact in facts:
-                if len(fact) == 3:
-                    feature, parameter, point = fact
-                elif len(fact) == 2:  # compatibility with legacy/external structured facts
-                    measurement, point = fact
-                    feature = getattr(measurement, "feature", None)
-                    parameter = getattr(measurement, "parameter", None)
-                else:
-                    continue
-                if getattr(feature, "kind", None) == "hole" and parameter is not None:
+            for feature, parameter, point in decoded:
+                if getattr(feature, "kind", None) == "hole":
                     structured_locations.add((feature, str(parameter), HoleRef.of(point)))
 
-    model_features = tuple(getattr(dwg.model(), "features", ()))
-
-    def _feature_for(hole):
-        ref = HoleRef.of(hole.location)
-        axis = _axis_letter(hole)
-        for feature in model_features:
-            if getattr(feature, "kind", None) != "hole" or feature.frame.axis != axis:
-                continue
-            members = getattr(feature, "members", ()) or (feature.frame.origin,)
-            if ref in {HoleRef.of(point) for point in members}:
-                return feature
-        return None
+    # Index only semantic owners that placed facts actually carry. This avoids an
+    # O(holes × model-features × members) rescan and preserves the documented
+    # external-producer contract: no ``Drawing.model()`` method is required.
+    feature_index = {}
+    for feature in {owner for owner, _parameter, _point in structured_locations}:
+        frame = getattr(feature, "frame", None)
+        if frame is None:
+            continue
+        members = getattr(feature, "members", ()) or (frame.origin,)
+        for point in members:
+            feature_index[(frame.axis, HoleRef.of(point))] = feature
 
     bb = part.bounding_box()
     centre = (bb.center().X, bb.center().Y, bb.center().Z)
@@ -448,11 +446,13 @@ def lint_location_coverage(
         # A hole coaxial with the part centre (the turning axis / a symmetry axis)
         # is located by centrelines, not a position dim — exempt from location.
         perp = [(ax, c, q) for ax, c, q in zip("xyz", (x, y, z), centre) if ax != axis]
-        coaxial = all(abs(c - q) <= 1.0 for _ax, c, q in perp)
-        feature = _feature_for(h)
         ref = HoleRef.of(h.location)
+        required_axes = [ax for ax, c, q in perp if abs(c - q) > _LOCATION_AXIS_TOL]
+        if ref in patterned or not required_axes:
+            continue
+
+        feature = feature_index.get((axis, ref))
         page_axes = VIEW_AXES[view]
-        required_axes = [ax for ax, c, q in perp if abs(c - q) > 1.0]
 
         def _axis_covered(model_axis):
             semantic = feature is not None and any(
@@ -466,11 +466,7 @@ def lint_location_coverage(
             )
             return semantic or geometric
 
-        if (
-            ref not in patterned
-            and not coaxial
-            and (not required_axes or not all(_axis_covered(ax) for ax in required_axes))
-        ):
+        if not all(_axis_covered(ax) for ax in required_axes):
             no_loc += 1
 
     issues = []
