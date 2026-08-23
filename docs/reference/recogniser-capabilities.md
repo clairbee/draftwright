@@ -49,13 +49,11 @@ Validation fails closed and names the family and boundary whenever possible:
 
 ## Adding or changing a recogniser
 
-For an additive field that increments an existing record schema, first land a narrow Draftwright
-declaration accepting both the installed schema and the named candidate schema. The existing adapter
-must remain valid when the new field is ignored, and tests must prove the next schema is accepted
-only by that explicit declaration while later schemas still fail. The package canary then proves
-the real candidate wheel against that committed consumer point. After the package release, the
-Draftwright dependency/behavior PR locks the immutable artifact, adopts the field, and narrows the
-declaration to the new schema.
+For an additive field that increments an existing record schema, update the relevant Draftwright
+adapter and declaration when advancing the exact `b123d-recognisers` dependency pin. Tests must
+prove the installed schema is accepted while later schemas still fail. The package version belongs
+only in `pyproject.toml` and `uv.lock`; the capability declaration derives runtime identities from
+installed package metadata.
 
 For each applicable stage, add the adapter, declaration, emitted-Sheet round trip, drawing behavior,
 and completeness evidence; for an inapplicable or deferred stage, state why and link its tracking

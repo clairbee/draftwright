@@ -110,12 +110,12 @@ jobs:
           new_version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           branch="automation/post-release-${RELEASE_TAG}-${GITHUB_RUN_ID}"
           git switch -c "$branch"
-          git add pyproject.toml uv.lock src/draftwright/recogniser_contract.py
+          git add pyproject.toml uv.lock
           git commit -m "chore: bump version to ${new_version} after release"
           git push origin HEAD:"$branch"
           gh pr create --base main --head "$branch" \
             --title "chore: bump version to ${new_version} after ${RELEASE_TAG}" \
-            --body "Branch-protection-safe post-release development-version bump. Publication already succeeded for \`${RELEASE_TAG}\`; this PR changes only build/lock identity and the independently checked consumer-contract version. A single-runner regular coverage gate is dispatched; the slow tier is intentionally not run for a version-only bump."
+            --body "Branch-protection-safe post-release development-version bump. Publication already succeeded for \`${RELEASE_TAG}\`; this PR changes only build/lock identity. A single-runner regular coverage gate is dispatched; the slow tier is intentionally not run for a version-only bump."
           pr_number=$(gh pr view "$branch" --json number --jq .number)
           gh workflow run ci.yml --ref "$branch" \
-            -f maintenance_bump=true -f maintenance_pr_number="$pr_number"
+            -f post_release_bump=true -f post_release_pr_number="$pr_number"

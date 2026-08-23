@@ -19,12 +19,7 @@ from b123d_recognisers import capability_manifest
 
 CONSUMER_CAPABILITY_FORMAT = "draftwright-recogniser-capabilities"
 CONSUMER_CAPABILITY_FORMAT_VERSION = 1
-_PACKAGE_VERSION = "0.3.0"
-# The only package identity the cross-repository canary may substitute for the exact production
-# pin.  Passing a candidate is explicit at the validator call site; normal imports and released
-# checks never consult environment state and therefore remain locked to ``_PACKAGE_VERSION``.
-# ``scripts/update-recogniser-dependency`` disables this window when 0.3.0 becomes the pin.
-_CANDIDATE_PACKAGE_VERSION: str | None = None
+_RECOGNISER_DISTRIBUTION = "b123d-recognisers"
 _BOUNDARIES = (
     "ir_adapter",
     "dsl_declaration",
@@ -111,10 +106,8 @@ _FAMILIES: dict[str, _FamilySpec] = {
     ),
 }
 
-# ADR 0017 permits a consumer to land dual-readable schema support before the provider publishes
-# an additive record change. This is deliberately record-specific: accepting every future schema
-# would turn the fail-closed join into an open version range. Package PR #151 adds only optional
-# ``turned`` fields; the existing adapters remain valid while #1276 adopts those fields.
+# Record schemas are explicit and family-specific. The exact dependency pin selects the installed
+# package version; this table records only the schemas its Draftwright adapters actually consume.
 _RECORD_SCHEMA_VERSIONS: dict[tuple[str, str], tuple[int, ...]] = {
     ("chamfers", "Chamfer"): (2,),
     ("fillets", "Fillet"): (2,),
@@ -280,7 +273,7 @@ def _unsupported_declaration(family_id: str) -> dict[str, Any]:
 
 
 def consumer_capability_declaration() -> dict[str, Any]:
-    """Return an isolated format-1 declaration for the released package contract."""
+    """Return an isolated format-1 declaration for the installed package contract."""
     families = [_family_declaration(key, value) for key, value in sorted(_FAMILIES.items())]
     families.extend(_unsupported_declaration(key) for key in sorted(_UNSUPPORTED))
     families.append(_geometry_only_declaration())
@@ -288,10 +281,10 @@ def consumer_capability_declaration() -> dict[str, Any]:
     return {
         "format": CONSUMER_CAPABILITY_FORMAT,
         "format_version": CONSUMER_CAPABILITY_FORMAT_VERSION,
-        "consumer": {"name": "draftwright", "version": "0.4.11.dev0"},
+        "consumer": {"name": "draftwright", "version": distribution_version("draftwright")},
         "package_compatibility": {
-            "distribution": "b123d-recognisers",
-            "version": f"=={_PACKAGE_VERSION}",
+            "distribution": _RECOGNISER_DISTRIBUTION,
+            "version": f"=={distribution_version(_RECOGNISER_DISTRIBUTION)}",
             "manifest_format": 1,
         },
         "families": families,
@@ -408,15 +401,8 @@ def validate_recogniser_capabilities(
     *,
     package: object | None = None,
     source_root: Path | None = None,
-    candidate_version: str | None = None,
 ) -> None:
-    """Fail closed when installed package truth and Draftwright policy do not exactly join.
-
-    ``candidate_version`` is the explicit two-checkout-canary seam.  It changes only the package
-    identity expected from ``package``; the checked-in production declaration stays pinned to
-    :data:`_PACKAGE_VERSION`.  The value must be an exact prerelease/stable spelling on the one
-    reviewed transition release, so it cannot become an open dependency interval.
-    """
+    """Fail closed when installed package truth and Draftwright policy do not exactly join."""
     current = consumer_capability_declaration() if declaration is None else declaration
     manifest = capability_manifest(format_version=1) if package is None else package
     if not isinstance(current, dict) or set(current) != {
@@ -442,16 +428,17 @@ def validate_recogniser_capabilities(
         "version": distribution_version("draftwright"),
     }:
         raise RecogniserCapabilityError(
-            "consumer identity/version is stale; update it with the Draftwright release"
+            "consumer identity/version does not match installed Draftwright metadata"
         )
+    installed_package_version = distribution_version(_RECOGNISER_DISTRIBUTION)
     compatibility = current["package_compatibility"]
     if not isinstance(compatibility, dict) or compatibility != {
-        "distribution": "b123d-recognisers",
-        "version": f"=={_PACKAGE_VERSION}",
+        "distribution": _RECOGNISER_DISTRIBUTION,
+        "version": f"=={installed_package_version}",
         "manifest_format": 1,
     }:
         raise RecogniserCapabilityError(
-            f"package compatibility must pin b123d-recognisers {_PACKAGE_VERSION} format 1"
+            "package compatibility does not match installed b123d-recognisers metadata"
         )
     if (
         not isinstance(manifest, dict)
@@ -460,36 +447,15 @@ def validate_recogniser_capabilities(
         or manifest.get("format_version") != 1
     ):
         raise RecogniserCapabilityError("installed recogniser manifest format is unsupported")
-    expected_package_version = _PACKAGE_VERSION
-    if candidate_version is not None:
-        candidate_pattern = (
-            None
-            if _CANDIDATE_PACKAGE_VERSION is None
-            else re.compile(
-                rf"{re.escape(_CANDIDATE_PACKAGE_VERSION)}"
-                r"(?:(?:a|b|rc)\d+|\.dev\d+)?"
-            )
-        )
-        if (
-            type(candidate_version) is not str
-            or candidate_pattern is None
-            or candidate_pattern.fullmatch(candidate_version) is None
-        ):
-            raise RecogniserCapabilityError(
-                f"candidate package version {candidate_version!r} is outside the reviewed "
-                f"{_CANDIDATE_PACKAGE_VERSION!r} transition"
-            )
-        expected_package_version = candidate_version
     package_info = manifest.get("package")
     if (
         not isinstance(package_info, dict)
         or package_info.get("name") != "b123d-recognisers"
-        or package_info.get("version") != expected_package_version
+        or package_info.get("version") != installed_package_version
     ):
         raise RecogniserCapabilityError(
             f"installed package identity {package_info!r} does not satisfy "
-            f"b123d-recognisers=={expected_package_version}; update the pin and declaration "
-            "together"
+            f"installed b123d-recognisers metadata {installed_package_version!r}"
         )
     package_families = manifest.get("families")
     families = current["families"]
@@ -525,7 +491,7 @@ def validate_recogniser_capabilities(
     stale = sorted(set(ids) - set(package_by_id))
     if stale:
         raise RecogniserCapabilityError(
-            f"family inventory mismatch for installed {_PACKAGE_VERSION}; "
+            f"family inventory mismatch for installed {installed_package_version}; "
             f"stale={stale}; a declared family is no longer in the package"
         )
     checkout_root = Path(__file__).resolve().parents[2]

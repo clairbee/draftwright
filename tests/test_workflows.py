@@ -2,7 +2,12 @@
 
 import json
 import re
+import shutil
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parent.parent
 
@@ -125,3 +130,37 @@ def test_testpypi_snapshot_build_and_publish_share_one_job():
     assert "if: github.event_name == 'release'" in _job(workflow, "build-release")
     assert 'scripts/update-draftwright-version "$base"' in _job(workflow, "build-release")
     assert "needs: build-release" in _job(workflow, "publish-pypi")
+
+
+def test_post_release_version_bump_uses_a_protected_main_pr():
+    bump = _job(_workflow("publish.yml"), "bump-version")
+
+    assert "pull-requests: write" in bump and "actions: write" in bump
+    assert "gh pr create" in bump
+    assert "gh workflow run ci.yml" in bump
+    assert "post_release_bump=true" in bump
+    assert 'post_release_pr_number="$pr_number"' in bump
+    assert "git push origin HEAD:" in bump
+    assert "git push\n" not in bump
+    assert "recogniser_contract.py" not in bump
+
+
+@pytest.mark.parametrize("target", ("0.4.12", "0.4.12.dev0", "0.4.12.dev123"))
+def test_version_updater_changes_only_project_and_lock_identity(tmp_path: Path, target: str):
+    for relative in ("pyproject.toml", "uv.lock"):
+        shutil.copyfile(ROOT / relative, tmp_path / relative)
+
+    loader = SourceFileLoader(
+        "draftwright_version_update",
+        str(ROOT / "scripts" / "update-draftwright-version"),
+    )
+    spec = spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    module.update(tmp_path, target)
+
+    assert f'version = "{target}"' in (tmp_path / "pyproject.toml").read_text()
+    lock = (tmp_path / "uv.lock").read_text()
+    package = lock.split('[[package]]\nname = "draftwright"', 1)[1].split("[[package]]", 1)[0]
+    assert f'version = "{target}"' in package

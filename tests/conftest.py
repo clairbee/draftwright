@@ -106,7 +106,6 @@ _UNIT_MODULES = frozenset(
         "test_architecture_docs.py",
         "test_carve_free_position_callers.py",
         "test_counting_calls.py",
-        "test_cross_repository_delivery_protocol.py",
         "test_deprecation_dates.py",
         "test_import_boundaries.py",
         "test_label_provenance.py",
@@ -119,7 +118,6 @@ _UNIT_MODULES = frozenset(
         "test_quality_components.py",
         "test_recogniser_adoption.py",
         "test_registry.py",
-        "test_two_repository_workflow.py",
         "test_workflows.py",
     }
 )

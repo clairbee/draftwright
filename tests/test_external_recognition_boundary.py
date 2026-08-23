@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import re
 from pathlib import Path
 
 import b123d_recognisers as external
@@ -19,26 +19,20 @@ from draftwright.score import feature_census
 
 ROOT = Path(__file__).parents[1]
 RECOGNITION_DIR = ROOT / "src" / "draftwright" / "recognition"
-RELEASE = json.loads((ROOT / ".github/recogniser-release.json").read_text(encoding="utf-8"))
-PINNED_VERSION = RELEASE["version"]
-RELEASE_HASHES = set(RELEASE["artifacts"].values())
 
 
 def test_dependency_is_pinned_to_the_published_stable_release() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     dependency = next(d for d in project["dependencies"] if d.startswith("b123d-recognisers"))
 
-    assert dependency == f"b123d-recognisers=={PINNED_VERSION}"
+    match = re.fullmatch(r"b123d-recognisers==(\d+\.\d+\.\d+)", dependency)
+    assert match is not None
+    pinned_version = match.group(1)
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
     package = lock.split('name = "b123d-recognisers"', 1)[1].split("[[package]]", 1)[0]
-    assert f'version = "{PINNED_VERSION}"' in package
+    assert f'version = "{pinned_version}"' in package
     assert 'source = { registry = "https://pypi.org/simple" }' in package
     assert "git+" not in package
-    assert RELEASE_HASHES == {
-        line.split("sha256:")[1].split('"')[0]
-        for line in package.splitlines()
-        if 'hash = "sha256:' in line
-    }
 
 
 def test_embedded_implementation_is_gone_and_compatibility_is_identity_preserving() -> None:
