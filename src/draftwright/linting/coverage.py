@@ -410,7 +410,7 @@ def lint_location_coverage(
     # Position-keyed (HoleRef), not id()-keyed: the old identity set only worked because
     # recognise_hole_patterns reuses the same HoleRecord objects; a position key is robust
     # to any hole source and matches the rest of the engine's patterned-membership tests.
-    patterned = {HoleRef.of(h.location) for pat in patterns for h in pat.holes}
+    patterned = {_location_ref(h, h.location) for pat in patterns for h in pat.holes}
 
     marks: dict[str, list] = {}
     dim_verts: dict[str, list] = {}
