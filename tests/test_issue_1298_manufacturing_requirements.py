@@ -318,6 +318,65 @@ def test_typed_internal_thread_and_knurl_render_manufacturing_complete_labels_on
     assert not [issue for issue in knurled.lint() if issue.code == "pmi_not_rendered"]
 
 
+def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_solve():
+    align = (Align.CENTER, Align.CENTER, Align.MIN)
+    segments = [
+        Pos(lo, 0, 0) * Cylinder(diameter / 2, hi - lo, align=align).rotate(Axis.Y, 90)
+        for diameter, lo, hi in (
+            (4.0, 0.0, 3.2),
+            (6.0, 3.2, 3.7),
+            (10.0, 3.7, 5.7),
+            (5.0, 5.7, 8.7),
+            (3.0, 8.7, 28.7),
+        )
+    ]
+    part = segments[0]
+    for segment in segments[1:]:
+        part += segment
+    features = [
+        _step(4.0, 0.0, 3.2),
+        _step(6.0, 3.2, 3.7),
+        _step(10.0, 3.7, 5.7),
+        _step(5.0, 5.7, 8.7),
+        _step(3.0, 8.7, 28.7),
+        _raw(
+            "knurl",
+            KNURL_TEXT,
+            _reference(diameter=10.0, interval=(4.0, 5.4), sense="external"),
+            "#2008",
+        ),
+        _raw(
+            "external_thread",
+            EXTERNAL_TEXT,
+            _reference(diameter=3.0, interval=(8.7, 28.2), sense="external"),
+            "#2000",
+        ),
+    ]
+    model = lower_ap242_manufacturing_requirements(PartModel(part.bounding_box(), "x", features))
+
+    drawing = build_drawing(part, model=model, pmi="annotate", page="A1")
+
+    assert {
+        name: drawing.get_annotation(name).label
+        for name in drawing.annotations()
+        if name.startswith("m_dia_x")
+    } == {
+        "m_dia_x0": "ø4",
+        "m_dia_x1": "ø6",
+        "m_dia_x2": (
+            "ø10 MAX AFTER KNURLING; STRAIGHT KNURL, 1.0 PITCH FULL WIDTH BETWEEN C0.3 "
+            "CHAMFERS; CUT OR FORMED PERMITTED"
+        ),
+        "m_dia_x3": "ø5",
+        "m_dia_x4": "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
+    }
+    assert not [
+        issue
+        for issue in drawing.lint()
+        if issue.code in {"diameter_dropped", "pmi_not_rendered", "annotation_overlap"}
+    ]
+
+
 def test_known_unsupported_manufacturing_intent_is_explicit_without_error_lint():
     unsupported = PmiRecord(
         kind="surface_texture",

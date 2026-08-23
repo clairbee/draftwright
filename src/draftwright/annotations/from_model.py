@@ -1370,6 +1370,95 @@ def _manufacturing_suffix(thread, knurl=None) -> str | None:
     return "; ".join(terms) or None
 
 
+_DIAMETER_LEAD_DIRS = ((0, -1), (0, 1), (1, 0), (-1, 0))
+
+
+def _diameter_source_bounds(dwg, view, feature, diameter) -> tuple[float, float, float, float]:
+    """Projected cylindrical-envelope bounds for a typed diameter leader.
+
+    A profile-view diameter leader must start on the owning cylindrical band, not at the
+    feature centre.  Build the orthographic envelope from the feature's finite axial span and
+    both radial basis directions; the projection collapses the hidden radial direction and
+    leaves the truthful visible silhouette.  A span-less boss retains its declared centre,
+    which is the same fallback used by the legacy diameter row.
+    """
+    span = getattr(feature, "span", None)
+    centres = tuple(span) if span is not None else (feature.frame.origin,)
+    axis_index = "xyz".index(feature.frame.axis)
+    radius = float(diameter) / 2
+    points = []
+    for centre in centres:
+        points.append(dwg.at(view, *centre))
+        for radial_index in range(3):
+            if radial_index == axis_index:
+                continue
+            for sign in (-1, 1):
+                point = list(centre)
+                point[radial_index] += sign * radius
+                points.append(dwg.at(view, *point))
+    return (
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    )
+
+
+def _render_typed_diameter_leaders(dwg, a, buckets, *, prefix, start, ctx) -> int:
+    """Route a typed thread/knurl diameter row through the shared leader solve.
+
+    The legacy row deliberately gives every item the widest label's pitch.  That is stable and
+    tidy for short diameter strings, but one authoritative manufacturing label can then evict
+    every sibling even on a large sheet.  Once any bucket carries typed manufacturing intent,
+    collect the whole row together so the global feature-leader solve can use independent
+    label footprints and multiple clear lanes.  Plain rows keep their byte-stable legacy path.
+    """
+    vb = dwg.view_bounds("front")
+    if vb is None:
+        return 0
+    reach = _leader_callout_reach(dwg.draft)
+    jobs = []
+    for index, (_anchor, dia, refs, dtol, suffix, groups) in enumerate(buckets.values()):
+        owner = next(iter(refs)) if len(refs) == 1 else None
+        representative = groups[0].facts
+        source_bounds = _diameter_source_bounds(dwg, "front", representative, dia)
+        raw_candidates = _radial_candidates(
+            dwg,
+            "front",
+            vb,
+            representative,
+            reach,
+            source_bounds=source_bounds,
+            directions=_DIAMETER_LEAD_DIRS,
+        )
+        candidates = ((tip, elbow, owner) for tip, elbow, _provenance in raw_candidates)
+        jobs.append(
+            (
+                f"{prefix}{start + index}",
+                "front",
+                vb,
+                f"ø{_fmt(dia)}{_tol_suffix(dtol, dwg.draft)}" + (f" {suffix}" if suffix else ""),
+                candidates,
+                tuple(
+                    parameter.id
+                    for group in groups
+                    for parameter in group.dims
+                    if parameter.kind == "diameter"
+                ),
+            )
+        )
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="typed manufacturing diameter",
+        drop_code="diameter_dropped",
+        ctx=ctx,
+        geom_clear=True,
+        joint=True,
+    )
+
+
 def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     """ø leaders for a turned part's external step/boss diameters, from the IR —
     one distinct callout per diameter, in a tidy row below the front view
@@ -1458,9 +1547,24 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     start_y = _next_start("m_dia_y") if only is not None else 0
     start_z = _next_start("m_dia_z") if only is not None else 0
     trace = getattr(ctx, "trace", None)  # the immediate placers report to the trace too (#736)
-    placed = _diameter_row_below(
-        dwg, _items(row_buckets), start=start_x, trace=trace, ctx=ctx
-    ) + _diameter_column_left(dwg, _items(col_buckets), start=start_z, trace=trace, ctx=ctx)
+    typed_row = any(
+        isinstance(group.facts.get("thread"), ThreadRequirement)
+        or isinstance(group.facts.get("knurl"), KnurlRequirement)
+        for entry in row_buckets.values()
+        for group in entry[5]
+    )
+    if typed_row:
+        placed = _render_typed_diameter_leaders(
+            dwg,
+            a,
+            row_buckets,
+            prefix="m_dia_x",
+            start=start_x,
+            ctx=ctx,
+        )
+    else:
+        placed = _diameter_row_below(dwg, _items(row_buckets), start=start_x, trace=trace, ctx=ctx)
+    placed += _diameter_column_left(dwg, _items(col_buckets), start=start_z, trace=trace, ctx=ctx)
 
     # A Y-axis step is end-on in the front view, so the X/Z profile-strip
     # leaders are geometrically inapplicable. Place one radial leader per
