@@ -362,6 +362,146 @@ class NominalRequirement:
         object.__setattr__(self, "source_ids", ids)
 
 
+def _require_source_identity(name: str, source_ids) -> tuple[str, ...]:
+    ids = tuple(dict.fromkeys(str(item).strip() for item in source_ids if str(item).strip()))
+    if not ids:
+        raise ValueError(f"{name} needs at least one source id")
+    return ids
+
+
+@dataclass(frozen=True)
+class ThreadRequirement:
+    """A source-authored internal or external metric-thread requirement.
+
+    The parsed fields drive callout composition and consistency checks. ``text`` remains the
+    authoritative source wording, while the Part21 identities and finite cylinders retain the
+    exact geometry association used to choose the canonical owner.  No nominal-value lookup is
+    needed—or permitted—after this aspect has been formed.
+    """
+
+    application: Literal["external", "internal"]
+    designation: str
+    nominal_diameter: float
+    pitch: float
+    tolerance_class: str
+    hand: Literal["RH", "LH"]
+    text: str
+    source_ids: tuple[str, ...]
+    part21_id: str
+    shape_aspect_ids: tuple[str, ...]
+    reference_item_ids: tuple[str, ...]
+    cylindrical_refs: tuple[CylindricalReference, ...]
+    full_available_length: bool = False
+    minimum_full_thread: float | None = None
+    drill_diameter: float | None = None
+    drill_depth: float | None = None
+    drill_point_angle: float | None = None
+    source: str = "ap242_pmi"
+
+    def __post_init__(self) -> None:
+        if self.application not in ("external", "internal"):
+            raise ValueError("thread application must be 'external' or 'internal'")
+        if not str(self.designation).strip():
+            raise ValueError("thread designation must be non-empty")
+        for name, raw in (("nominal_diameter", self.nominal_diameter), ("pitch", self.pitch)):
+            value = float(raw)
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"thread {name} must be finite and positive")
+            object.__setattr__(self, name, value)
+        for name in ("minimum_full_thread", "drill_diameter", "drill_depth", "drill_point_angle"):
+            raw = getattr(self, name)
+            if raw is None:
+                continue
+            value = float(raw)
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"thread {name} must be finite and positive")
+            object.__setattr__(self, name, value)
+        if not str(self.text).strip():
+            raise ValueError("thread source text must be non-empty")
+        if not str(self.part21_id).strip():
+            raise ValueError("thread requirement needs its Part21 identity")
+        if not self.cylindrical_refs:
+            raise ValueError("thread requirement needs finite-cylinder topology evidence")
+        object.__setattr__(
+            self, "source_ids", _require_source_identity("thread requirement", self.source_ids)
+        )
+
+    @property
+    def callout_suffix(self) -> str:
+        """The source terms not already stated by the owner's canonical dimensions."""
+        if self.application == "external":
+            length = ", FULL AVAILABLE LENGTH" if self.full_available_length else ""
+            return f"{self.designation}{length}"
+        terms = [self.designation]
+        if self.minimum_full_thread is not None:
+            terms.append(f"{_fmt(self.minimum_full_thread)} MIN FULL THREAD")
+        if self.drill_point_angle is not None:
+            terms.append(f"{_fmt(self.drill_point_angle)}° CONVENTIONAL DRILL POINT")
+        return "; ".join(terms)
+
+
+@dataclass(frozen=True)
+class KnurlRequirement:
+    """A source-authored knurl aspect on a finite cylindrical region."""
+
+    pattern: Literal["straight", "diamond"]
+    pitch: float
+    full_width: bool
+    text: str
+    source_ids: tuple[str, ...]
+    part21_id: str
+    shape_aspect_ids: tuple[str, ...]
+    reference_item_ids: tuple[str, ...]
+    cylindrical_refs: tuple[CylindricalReference, ...]
+    edge_chamfer: float | None = None
+    maximum_diameter: float | None = None
+    processes: tuple[Literal["cut", "formed"], ...] = ()
+    source: str = "ap242_pmi"
+
+    def __post_init__(self) -> None:
+        if self.pattern not in ("straight", "diamond"):
+            raise ValueError("knurl pattern must be 'straight' or 'diamond'")
+        pitch = float(self.pitch)
+        if not isfinite(pitch) or pitch <= 0:
+            raise ValueError("knurl pitch must be finite and positive")
+        object.__setattr__(self, "pitch", pitch)
+        for name in ("edge_chamfer", "maximum_diameter"):
+            raw = getattr(self, name)
+            if raw is None:
+                continue
+            value = float(raw)
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"knurl {name} must be finite and positive")
+            object.__setattr__(self, name, value)
+        if not str(self.text).strip():
+            raise ValueError("knurl source text must be non-empty")
+        if not str(self.part21_id).strip():
+            raise ValueError("knurl requirement needs its Part21 identity")
+        if not self.cylindrical_refs:
+            raise ValueError("knurl requirement needs finite-cylinder topology evidence")
+        if any(process not in ("cut", "formed") for process in self.processes):
+            raise ValueError("knurl processes must be 'cut' and/or 'formed'")
+        object.__setattr__(
+            self, "source_ids", _require_source_identity("knurl requirement", self.source_ids)
+        )
+
+    @property
+    def callout_suffix(self) -> str:
+        """Terms following the canonical diameter at the head of its leader."""
+        terms = []
+        if self.maximum_diameter is not None:
+            terms.append("MAX AFTER KNURLING")
+        knurl = f"{self.pattern.upper()} KNURL, {self.pitch} PITCH"
+        if self.full_width:
+            knurl += " FULL WIDTH"
+            if self.edge_chamfer is not None:
+                knurl += f" BETWEEN C{_fmt(self.edge_chamfer)} CHAMFERS"
+        terms.append(knurl)
+        if self.processes:
+            terms.append(" OR ".join(process.upper() for process in self.processes) + " PERMITTED")
+        return "; ".join(terms)
+
+
 def display(p: DimParameter) -> str:
     """A font-safe text form of a parameter (uses only glyphs the pinned font has;
     GD&T symbols are the renderer's job). For debug and tests, not output."""
@@ -430,7 +570,7 @@ class HoleFeature:
     # A thread spec (tap/thread), e.g. ``"M3x0.5"`` — free text folded onto the hole's
     # compound callout (#764). A declaration-only aspect (ADR 0011 side-layer): threads
     # are cosmetic, rarely modelled as geometry, so there is no recogniser — declare + emit.
-    thread: str | None = None
+    thread: str | ThreadRequirement | None = None
     # A structural bore profile. ``None`` is the ordinary circular bore; ``double_d``
     # means the bore diameter is its parent-circle major diameter and the independently
     # planned A/F parameter below defines the two chord flats (#1061).
@@ -516,7 +656,8 @@ class StepFeature:
     # An EXTERNAL thread spec, e.g. ``"M3x0.5"`` — free text appended to the OD (⌀) callout
     # (#859). The turned analog of ``HoleFeature.thread``: a declaration-only aspect, threads
     # are cosmetic and rarely modelled as geometry, so there is no recogniser — declare + render.
-    thread: str | None = None
+    thread: str | ThreadRequirement | None = None
+    knurl: KnurlRequirement | None = None
     kind: ClassVar[str] = "step"
 
     def parameters(self) -> list[DimParameter]:
@@ -856,7 +997,8 @@ class BossFeature:
     height: float | None = None
     span: tuple[Point, Point] | None = None
     # An external thread spec appended to the OD callout (#859) — see ``StepFeature.thread``.
-    thread: str | None = None
+    thread: str | ThreadRequirement | None = None
+    knurl: KnurlRequirement | None = None
     kind: ClassVar[str] = "boss"
 
     def parameters(self) -> list[DimParameter]:
@@ -1570,6 +1712,7 @@ class PmiFeature:
     reference_axis: str = ""
     semantic_name: str = ""
     shape_aspect_ids: tuple[str, ...] = ()
+    cylindrical_refs: tuple[CylindricalReference, ...] = ()
     kind: ClassVar[str] = "pmi"
 
     def parameters(self) -> list[DimParameter]:

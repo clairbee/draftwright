@@ -8,9 +8,11 @@ an explicit reason.  It deliberately knows nothing about annotation coordinates 
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import replace
 from decimal import Decimal
+from typing import Literal, cast
 
 from draftwright.model.ir import (
     AuthoredDimension,
@@ -18,11 +20,14 @@ from draftwright.model.ir import (
     CylindricalReference,
     Feature,
     HoleFeature,
+    KnurlRequirement,
     NominalRequirement,
     PartModel,
     PatternFeature,
+    PmiFeature,
     RotationalFeature,
     StepFeature,
+    ThreadRequirement,
     ToleranceDecoration,
 )
 
@@ -549,6 +554,260 @@ def lower_ap242_nominal_diameters(model: PartModel) -> PartModel:
     )
 
 
+_EXTERNAL_THREAD = re.compile(
+    r"^(?P<designation>M(?P<nominal>\d+(?:\.\d+)?)\s*x\s*"
+    r"(?P<pitch>\d+(?:\.\d+)?)-(?P<class>[A-Za-z0-9]+)\s+"
+    r"(?P<hand>RH|LH)),\s*full available length on nominal DIA\s+"
+    r"(?P<region>\d+(?:\.\d+)?)\s+region$",
+    re.IGNORECASE,
+)
+_INTERNAL_THREAD = re.compile(
+    r"^(?P<designation>M(?P<nominal>\d+(?:\.\d+)?)\s*x\s*"
+    r"(?P<pitch>\d+(?:\.\d+)?)-(?P<class>[A-Za-z0-9]+)\s+"
+    r"(?P<hand>RH|LH)),\s*(?P<full>\d+(?:\.\d+)?)\s*mm minimum full thread;\s*"
+    r"DIA\s+(?P<drill>\d+(?:\.\d+)?)\s+tapping drill\s+x\s+"
+    r"(?P<depth>\d+(?:\.\d+)?)\s*mm full-diameter depth;\s*conventional\s+"
+    r"(?P<angle>\d+(?:\.\d+)?)\s+degree drill point$",
+    re.IGNORECASE,
+)
+_KNURL = re.compile(
+    r"^(?P<pattern>Straight|Diamond) knurl,\s*(?P<pitch>\d+(?:\.\d+)?)\s*mm pitch,\s*"
+    r"full width between C(?P<chamfer>\d+(?:\.\d+)?) chamfers,\s*DIA\s+"
+    r"(?P<diameter>\d+(?:\.\d+)?)\s*mm maximum after knurling;\s*"
+    r"(?P<processes>cut or formed) process permitted$",
+    re.IGNORECASE,
+)
+
+
+def _requirement_source_ids(feature: PmiFeature) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(((feature.source_id,) if feature.source_id else ()) + feature.source_ids)
+    )
+
+
+def _thread_requirement(feature: PmiFeature) -> ThreadRequirement:
+    pattern = _EXTERNAL_THREAD if feature.pmi_kind == "external_thread" else _INTERNAL_THREAD
+    match = pattern.fullmatch(feature.label.strip())
+    if match is None:
+        raise ValueError(f"unsupported {feature.pmi_kind.replace('_', ' ')} syntax")
+    application: Literal["external", "internal"] = (
+        "external" if feature.pmi_kind == "external_thread" else "internal"
+    )
+    values = match.groupdict()
+    if application == "external" and not _same_number(
+        float(values["nominal"]), float(values["region"])
+    ):
+        raise ValueError("external thread designation and nominal region disagree")
+    return ThreadRequirement(
+        application=application,
+        designation=values["designation"],
+        nominal_diameter=float(values["nominal"]),
+        pitch=float(values["pitch"]),
+        tolerance_class=values["class"],
+        hand=cast(Literal["RH", "LH"], values["hand"].upper()),
+        text=feature.label,
+        source_ids=_requirement_source_ids(feature),
+        part21_id=feature.part21_id,
+        shape_aspect_ids=feature.shape_aspect_ids,
+        reference_item_ids=feature.reference_item_ids,
+        cylindrical_refs=feature.cylindrical_refs,
+        full_available_length=application == "external",
+        minimum_full_thread=(float(values["full"]) if values.get("full") else None),
+        drill_diameter=(float(values["drill"]) if values.get("drill") else None),
+        drill_depth=(float(values["depth"]) if values.get("depth") else None),
+        drill_point_angle=(float(values["angle"]) if values.get("angle") else None),
+    )
+
+
+def _knurl_requirement(feature: PmiFeature) -> KnurlRequirement:
+    match = _KNURL.fullmatch(feature.label.strip())
+    if match is None:
+        raise ValueError("unsupported knurl requirement syntax")
+    values = match.groupdict()
+    return KnurlRequirement(
+        pattern=cast(Literal["straight", "diamond"], values["pattern"].lower()),
+        pitch=float(values["pitch"]),
+        full_width=True,
+        edge_chamfer=float(values["chamfer"]),
+        maximum_diameter=float(values["diameter"]),
+        processes=("cut", "formed"),
+        text=feature.label,
+        source_ids=_requirement_source_ids(feature),
+        part21_id=feature.part21_id,
+        shape_aspect_ids=feature.shape_aspect_ids,
+        reference_item_ids=feature.reference_item_ids,
+        cylindrical_refs=feature.cylindrical_refs,
+    )
+
+
+def _block_requirement(feature: PmiFeature, reason: str) -> PmiFeature:
+    return replace(
+        feature,
+        lowering_blockers=tuple(dict.fromkeys((*feature.lowering_blockers, reason))),
+    )
+
+
+def _manufacturing_owner_matches(requirement, feature, bbox) -> bool:
+    references = requirement.cylindrical_refs
+    if len(references) != 1:
+        return False
+    reference = references[0]
+    if isinstance(requirement, ThreadRequirement) and requirement.application == "internal":
+        if isinstance(feature, PatternFeature):
+            hole = feature.member
+            members = tuple(feature.members) or (hole.frame.origin,)
+            return len(members) == 1 and _internal_member_matches(
+                reference, hole, members[0], bbox
+            )
+        return isinstance(feature, HoleFeature) and _internal_member_matches(
+            reference,
+            feature,
+            (tuple(feature.members) or (feature.frame.origin,))[0],
+            bbox,
+        )
+    return isinstance(feature, (StepFeature, BossFeature)) and _external_owner_matches(
+        reference, feature
+    )
+
+
+def _remap_model_features(model: PartModel, replacements: dict[int, Feature]) -> PartModel:
+    if not replacements:
+        return model
+
+    def remap(feature):
+        return replacements.get(id(feature), feature)
+
+    features = [remap(feature) for feature in model.features]
+    decorations = {
+        ((remap(key[0]), *key[1:]) if isinstance(key, tuple) and key else key): value
+        for key, value in model.decorations.items()
+    }
+    requested = tuple(
+        replace(item, feature=remap(item.feature)) for item in model.requested_dimensions
+    )
+    authored = (
+        None
+        if model.authored_dimensions is None
+        else tuple(
+            replace(item, feature=remap(item.feature)) for item in model.authored_dimensions
+        )
+    )
+    return replace(
+        model,
+        features=features,
+        decorations=decorations,
+        requested_dimensions=requested,
+        authored_dimensions=authored,
+    )
+
+
+def lower_ap242_manufacturing_requirements(model: PartModel) -> PartModel:
+    """Lower supported semantic requirements through exact source topology."""
+    raw = {
+        index: feature
+        for index, feature in enumerate(model.features)
+        if isinstance(feature, PmiFeature)
+        and feature.source_category == "manufacturing_requirement"
+        and feature.pmi_kind in {"external_thread", "internal_thread", "knurl"}
+    }
+    if not raw:
+        return model
+
+    owners = [
+        feature
+        for feature in model.features
+        if isinstance(feature, (StepFeature, BossFeature, HoleFeature, PatternFeature))
+    ]
+    replacements: dict[int, Feature] = {}
+    consumed: set[int] = set()
+    blocked: dict[int, str] = {}
+    claimed: set[int] = set()
+    for index, feature in raw.items():
+        if feature.lowering_blockers:
+            continue
+        try:
+            requirement = (
+                _knurl_requirement(feature)
+                if feature.pmi_kind == "knurl"
+                else _thread_requirement(feature)
+            )
+        except ValueError as exc:
+            blocked[index] = str(exc)
+            continue
+        reference = requirement.cylindrical_refs[0] if requirement.cylindrical_refs else None
+        expected_diameter = (
+            requirement.maximum_diameter
+            if isinstance(requirement, KnurlRequirement)
+            else requirement.drill_diameter
+            if requirement.application == "internal"
+            else requirement.nominal_diameter
+        )
+        if (
+            reference is None
+            or expected_diameter is None
+            or not _same_number(reference.diameter, expected_diameter, abs_tol=0.01)
+        ):
+            blocked[index] = "manufacturing requirement text disagrees with source cylinder"
+            continue
+        matches = [
+            owner
+            for owner in owners
+            if _manufacturing_owner_matches(requirement, owner, model.bbox)
+        ]
+        if len(matches) != 1:
+            blocked[index] = (
+                "unmatched manufacturing requirement: no canonical feature matches source topology"
+                if not matches
+                else f"ambiguous manufacturing requirement: source topology matches {len(matches)} canonical features"
+            )
+            continue
+        owner = matches[0]
+        if id(owner) in claimed:
+            blocked[index] = (
+                "ambiguous manufacturing requirement: canonical feature is already claimed"
+            )
+            continue
+        current = replacements.get(id(owner), owner)
+        updated: Feature
+        if isinstance(requirement, KnurlRequirement):
+            assert isinstance(current, (StepFeature, BossFeature))
+            if getattr(current, "knurl", None) is not None:
+                blocked[index] = (
+                    "ambiguous knurl ownership: canonical feature already has a knurl aspect"
+                )
+                continue
+            updated = replace(current, knurl=requirement)
+        elif isinstance(current, PatternFeature):
+            if current.member.thread is not None:
+                blocked[index] = (
+                    "ambiguous thread ownership: canonical hole already has a thread aspect"
+                )
+                continue
+            updated = replace(current, member=replace(current.member, thread=requirement))
+        else:
+            assert isinstance(current, (StepFeature, BossFeature, HoleFeature))
+            if getattr(current, "thread", None) is not None:
+                blocked[index] = (
+                    "ambiguous thread ownership: canonical feature already has a thread aspect"
+                )
+                continue
+            updated = replace(current, thread=requirement)
+        replacements[id(owner)] = updated
+        claimed.add(id(owner))
+        consumed.add(index)
+
+    lowered = _remap_model_features(model, replacements)
+    rebuilt: list[Feature] = []
+    for index, lowered_feature in enumerate(lowered.features):
+        if index in consumed:
+            continue
+        if index in blocked and isinstance(lowered_feature, PmiFeature):
+            lowered_feature = _block_requirement(lowered_feature, blocked[index])
+        rebuilt.append(lowered_feature)
+    return replace(lowered, features=rebuilt)
+
+
 def lower_ap242_dimensions(model: PartModel) -> PartModel:
-    """Run every geometry-correlated AP242 dimensional lowering at the IR waist."""
-    return lower_ap242_nominal_diameters(lower_ap242_hole_tolerances(model))
+    """Run every geometry-correlated AP242 lowering at the IR waist."""
+    dimensions = lower_ap242_nominal_diameters(lower_ap242_hole_tolerances(model))
+    return lower_ap242_manufacturing_requirements(dimensions)
