@@ -8202,13 +8202,11 @@ class TestFindSlots:
         assert recognise_pockets(void) == []
 
     def test_pivot_boss_at_slot_end_does_not_extend_length(self):
-        # A slotted lever with a cylindrical pivot boss (radius = width/2) protruding at one
-        # end must NOT be read as a radiused end: the boss sits at a different depth than the
-        # slot, and a true obround is symmetric (both ends). Flat length 22 stays 22 (#613 review).
+        # A rectangular cut interrupted by a cylindrical pivot boss contains solid material
+        # inside the proposed recess prism, so it is not a complete slot. Recognisers 0.3.1
+        # deliberately rejects the candidate instead of reporting a misleading 22 mm slot.
         part = Box(60, 30, 10) - Box(22, 8, 20) + Pos(11.3, 0, 5) * Cylinder(4, 10)
-        (s,) = recognise_slots(part)
-        assert s.length == 22.0
-        assert (s.lo, s.hi) == (-11.0, 11.0)
+        assert recognise_slots(part) == []
 
     def test_coaxial_blind_hole_does_not_extend_pocket(self):
         # A blind pocket with a separate blind hole (radius = width/2) drilled from the far
