@@ -68,6 +68,24 @@ _RECON_DIA_TOL = 0.2
 _RECON_POS_TOL = 0.5
 _LOCATION_AXIS_TOL = 1.0
 
+
+def _location_ref(owner, point) -> HoleRef:
+    """Location identity with an irrelevant through-axis coordinate removed.
+
+    Declared through holes use the cutter origin while recognition reports the
+    bore midpoint.  Those are the same hole for location purposes: only the two
+    coordinates perpendicular to its axis can require locating dimensions.
+    Blind/opposed holes retain their axial coordinate so distinct features do not
+    acquire one another's semantic evidence.
+    """
+    axis = getattr(getattr(owner, "frame", None), "axis", None) or _axis_letter(owner)
+    coords = list(_xyz(point))
+    hole = getattr(owner, "member", owner)
+    if getattr(hole, "through", False) or getattr(hole, "bottom", None) == "through":
+        coords["xyz".index(axis)] = 0.0
+    return HoleRef.of(coords)
+
+
 # Declared feature kinds with a single defining cylinder to confirm against geometry, mapped to the
 # cylinder polarity that confirms them: a hole is a bore (external=False); a boss / turned step is
 # external material (external=True). Checking polarity stops a phantom hole being silenced by a
@@ -418,19 +436,23 @@ def lint_location_coverage(
                 dim_verts.setdefault(view, []).extend(_dim_vertices(ann))
             for feature, parameter, point in decoded:
                 if getattr(feature, "kind", None) == "hole":
-                    structured_locations.add((feature, str(parameter), HoleRef.of(point)))
+                    structured_locations.add(
+                        (feature, str(parameter), _location_ref(feature, point))
+                    )
 
     # Index only semantic owners that placed facts actually carry. This avoids an
     # O(holes × model-features × members) rescan and preserves the documented
     # external-producer contract: no ``Drawing.model()`` method is required.
-    feature_index = {}
+    feature_index: dict[tuple[str, HoleRef], set[object]] = {}
     for feature in {owner for owner, _parameter, _point in structured_locations}:
         frame = getattr(feature, "frame", None)
         if frame is None:
             continue
         members = getattr(feature, "members", ()) or (frame.origin,)
         for point in members:
-            feature_index[(frame.axis, HoleRef.of(point))] = feature
+            feature_index.setdefault((frame.axis, _location_ref(feature, point)), set()).add(
+                feature
+            )
 
     bb = part.bounding_box()
     centre = (bb.center().X, bb.center().Y, bb.center().Z)
@@ -446,17 +468,17 @@ def lint_location_coverage(
         # A hole coaxial with the part centre (the turning axis / a symmetry axis)
         # is located by centrelines, not a position dim — exempt from location.
         perp = [(ax, c, q) for ax, c, q in zip("xyz", (x, y, z), centre) if ax != axis]
-        ref = HoleRef.of(h.location)
+        ref = _location_ref(h, h.location)
         required_axes = [ax for ax, c, q in perp if abs(c - q) > _LOCATION_AXIS_TOL]
         if ref in patterned or not required_axes:
             continue
 
-        feature = feature_index.get((axis, ref))
+        features = feature_index.get((axis, ref), set())
         page_axes = VIEW_AXES[view]
 
         def _axis_covered(model_axis):
-            semantic = feature is not None and any(
-                owner is feature and parameter.endswith(f".{model_axis}") and point == ref
+            semantic = any(
+                owner in features and parameter.endswith(f".{model_axis}") and point == ref
                 for owner, parameter, point in structured_locations
             )
             page_index = page_axes.index(model_axis)

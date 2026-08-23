@@ -131,9 +131,23 @@ def _annotation_hole_features(registry, name, annotation) -> frozenset:
             features.add(feature)
     for fact in getattr(annotation, "covers_hole_locations", ()):
         decoded = _decode_hole_location_fact(fact)
-        if decoded is None:
-            continue
-        feature, _parameter, _point = decoded
+        if decoded is not None:
+            feature = decoded[0]
+        else:
+            # Replacement ownership is a broader question than whether a fact can
+            # prove axis-specific coverage.  Legacy/external riders may carry only
+            # ``(measurement, point)``; retain that measurement's semantic owner
+            # even when it has no parameter and the strict decoder rightly refuses
+            # to treat it as location evidence.
+            try:
+                candidate = fact[0]
+            except (IndexError, TypeError):
+                continue
+            feature = (
+                candidate
+                if getattr(candidate, "kind", None) in {"hole", "pattern"}
+                else getattr(candidate, "feature", None)
+            )
         if getattr(feature, "kind", None) in {"hole", "pattern"}:
             features.add(feature)
     for feature, _requirement, _count in getattr(
