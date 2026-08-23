@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from itertools import chain, islice, tee
+from itertools import chain, groupby, islice, tee
 from typing import Any
 
 from build123d_drafting import DatumFeature, FeatureControlFrame, SurfaceFinish, TextBlock
@@ -1407,21 +1407,21 @@ def _diameter_source_bounds(dwg, view, feature, diameter) -> tuple[float, float,
     )
 
 
-def _render_typed_diameter_leaders(dwg, a, buckets, *, prefix, start, ctx) -> int:
+def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ctx) -> int:
     """Route a typed thread/knurl diameter row through the shared leader solve.
 
     The legacy row deliberately gives every item the widest label's pitch.  That is stable and
-    tidy for short diameter strings, but one authoritative manufacturing label can then evict
-    every sibling even on a large sheet.  Once any bucket carries typed manufacturing intent,
-    collect the whole row together so the global feature-leader solve can use independent
-    label footprints and multiple clear lanes.  Plain rows keep their byte-stable legacy path.
+    tidy for short diameter strings, but an authoritative manufacturing paragraph cannot share
+    that pitch without evicting its siblings.  Collect typed buckets into the global
+    feature-leader solve, which has independent label footprints and multiple clear lanes;
+    short plain buckets retain their byte-stable legacy row.
     """
     vb = dwg.view_bounds("front")
     if vb is None:
         return 0
     reach = _leader_callout_reach(dwg.draft)
     jobs = []
-    for index, (_anchor, dia, refs, dtol, suffix, groups) in enumerate(buckets.values()):
+    for index, (_anchor, dia, refs, dtol, suffix, groups) in indexed_buckets:
         owner = next(iter(refs)) if len(refs) == 1 else None
         representative = groups[0].facts
         source_bounds = _diameter_source_bounds(dwg, "front", representative, dia)
@@ -1514,23 +1514,24 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         if entry[3] is None:
             entry[3] = dtol
 
-    def _items(buckets):
+    def _item(entry):
         # The trailing element is the ADR 0010 claim: one ø callout stands for every step
         # sharing this diameter, so it draws each of their diameter dims (#1002). It is the
         # same derivation the m_dia_y branch below already made; the row/column placers
         # threaded nothing, so every X- and Z-turned ø callout reached the sheet unclaimed
         # and no verifier could see it (#1227).
-        return [
-            (
-                _diameter_step_anchor(a, gs),
-                d,
-                next(iter(refs)) if len(refs) == 1 else None,
-                t,
-                thr,
-                tuple(pd.id for gp in gs for pd in gp.dims if pd.kind == "diameter"),
-            )
-            for a, d, refs, t, thr, gs in buckets.values()
-        ]
+        a, d, refs, t, thr, gs = entry
+        return (
+            _diameter_step_anchor(a, gs),
+            d,
+            next(iter(refs)) if len(refs) == 1 else None,
+            t,
+            thr,
+            tuple(pd.id for gp in gs for pd in gp.dims if pd.kind == "diameter"),
+        )
+
+    def _items(buckets):
+        return [_item(entry) for entry in buckets.values()]
 
     # The placers name leaders m_dia_{x,z}{start+i} CONTIGUOUSLY from one start. The auto-pass
     # (only None) uses start=0 — byte-identical. The finalize path (only set) may run after
@@ -1550,23 +1551,41 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     start_y = _next_start("m_dia_y") if only is not None else 0
     start_z = _next_start("m_dia_z") if only is not None else 0
     trace = getattr(ctx, "trace", None)  # the immediate placers report to the trace too (#736)
-    typed_row = any(
-        isinstance(group.facts.get("thread"), ThreadRequirement)
-        or isinstance(group.facts.get("knurl"), KnurlRequirement)
-        for entry in row_buckets.values()
-        for group in entry[5]
-    )
-    if typed_row:
-        placed = _render_typed_diameter_leaders(
+    indexed_row = list(enumerate(row_buckets.values()))
+
+    def _typed(entry):
+        return any(
+            isinstance(group.facts.get("thread"), ThreadRequirement)
+            or isinstance(group.facts.get("knurl"), KnurlRequirement)
+            for group in entry[5]
+        )
+
+    typed_entries = [(index, entry) for index, entry in indexed_row if _typed(entry)]
+    plain_entries = [(index, entry) for index, entry in indexed_row if not _typed(entry)]
+    placed = 0
+    # Preserve the legacy tidy row for short plain diameters. Split only where a typed
+    # bucket owns the intervening stable name; each contiguous run can then use the legacy
+    # solver without renumbering a source-owned callout.
+    for _, run in groupby(
+        enumerate(plain_entries),
+        key=lambda item: item[1][0] - item[0],
+    ):
+        entries = [entry for _ordinal, entry in run]
+        placed += _diameter_row_below(
             dwg,
-            a,
-            row_buckets,
-            prefix="m_dia_x",
-            start=start_x,
+            [_item(entry) for _index, entry in entries],
+            start=start_x + entries[0][0],
+            trace=trace,
             ctx=ctx,
         )
-    else:
-        placed = _diameter_row_below(dwg, _items(row_buckets), start=start_x, trace=trace, ctx=ctx)
+    placed += _render_typed_diameter_leaders(
+        dwg,
+        a,
+        typed_entries,
+        prefix="m_dia_x",
+        start=start_x,
+        ctx=ctx,
+    )
     placed += _diameter_column_left(dwg, _items(col_buckets), start=start_z, trace=trace, ctx=ctx)
 
     # A Y-axis step is end-on in the front view, so the X/Z profile-strip
