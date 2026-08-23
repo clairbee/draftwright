@@ -1357,6 +1357,10 @@ class AuthoredDimension:
     # canonical geometry feature.  The reason is structured and round-trips, rather than
     # disappearing into a log line or an emitter-only comment (#1116).
     lowering_blockers: tuple[str, ...] = ()
+    # Geometry-evidence failures that prevent truthful rendering. These are distinct from
+    # ``lowering_blockers``: failure to correlate to a canonical owner still permits the
+    # standalone authored-dimension fallback promised by #1116 (#1209 review).
+    rendering_blockers: tuple[str, ...] = ()
     kind: ClassVar[str] = "authored_dimension"
 
     @property

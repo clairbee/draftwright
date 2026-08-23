@@ -2072,6 +2072,7 @@ def measured_dimension(
     source_kind: str | None = None,
     source_id: str = "",
     lowering_blockers: tuple[str, ...] = (),
+    rendering_blockers: tuple[str, ...] = (),
 ) -> AuthoredDimension:
     """A pre-authored drafting dimension from explicit measured values — the IR constructor
     behind :meth:`Sheet.measured_dimension` (#704: extracted so ``build_drawing(model=…)``
@@ -2081,21 +2082,25 @@ def measured_dimension(
     ``lower_bound`` and ``upper_bound`` carry a limit range and must be supplied together; they
     are mutually exclusive with deviation tolerances. ``source_id`` preserves an external
     record identity; ordinary Sheet declarations leave it blank. ``lowering_blockers`` retains
-    why an imported requirement could not safely enrich a canonical feature parameter."""
+    why an imported requirement could not safely enrich a canonical feature parameter;
+    ``rendering_blockers`` retains why its source geometry cannot truthfully form a witness."""
     _require_positive(value=value)
     dim_kind = str(kind).lower()
     if dim_kind not in AUTHORED_DIMENSION_KINDS:
         allowed = ", ".join(sorted(AUTHORED_DIMENSION_KINDS))
         raise ValueError(f"measured_dimension() kind must be one of: {allowed}")
     pts = tuple(_point3("ref_pts item", p) for p in ref_pts)
-    if len(pts) < 2:
+    imported_blocked = bool(source_id and rendering_blockers)
+    if len(pts) < 2 and not imported_blocked:
         raise ValueError("measured_dimension() needs at least two ref_pts")
     bbox = None if ref_bbox is None else tuple(float(c) for c in ref_bbox)
     if bbox is not None and len(bbox) != 6:
         raise ValueError("measured_dimension() ref_bbox must be a 6-tuple")
     dom = str(dominant_axis).upper()
     if dom not in ("X", "Y", "Z"):
-        if not (dom == "?" and dim_kind in ("diameter", "radius") and bbox is not None):
+        unresolved_import = dom == "?" and imported_blocked
+        unresolved_bore = dom == "?" and dim_kind in ("diameter", "radius") and bbox is not None
+        if not (unresolved_import or unresolved_bore):
             raise ValueError("measured_dimension() dominant_axis must be X, Y, or Z")
     if (lower_bound is None) != (upper_bound is None):
         raise ValueError("measured_dimension() needs both lower_bound and upper_bound")
@@ -2135,4 +2140,5 @@ def measured_dimension(
         source_kind=source_kind or dim_kind,
         source_id=str(source_id),
         lowering_blockers=tuple(str(reason) for reason in lowering_blockers),
+        rendering_blockers=tuple(str(reason) for reason in rendering_blockers),
     )

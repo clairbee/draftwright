@@ -10,6 +10,7 @@ from draftwright.annotations.from_model import _pmi_witness_from_bbox
 from draftwright.pmi import _linear_reference_stations
 
 CTC04 = Path(__file__).parent / "fixtures" / "nist_ctc_04_asme1_ap242.stp"
+CTC03 = Path(__file__).parent / "fixtures" / "nist_ctc_03_asme1_ap242.stp"
 
 
 @pytest.mark.parametrize(
@@ -65,12 +66,14 @@ def test_ctc04_uses_authored_groups_and_reports_the_two_untruthful_records():
 
     oblique = records["dimension:0:1:4:26"]
     assert oblique.dominant_axis == "?"
-    assert "not principal-axis aligned" in oblique.lowering_blockers[0]
+    assert oblique.lowering_blockers == ()
+    assert "not principal-axis aligned" in oblique.rendering_blockers[0]
 
     one_sided = records["dimension:0:1:4:29"]
     assert one_sided.dominant_axis == "?"
     assert len(one_sided.ref_pts) == 1
-    assert one_sided.lowering_blockers == (
+    assert one_sided.lowering_blockers == ()
+    assert one_sided.rendering_blockers == (
         "linear dimension needs two measurable authored reference groups",
     )
 
@@ -78,6 +81,58 @@ def test_ctc04_uses_authored_groups_and_reports_the_two_untruthful_records():
     assert outcomes[truthful.source_id].outcome == "extracted"
     assert outcomes[oblique.source_id].outcome == "partially_extracted"
     assert outcomes[one_sided.source_id].outcome == "partially_extracted"
+
+
+def test_ap242_thickness_without_two_proven_groups_fails_closed():
+    record = next(
+        record for record in extract_pmi_report(CTC03).records if record.kind == "thickness"
+    )
+
+    assert record.source_id == "dimension:0:1:4:47"
+    assert record.value == pytest.approx(0.82)
+    assert record.dominant_axis == "?"
+    assert record.lowering_blockers == ()
+    assert record.rendering_blockers == (
+        "thickness dimension needs two measurable authored reference groups",
+    )
+
+
+def test_render_gate_distinguishes_correlation_from_geometry_blockers():
+    from build123d import Box
+
+    from draftwright import Sheet
+
+    sheet = Sheet(Box(40, 30, 20), number="1209")
+    sheet.measured_dimension(
+        kind="linear",
+        value=16,
+        label="16",
+        dominant_axis="Y",
+        ref_pts=((0, -8, 0), (0, 8, 0)),
+        source_id="dimension:correlation-fallback",
+        lowering_blockers=("unmatched hole correlation: no canonical owner",),
+    )
+    sheet.measured_dimension(
+        kind="linear",
+        value=25,
+        label="25",
+        dominant_axis="?",
+        ref_pts=((0, 0, 0),),
+        source_id="dimension:geometry-blocked",
+        rendering_blockers=("linear dimension needs two measurable authored reference groups",),
+    )
+    sheet.authored_dimensions()
+    drawing = sheet.build()
+
+    features = {feature.source_id: feature for feature in drawing.model().features}
+    fallback_feature = features["dimension:correlation-fallback"]
+    blocked_feature = features["dimension:geometry-blocked"]
+    assert drawing.registry.names_for_feature(fallback_feature)
+    assert drawing.registry.names_for_feature(blocked_feature) == []
+    unresolved = [
+        issue for issue in drawing.lint() if issue.code == "authored_dim_source_unresolved"
+    ]
+    assert [issue.source_ids for issue in unresolved] == [("dimension:geometry-blocked",)]
 
 
 def test_linear_witness_uses_stations_while_bbox_supplies_only_transverse_support():

@@ -433,6 +433,43 @@ class TestEmit:
         assert (feature.lower_bound, feature.upper_bound) == (34.8, 35.2)
         assert feature.label == "ø34.8 - ø35.2"
 
+    def test_unresolved_imported_dimension_round_trips_both_blocker_classes(self):
+        """A one-sided AP242 relationship remains typed and reproducible while fail-closed."""
+        from draftwright import Sheet
+        from draftwright.sheet_emit import emit_sheet_script
+
+        part = Box(40, 20, 10)
+        sheet = Sheet(part, title="P").authored_dimensions()
+        sheet.measured_dimension(
+            kind="linear",
+            value=25,
+            label="25",
+            dominant_axis="?",
+            ref_pts=((0, 0, 0),),
+            source="ap242_pmi",
+            source_id="dimension:one-sided",
+            lowering_blockers=("canonical correlation unavailable",),
+            rendering_blockers=(
+                "linear dimension needs two measurable authored reference groups",
+            ),
+        )
+
+        src = emit_sheet_script(sheet.model(), "part", "blocked", title="P", number="N")
+        namespace = {"part": part}
+        body = src[: src.index("drawing = sheet.build()")]
+        exec(compile(body, "<blocked-dimension-emit>", "exec"), namespace)  # noqa: S102
+        feature = next(
+            feature
+            for feature in namespace["sheet"].model().features
+            if feature.source_id == "dimension:one-sided"
+        )
+
+        assert feature.ref_pts == ((0.0, 0.0, 0.0),)
+        assert feature.lowering_blockers == ("canonical correlation unavailable",)
+        assert feature.rendering_blockers == (
+            "linear dimension needs two measurable authored reference groups",
+        )
+
     def test_raw_pmi_round_trips_part21_identity(self):
         """Execute the generated declaration; emitted text alone is not the contract."""
         import dataclasses

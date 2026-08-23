@@ -176,22 +176,23 @@ class PmiRecord:
         lower_bound:    Lower limit of a range dimension, in the same units as ``value``.
         upper_bound:    Upper limit of a range dimension, in the same units as ``value``.
         ref_pts:        Reference stations in global STEP space (same coordinate frame as
-                        the imported solid). For a linear dimension these are the centroids
-                        of its two authored reference groups; other records retain the
-                        per-shape bounding-box centroids.
+                        the imported solid). For a linear or thickness dimension these are
+                        the centroids of its authored reference groups; other records retain
+                        the per-shape bounding-box centroids.
         ref_bbox:       Combined axis-aligned bbox of ALL referenced shapes:
                         ``(xmin, ymin, zmin, xmax, ymax, zmax)``. Linear rendering uses
                         it for transverse witness support only; the authored stations,
                         not this outer envelope, own the measured span.
-        dominant_axis:  ``'X'``, ``'Y'``, ``'Z'``, or ``'?'`` — a linear dimension's
-                        proven reference-station direction; for other records, the
-                        referenced geometry's largest bbox extent.
+        dominant_axis:  ``'X'``, ``'Y'``, ``'Z'``, or ``'?'`` — a linear/thickness
+                        dimension's proven reference-station direction; for other records,
+                        the referenced geometry's largest bbox extent.
         label:          Ready-to-use annotation label (e.g. ``"ø35"``, ``"60"``).
         datum_refs:     Ordered datum letters referenced by a geometric tolerance.
         part21_id:      Part21 entity id supplying an overlaid tolerance magnitude.
         source_category: Source inventory category; structural evidence for concept lowering.
         gtol_modifiers: Stable names for the source geometric-tolerance modifier sequence.
         lowering_blockers: Missing/unrepresented facts that make concept lowering unsafe.
+        rendering_blockers: Source-geometry facts that make a typed dimension unsafe to draw.
         source_ids:     All source occurrences represented by one projected definition.
         datum_contexts: Tolerance semantic names in which a datum definition is referenced.
         reference_item_ids: Exact Part21 representation items bound to a datum feature.
@@ -228,6 +229,9 @@ class PmiRecord:
     reference_axis: str = ""
     semantic_name: str = ""
     shape_aspect_ids: tuple[str, ...] = ()
+    # Kept separate from ``lowering_blockers``: an imported requirement may fail to enrich a
+    # canonical owner yet remain a truthful standalone dimension (#1116/#1209).
+    rendering_blockers: tuple[str, ...] = ()
 
 
 PmiExtractionOutcome = Literal[
@@ -868,10 +872,19 @@ def _dimension_record(
     )
     partial_reasons.extend(reference_reasons)
     kind = _DIM_TYPE.get(type_code, f"type{type_code}")
-    if kind == "linear":
+    rendering_blockers: tuple[str, ...] = ()
+    if kind in ("linear", "thickness"):
         points, dominant_axis, station_reasons = _linear_reference_stations(group_stations, value)
-        partial_reasons.extend(station_reasons)
-    blockers = tuple(dict.fromkeys(partial_reasons))
+        if kind == "thickness":
+            station_reasons = tuple(
+                reason.replace("linear dimension", "thickness dimension").replace(
+                    "linear reference", "thickness reference"
+                )
+                for reason in station_reasons
+            )
+        rendering_blockers = tuple(dict.fromkeys(station_reasons))
+    lowering_blockers = tuple(dict.fromkeys(partial_reasons))
+    blockers = tuple(dict.fromkeys((*lowering_blockers, *rendering_blockers)))
     return (
         PmiRecord(
             kind=kind,
@@ -894,7 +907,8 @@ def _dimension_record(
             ),
             source_id=source_id,
             source_category="dimension",
-            lowering_blockers=blockers,
+            lowering_blockers=lowering_blockers,
+            rendering_blockers=rendering_blockers,
         ),
         blockers,
     )

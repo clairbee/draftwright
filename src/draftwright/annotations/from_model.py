@@ -5088,7 +5088,7 @@ def _authored_with_usable_references(record) -> bool:
         record.kind == "authored_dimension"
         and record.value > 0
         and len(record.ref_pts) >= 2
-        and not getattr(record, "lowering_blockers", ())
+        and not getattr(record, "rendering_blockers", ())
     )
 
 
@@ -5099,18 +5099,18 @@ def _blocked_authored_dimension_records(records):
         for record in records
         if record.kind == "authored_dimension"
         and record.value > 0
-        and getattr(record, "lowering_blockers", ())
+        and getattr(record, "rendering_blockers", ())
     ]
 
 
 def _record_blocked_authored_dimension(ctx, rec):
     source_id = getattr(rec, "source_id", "")
-    reasons = "; ".join(rec.lowering_blockers)
+    reasons = "; ".join(rec.rendering_blockers)
     ctx.record_issue(
         "error" if source_id else "warning",
         "authored_dim_source_unresolved",
         f"authored dimension {getattr(rec, 'label', '')!r} is not drawn because its source "
-        f"intent is unresolved: {reasons}",
+        f"reference geometry is unresolved: {reasons}",
         source=source_id,
         outcome_stage="validation",
     )

@@ -1119,6 +1119,7 @@ class Sheet:
         source_kind: str | None = None,
         source_id: str = "",
         lowering_blockers: tuple[str, ...] = (),
+        rendering_blockers: tuple[str, ...] = (),
     ) -> _Params:
         """Declare a drafting dimension from explicit **measured** values.
 
@@ -1136,7 +1137,8 @@ class Sheet:
         ``upper_tol``/``lower_tol`` for a limit range. ``source_id`` is the external record
         identity retained by generated imported-PMI scripts; hand-authored dimensions normally
         leave it blank. ``lowering_blockers`` carries the explicit reason a supported imported
-        requirement could not safely enrich a canonical feature parameter.
+        requirement could not safely enrich a canonical feature parameter;
+        ``rendering_blockers`` carries the source-geometry reason it cannot be drawn truthfully.
         Delegates to :func:`draftwright.model.declare.measured_dimension` (#704), so
         ``build_drawing(model=…)`` callers can author the same feature without the façade.
         """
@@ -1158,6 +1160,7 @@ class Sheet:
                 source_kind=source_kind,
                 source_id=source_id,
                 lowering_blockers=lowering_blockers,
+                rendering_blockers=rendering_blockers,
             )
         )
         # A handle like every other declaration verb (#922). A measured dimension carries its
