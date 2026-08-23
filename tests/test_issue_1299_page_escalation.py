@@ -142,6 +142,85 @@ def test_no_iso_proposal_on_different_page_reselects_scale_for_original_page(mon
     ]
 
 
+def test_expected_larger_page_build_failure_is_recorded_before_next_page(monkeypatch):
+    class FakeDrawing:
+        def __init__(self, *, page, include_iso):
+            self.page_w, self.page_h = page
+            self.scale = 2.0
+            self.views = {"front": object()}
+            if include_iso:
+                self.views["iso"] = object()
+            self.solve_trace = None
+
+        def model(self):
+            return SimpleNamespace(authored_dimensions=None)
+
+        def lint(self, *, physical=False):
+            return ()
+
+    def fake_one_pass(
+        _step_file,
+        *,
+        page,
+        _include_iso,
+        _analysis_sink,
+        **_kwargs,
+    ):
+        _analysis_sink(
+            SimpleNamespace(
+                arrangement=builder.ARRANGEMENTS[0],
+                part=object(),
+                prof=object(),
+            )
+        )
+        if page == "A3":
+            raise ValueError("drawing geometry degenerates on speculative A3")
+        dimensions = {
+            None: (297.0, 210.0),
+            "A2": (594.0, 420.0),
+        }[page]
+        return FakeDrawing(page=dimensions, include_iso=_include_iso)
+
+    monkeypatch.setattr(builder, "_build_drawing_once", fake_one_pass)
+    monkeypatch.setattr(
+        builder,
+        "lint_axial_coverage",
+        lambda _part, drawing, *, prof: ("gap",) if drawing.page_w == 297.0 else (),
+    )
+
+    drawing = builder.build_drawing(object())
+
+    assert (drawing.page_w, drawing.page_h) == (594.0, 420.0)
+    assert [
+        (
+            attempt["page"],
+            attempt["status"],
+            attempt["reason"],
+            attempt.get("error"),
+        )
+        for attempt in drawing.scale_decision["attempts"]
+    ] == [
+        ((297.0, 210.0), "axial_coverage_incomplete", "remove_optional_iso", None),
+        ((297.0, 210.0), "rejected", "remove_optional_iso", None),
+        (
+            (420.0, 297.0),
+            "error",
+            "page_escalation_after_optional_iso",
+            "drawing geometry degenerates on speculative A3",
+        ),
+        ((594.0, 420.0), "complete", "page_escalation_after_optional_iso", None),
+    ]
+
+    def unexpected_one_pass(*args, page, **kwargs):
+        if page == "A3":
+            raise ValueError("invalid declared model")
+        return fake_one_pass(*args, page=page, **kwargs)
+
+    monkeypatch.setattr(builder, "_build_drawing_once", unexpected_one_pass)
+    with pytest.raises(ValueError, match="invalid declared model"):
+        builder.build_drawing(object())
+
+
 def test_explicit_a4_remains_fixed_instead_of_escalating():
     drawing = build_drawing(_five_step_grm_profile(), page="A4", pmi="off")
 
