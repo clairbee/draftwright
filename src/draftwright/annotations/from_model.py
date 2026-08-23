@@ -1434,7 +1434,29 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
             source_bounds=source_bounds,
             directions=_DIAMETER_LEAD_DIRS[representative.frame.axis],
         )
-        candidates = ((tip, elbow, owner) for tip, elbow, _provenance in raw_candidates)
+
+        def _wide_lanes(_raw=raw_candidates):
+            # Short adjacent turned bands put their radial leaders directly under the axial
+            # dimension chain.  The shared adapter adds nearby lanes; typed manufacturing
+            # text also needs a bounded set of farther elbows so its shaft can clear those
+            # fixed labels while its arrow remains on the same cylindrical rim.
+            spacing = dwg.draft.font_size + 2 * dwg.draft.pad_around_text
+            for tip, elbow, _provenance in _raw:
+                dx, dy = float(elbow[0]) - float(tip[0]), float(elbow[1]) - float(tip[1])
+                length = math.hypot(dx, dy) or 1.0
+                px, py = -dy / length, dx / length
+                for lane in (0, 4, -4, 8, -8):
+                    yield (
+                        tip,
+                        (
+                            float(elbow[0]) + px * spacing * lane,
+                            float(elbow[1]) + py * spacing * lane,
+                            0,
+                        ),
+                        owner,
+                    )
+
+        candidates = _wide_lanes()
         jobs.append(
             (
                 f"{prefix}{start + index}",

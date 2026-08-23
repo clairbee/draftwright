@@ -372,7 +372,13 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
     assert not [
         issue
         for issue in drawing.lint()
-        if issue.code in {"diameter_dropped", "pmi_not_rendered", "annotation_overlap"}
+        if issue.code
+        in {
+            "diameter_dropped",
+            "pmi_not_rendered",
+            "annotation_overlap",
+            "feature_leader_crossing",
+        }
     ]
     axis_y = drawing.at("front", 0.0, 0.0, 0.0)[1]
     for name, diameter in {
