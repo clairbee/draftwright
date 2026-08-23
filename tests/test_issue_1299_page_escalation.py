@@ -215,8 +215,8 @@ def test_required_drop_without_axial_gap_uses_the_same_bounded_page_recovery(mon
     ]
 
 
-def test_conservative_detail_recovery_uses_a_larger_complete_primary_view(monkeypatch):
-    """A truthful but dominant detail is not preferred over a bounded clean sheet."""
+def test_complete_detail_drawing_stays_on_its_original_page(monkeypatch):
+    """#1299 does not broaden recovery beyond incomplete axial/source-owned plans."""
 
     class FakeDrawing:
         def __init__(self, *, page, scale, include_iso, detail):
@@ -271,8 +271,8 @@ def test_conservative_detail_recovery_uses_a_larger_complete_primary_view(monkey
 
     drawing = builder.build_drawing(object())
 
-    assert (drawing.page_w, drawing.page_h, drawing.scale) == (420.0, 297.0, 5.0)
-    assert "detail_a" not in drawing.views
+    assert (drawing.page_w, drawing.page_h, drawing.scale) == (297.0, 210.0, 2.0)
+    assert "detail_a" in drawing.views
     assert [
         (
             attempt["page"],
@@ -292,7 +292,6 @@ def test_conservative_detail_recovery_uses_a_larger_complete_primary_view(monkey
         ),
         ((297.0, 210.0), 5.0, "rejected", "measured_upscale", "recovery_detail_retained"),
         ((297.0, 210.0), 10.0, "rejected", "measured_upscale", "recovery_detail_retained"),
-        ((420.0, 297.0), 5.0, "complete", "page_escalation_after_detail", None),
     ]
 
 

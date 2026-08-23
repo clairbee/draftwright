@@ -1863,24 +1863,6 @@ def build_drawing(
                     candidate=candidate_drawing,
                 )
 
-            # A conservative detail reservation may be truthful yet still dominate the
-            # sheet after every same-page measured upscale is rejected.  Page preference is
-            # subordinate to a complete primary-view drawing here too: use the same bounded
-            # standard-page tail as the optional-ISO correction, retaining ISO because this
-            # branch is correcting the detail reservation alone.
-            if _has_detail_view(drawing.views) and page is None:
-                larger, issues = _try_larger_standard_pages(
-                    original_page,
-                    include_iso=_include_iso,
-                    reason="page_escalation_after_detail",
-                    fallback_views=drawing.views,
-                    require_axial_coverage=True,
-                )
-                if larger is not None:
-                    drawing = larger
-                    settled_issues = issues
-                    replanned = True
-
         # #443/#1299: a pictorial view is useful context, but it cannot outrank the
         # dimensions or other required annotations needed to manufacture a part.
         # GRM-03 originally selected 2:1 with ISO, collapsed its 0.5 + 2 mm head
@@ -1906,8 +1888,11 @@ def build_drawing(
                 )
             )
             original_issues, original_blockers = _automatic_assessment(drawing)
+            source_blockers = tuple(
+                blocker for blocker in original_blockers if blocker["source_ids"]
+            )
             settled_issues = original_issues
-            if original_has_axial_gap or original_blockers:
+            if original_has_axial_gap or source_blockers:
                 _record_attempt(
                     drawing.scale,
                     (
@@ -1915,7 +1900,7 @@ def build_drawing(
                         if original_has_axial_gap
                         else "required_outcome_dropped"
                     ),
-                    original_blockers,
+                    source_blockers,
                     reason="remove_optional_iso",
                     candidate=drawing,
                 )
