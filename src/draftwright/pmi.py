@@ -353,6 +353,24 @@ def _linear_reference_stations(
     return measurable, axis, ()
 
 
+def _dimension_geometry_blockers(
+    kind: str,
+    reference_reasons: tuple[str, ...],
+    station_reasons: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Rendering blockers owned by incomplete source geometry, not later correlation.
+
+    A group station computed from the measurable subset is not proof that the authored
+    relationship is complete when another referenced shape was unavailable. Keep those XCAF
+    extraction failures in ``lowering_blockers`` for source accounting *and* in this distinct
+    render gate. Correlation blockers added later by model lowering never pass through here,
+    so #1116's standalone fallback remains drawable (#1209 re-review).
+    """
+    if kind not in ("linear", "thickness"):
+        return ()
+    return tuple(dict.fromkeys((*reference_reasons, *station_reasons)))
+
+
 def _make_label(
     kind: str,
     value: float,
@@ -882,7 +900,7 @@ def _dimension_record(
                 )
                 for reason in station_reasons
             )
-        rendering_blockers = tuple(dict.fromkeys(station_reasons))
+        rendering_blockers = _dimension_geometry_blockers(kind, reference_reasons, station_reasons)
     lowering_blockers = tuple(dict.fromkeys(partial_reasons))
     blockers = tuple(dict.fromkeys((*lowering_blockers, *rendering_blockers)))
     return (

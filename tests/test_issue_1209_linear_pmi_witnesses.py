@@ -7,7 +7,7 @@ import pytest
 
 from draftwright import extract_pmi_report
 from draftwright.annotations.from_model import _pmi_witness_from_bbox
-from draftwright.pmi import _linear_reference_stations
+from draftwright.pmi import _dimension_geometry_blockers, _linear_reference_stations
 
 CTC04 = Path(__file__).parent / "fixtures" / "nist_ctc_04_asme1_ap242.stp"
 CTC03 = Path(__file__).parent / "fixtures" / "nist_ctc_03_asme1_ap242.stp"
@@ -52,6 +52,17 @@ def test_an_oblique_or_one_sided_relationship_fails_closed_without_nominal_guess
     assert len(points) == 2
     assert axis == "X"
     assert blockers == ("linear reference-station span 10 mm differs from nominal 20 mm",)
+
+
+def test_a_partially_measured_group_cannot_render_from_its_incomplete_subset():
+    missing = "one referenced shape is unavailable"
+    assert _dimension_geometry_blockers("linear", (missing,), ()) == (missing,)
+    assert _dimension_geometry_blockers(
+        "thickness", (missing,), ("thickness reference groups occupy the same station",)
+    ) == (missing, "thickness reference groups occupy the same station")
+    # Canonical-correlation blockers are added after extraction and deliberately never enter
+    # this source-geometry gate; #1116's standalone fallback therefore remains renderable.
+    assert _dimension_geometry_blockers("diameter", (missing,), ()) == ()
 
 
 def test_ctc04_uses_authored_groups_and_reports_the_two_untruthful_records():
