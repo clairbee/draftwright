@@ -127,18 +127,22 @@ class TestTheOutcomeIsReadOffTheDrawing:
     @pytest.mark.parametrize(
         ("fixture", "expected"),
         [
-            pytest.param("tests/fixtures/nist_ctc_04_asme1_ap203.stp", 8, id="ctc04"),
+            # Both NIST specimen builds are slow-tier by repository policy. CTC-04
+            # repeatedly exceeded the fast tier's 300 s timeout on Linux/Python 3.10;
+            # CTC-03 had already been classified correctly. The pure canonical-space
+            # tests below retain millisecond-scale PR coverage of the same join rule.
+            pytest.param(
+                "tests/fixtures/nist_ctc_04_asme1_ap203.stp",
+                8,
+                id="ctc04",
+                marks=pytest.mark.slow,
+            ),
             # CTC-03 carries a 45-degree bore and is the only fixture whose raw record axis
             # and spec-rounded axis LETTER differ — the components tie after rounding and
             # `max` takes the first. CTC-04 has non-principal-axis holes too (eight of its 54
             # sit on `(0, -0.3746, 0.9272)`, which is why they are `unverifiable`), but its
             # raw and rounded letters agree, so it cannot expose a lettering mismatch.
             #
-            # SLOW-tier: this build timed out at 300 s on ubuntu 3.10 while taking ~40 s on
-            # macOS. CTC fixture builds are slow-tier by policy in this repo
-            # (`test_e2e_standards.py`), and putting one in the fast tier was the mistake, not
-            # the timeout. `TestTheCanonicalSpaceIsTheLedgersOwn` below pins the same property
-            # in milliseconds, so the fast tier keeps a guard.
             pytest.param(
                 "tests/fixtures/nist_ctc_03_asme1_ap203.stp",
                 5,

@@ -6,13 +6,9 @@ direction cannot break anything here and blocking on it made the *provider* unre
 until its consumer caught up. The obligation to decide did not go away — it moved here,
 where the decision belongs.
 
-**This file is deliberately outside the downstream canary.** ``check_downstream.py`` in
-b123d-recognisers runs ``tests/test_recogniser_capabilities.py`` and
-``tests/test_import_boundaries.py`` against a candidate wheel; those two are the
-*compatibility* contract, and a candidate that adds a family has not broken compatibility.
-Adoption is a Draftwright schedule question, so it is checked in Draftwright's own CI and
-nowhere else. Adding this module to that list would restore exactly the coupling the split
-removed.
+Adoption is a Draftwright schedule question, so it is checked in Draftwright's ordinary CI. An
+additive package family does not break the runtime compatibility join, but advancing the exact
+dependency pin cannot silently leave that family undecided.
 """
 
 from __future__ import annotations

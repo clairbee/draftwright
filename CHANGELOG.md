@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Recogniser integration now uses only the exact `b123d-recognisers` dependency in
+  `pyproject.toml` and `uv.lock`. The separate release-evidence record, dependency-bump workflow,
+  candidate-checkout harness, and release-time capability-version rewrites have been removed;
+  ordinary compatibility tests validate the installed pinned package.
+
 ## v0.4.10 — 2026-08-22
 
 **A view-set-aware planning and turned-edge-treatment patch.** Authored view constraints now

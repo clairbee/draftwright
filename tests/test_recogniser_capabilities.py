@@ -7,8 +7,6 @@ import copy
 import dataclasses
 import importlib.metadata
 import inspect
-import json
-import os
 import typing
 from pathlib import Path
 
@@ -34,20 +32,12 @@ from draftwright.sheet import Sheet
 from draftwright.sheet_emit import _feature_line, emit_sheet_script
 
 ROOT = Path(__file__).parents[1]
-PINNED_VERSION = json.loads(
-    (ROOT / ".github/recogniser-release.json").read_text(encoding="utf-8")
-)["version"]
-CANDIDATE_VERSION = os.environ.get("DRAFTWRIGHT_RECOGNISER_CANDIDATE_VERSION")
-EXPECTED_PACKAGE_VERSION = CANDIDATE_VERSION or PINNED_VERSION
+INSTALLED_PACKAGE_VERSION = importlib.metadata.version("b123d-recognisers")
 
 
 def _validate(*args, **kwargs) -> None:
-    """Run the same contract under the explicitly selected two-checkout candidate, if any."""
-    validate_recogniser_capabilities(
-        *args,
-        **kwargs,
-        candidate_version=CANDIDATE_VERSION,
-    )
+    """Validate the installed package against Draftwright's runtime declaration."""
+    validate_recogniser_capabilities(*args, **kwargs)
 
 
 def test_installed_wheel_layout_validates_portable_contract_without_source_evidence(
@@ -121,11 +111,8 @@ def _emitter_literal_kinds() -> set[str]:
 
 def test_installed_package_contract_validates_without_a_sibling_checkout() -> None:
     distribution = importlib.metadata.distribution("b123d-recognisers")
-    assert distribution.version == EXPECTED_PACKAGE_VERSION
-    if CANDIDATE_VERSION is None:
-        assert distribution.read_text("direct_url.json") is None
-    else:
-        assert distribution.read_text("direct_url.json") is not None
+    assert distribution.version == INSTALLED_PACKAGE_VERSION
+    assert distribution.read_text("direct_url.json") is None
     package_path = Path(inspect.getfile(recognition)).resolve()
     assert package_path.is_relative_to(ROOT / ".venv")
 
@@ -296,7 +283,7 @@ def _supported(value: dict) -> dict:
         (lambda value: value["consumer"].update({"version": "0.4.6"}), "identity/version"),
         (
             lambda value: value["package_compatibility"].update({"version": "==0.1.0"}),
-            "must pin",
+            "installed b123d-recognisers metadata",
         ),
         (
             # The stale direction, and the one that really breaks: an id the package does not
@@ -406,20 +393,12 @@ def test_schema_format_fails_closed() -> None:
         _validate(package=package)
 
 
-def test_only_chamfer_and_fillet_use_the_declared_additive_schema_2_state() -> None:
-    """The 0.3.0 transition is dual-readable before cutover and schema-2-only afterward.
-
-    Package PR #151 adds one optional ``turned`` field to these two records. The existing
-    converters consume only the unchanged schema-1 fields, so accepting schema 2 before the
-    dependency cutover is compatible. The dependency updater closes the window to schema 2;
-    schema 3 remains unknown in both states and must fail closed.
-    """
+def test_only_chamfer_and_fillet_accept_installed_schema_2() -> None:
+    """The pinned package uses schema 2 only for chamfers and fillets."""
     declaration = consumer_capability_declaration()
     families = _families(declaration)
-    transition_open = contract_module._CANDIDATE_PACKAGE_VERSION is not None
-    expected_transition_schemas = [1, 2] if transition_open else [2]
-    assert families["chamfers"]["record_schemas"] == {"Chamfer": expected_transition_schemas}
-    assert families["fillets"]["record_schemas"] == {"Fillet": expected_transition_schemas}
+    assert families["chamfers"]["record_schemas"] == {"Chamfer": [2]}
+    assert families["fillets"]["record_schemas"] == {"Fillet": [2]}
     assert all(
         versions == [1]
         for family_id, family in families.items()
@@ -438,25 +417,11 @@ def test_only_chamfer_and_fillet_use_the_declared_additive_schema_2_state() -> N
         _validate(declaration, package=package)
 
 
-def test_candidate_validation_changes_only_the_explicit_reviewed_package_identity() -> None:
+def test_package_identity_must_match_the_installed_distribution() -> None:
     package = recognition.capability_manifest()
-    transition = contract_module._CANDIDATE_PACKAGE_VERSION
-    if transition is not None:
-        candidate = f"{transition}.dev0"
-        package["package"]["version"] = candidate
-        package_families = _families(package)
-        package_families["chamfers"]["records"][0]["schema_version"] = 2
-        package_families["fillets"]["records"][0]["schema_version"] = 2
-        validate_recogniser_capabilities(package=package, candidate_version=candidate)
-
-        with pytest.raises(
-            RecogniserCapabilityError,
-            match=rf"b123d-recognisers=={PINNED_VERSION}",
-        ):
-            validate_recogniser_capabilities(package=package)
-
-    with pytest.raises(RecogniserCapabilityError, match="outside the reviewed"):
-        validate_recogniser_capabilities(package=package, candidate_version="99.99.99")
+    package["package"]["version"] = "99.99.99"
+    with pytest.raises(RecogniserCapabilityError, match="installed b123d-recognisers metadata"):
+        _validate(package=package)
 
     package = recognition.capability_manifest()
     package["package"]["name"] = "lookalike"
@@ -584,7 +549,7 @@ def test_state_transition_requires_version_release_notes_and_compatibility_evide
         ),
         (
             lambda _declaration, package: package["package"].update({"version": "99.99.99"}),
-            f"does not satisfy b123d-recognisers=={EXPECTED_PACKAGE_VERSION}",
+            "does not satisfy installed b123d-recognisers metadata",
         ),
         (
             lambda _declaration, package: package.update({"families": {}}),

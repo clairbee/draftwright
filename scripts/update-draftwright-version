@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomically update Draftwright's build version and consumer-contract identity."""
+"""Atomically update Draftwright's build version and lockfile identity."""
 
 from __future__ import annotations
 
@@ -15,26 +15,19 @@ _VERSION = re.compile(
 
 
 def update(root: Path, target: str) -> None:
-    """Update package metadata and the independently validated consumer identity together."""
+    """Update package metadata and its lockfile entry together."""
     if not _VERSION.fullmatch(target):
         raise ValueError("version must be X.Y.Z or X.Y.Z.devN")
     project = root / "pyproject.toml"
     lock = root / "uv.lock"
-    contract = root / "src/draftwright/recogniser_contract.py"
     project_text = project.read_text(encoding="utf-8")
     current_match = re.search(r'^version = "([^"]+)"$', project_text, re.MULTILINE)
     if not current_match:
         raise RuntimeError("pyproject.toml has no single project version")
     current = current_match.group(1)
-    contract_text = contract.read_text(encoding="utf-8")
-    old_identity = f'"consumer": {{"name": "draftwright", "version": "{current}"}}'
-    new_identity = f'"consumer": {{"name": "draftwright", "version": "{target}"}}'
-    if contract_text.count(old_identity) != 1:
-        raise RuntimeError("consumer declaration version is stale before the bump")
-    snapshots = {path: path.read_bytes() for path in (project, lock, contract)}
+    snapshots = {path: path.read_bytes() for path in (project, lock)}
     try:
         subprocess.run(["uv", "version", "--no-sync", target], cwd=root, check=True)
-        contract.write_text(contract_text.replace(old_identity, new_identity), encoding="utf-8")
     except BaseException:
         for path, content in snapshots.items():
             path.write_bytes(content)

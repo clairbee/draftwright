@@ -22,7 +22,7 @@ breaks its claimed contract (#1018 rule).
 | `test_detect_registry.py` | **keep** | Record→Feature completeness; a silently unadapted record family is invisible in output. |
 | `test_carve_free_position_callers.py` | **keep** | Two features (#555, #559) regressed onto the solver-invisible path before #636 — the failure mode recurred twice. Carries anti-tautology self-tests. |
 | `test_declared_recognition_gate.py` | **keep** | ADR 0017: declared builds must not pay recognition cost; regression is silent (slow, not wrong). |
-| `test_external_recognition_boundary.py` | **keep** | Pins the published recogniser release by hash; the fail-closed join depends on it. |
+| `test_external_recognition_boundary.py` | **keep** | Enforces the exact registry dependency and the external-package boundary. |
 | `test_private_test_imports.py` | **keep** | Shrink-only ratchet with per-entry rationale (#641). The stale-entry assertion is the shrink mechanism, not churn. |
 | `test_private_test_attr_reads.py` | **keep** | Cardinality ratchet closing the last reach-through quadrant (#741); deliberately line-number-churn-free. |
 | `test_architecture_docs.py` | **trimmed** | Three of four assertions policed phrase absences from battles won weeks ago (stale ADR 0008/0009 references); only the live no-line-anchors rule survives. |

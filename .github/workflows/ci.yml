@@ -10,13 +10,13 @@ on:
     - cron: "17 4 * * 6"
   workflow_dispatch:
     inputs:
-      maintenance_bump:
-        description: Run one canonical coverage suite for an automation-only version/dependency PR
+      post_release_bump:
+        description: Run one canonical coverage suite for an automated post-release version PR
         required: false
         default: false
         type: boolean
-      maintenance_pr_number:
-        description: PR number receiving Codecov patch/project statuses for a maintenance bump
+      post_release_pr_number:
+        description: PR number receiving Codecov patch/project statuses for the version bump
         required: false
         type: string
 
@@ -51,7 +51,7 @@ jobs:
   test:
     # The PR is the compatibility gate. A merge to protected main has already passed these
     # exact checks, so main keeps lint + the slow post-merge safety net without repeating them.
-    if: github.event_name != 'push' && !inputs.maintenance_bump
+    if: github.event_name != 'push' && !inputs.post_release_bump
     permissions:
       contents: read
     strategy:
@@ -139,7 +139,7 @@ jobs:
           ${{ matrix.shard && format('--splits 2 --group {0}', matrix.shard) || '' }}
 
   coverage:
-    if: github.event_name == 'pull_request' || inputs.maintenance_bump
+    if: github.event_name == 'pull_request' || inputs.post_release_bump
     # The ninth OS/Python compatibility entry, split out so only the one job that
     # uploads to Codecov receives an OIDC token and renders retained reports.
     name: test (ubuntu-latest, 3.13)
@@ -176,7 +176,7 @@ jobs:
           # Branch protection requires Codecov's project and patch checks. Fail this
           # job too when the upload cannot produce those checks, rather than hanging.
           fail_ci_if_error: true
-          override_pr: ${{ inputs.maintenance_pr_number || github.event.pull_request.number }}
+          override_pr: ${{ inputs.post_release_pr_number || github.event.pull_request.number }}
           use_oidc: true
 
       - name: Upload coverage report
@@ -267,7 +267,7 @@ jobs:
     needs: [lint, test, coverage, test-platform-canary]
     runs-on: ubuntu-latest
     permissions:
-      statuses: write # Attach the dispatched maintenance gate to its generated PR head.
+      statuses: write # Attach the dispatched post-release gate to its generated PR head.
     steps:
       - name: Require every gating job to have succeeded or been legitimately skipped
         env:
@@ -290,8 +290,8 @@ jobs:
           done
           exit $failed
 
-      - name: Attach successful maintenance gate to the generated PR head
-        if: inputs.maintenance_bump
+      - name: Attach successful post-release gate to the generated PR head
+        if: inputs.post_release_bump
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -300,5 +300,5 @@ jobs:
           "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}"
           -f state=success
           -f context=ci-ok
-          -f description="Maintenance CI passed"
+          -f description="Post-release CI passed"
           -f target_url="$TARGET_URL"
