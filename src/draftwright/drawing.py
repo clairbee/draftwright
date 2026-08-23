@@ -44,6 +44,7 @@ from draftwright._core import (
     _build_table,
     _dim,
     _fmt,
+    _font_safe_text,
     _log,
     _tag_sequence,
     _tol_suffix,
@@ -1154,7 +1155,7 @@ class Drawing:
         if kwargs.get("label") is None:
             page_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             kwargs["label"] = _fmt(page_len / self.scale)
-        kwargs["label"] = f"{kwargs['label']}{_tol_suffix(tolerance, draft)}"
+        kwargs["label"] = _font_safe_text(f"{kwargs['label']}{_tol_suffix(tolerance, draft)}")
         return self._add(
             _dim(p1, p2, side, max(dist, 4.0), draft, **kwargs), name, feature=feature
         )
@@ -1337,7 +1338,9 @@ class Drawing:
         if dim_kwargs.get("label") is None:  # `None` is "auto"; see `_place_dim` (#1234 r5)
             page_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             dim_kwargs["label"] = _fmt(page_len / self.scale)
-        dim_kwargs["label"] = f"{dim_kwargs['label']}{_tol_suffix(tolerance, self.draft)}"
+        dim_kwargs["label"] = _font_safe_text(
+            f"{dim_kwargs['label']}{_tol_suffix(tolerance, self.draft)}"
+        )
         slot = it.kwargs.get("slot", 8.0)
         axis = "y" if side in ("above", "below") else "x"
         ax = 1 if axis == "y" else 0
@@ -2799,7 +2802,7 @@ class Drawing:
         from build123d_drafting import Note
 
         n = Note(
-            text,
+            _font_safe_text(text),
             at,
             self.draft,
             rotation=rotation,

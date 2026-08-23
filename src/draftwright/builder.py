@@ -14,7 +14,7 @@ import collections
 import json
 import os
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -27,6 +27,7 @@ from build123d_drafting.helpers import (
     draft_preset,
     format_drawing_scale,
 )
+from OCP.Standard import Standard_Failure
 
 from draftwright._core import (
     _FONT_SIZE,
@@ -66,6 +67,7 @@ from draftwright.compose import (
 from draftwright.drawing import Drawing, feature_key
 from draftwright.fonts import PLEX_MONO
 from draftwright.linting import LintIssue
+from draftwright.linting.coverage import lint_axial_coverage
 from draftwright.model import (
     Datum,
     Feature,
@@ -1210,14 +1212,10 @@ def _is_required_scale_drop(issue) -> bool:
     return True
 
 
-def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, ...]:
-    """Required placement failures on a finished drawing, as stable plain data.
-
-    ``physical=False`` restricts the critique to the recognition-free components, so a caller
-    that must not materialise the ADR 0017 aggregate can still read what failed to place.
-    """
+def _scale_blockers_from_issues(issues) -> tuple[dict, ...]:
+    """Required placement failures from one already-materialised lint pass."""
     blockers = []
-    for issue in drawing.lint(physical=physical):
+    for issue in issues:
         if not _is_required_scale_drop(issue):
             continue
         blockers.append(
@@ -1236,6 +1234,15 @@ def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, .
             }
         )
     return tuple(blockers)
+
+
+def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, ...]:
+    """Required placement failures on a finished drawing, as stable plain data.
+
+    ``physical=False`` restricts the critique to the recognition-free components, so a caller
+    that must not materialise the ADR 0017 aggregate can still read what failed to place.
+    """
+    return _scale_blockers_from_issues(drawing.lint(physical=physical))
 
 
 def _blocker_identity(blocker) -> str:
@@ -1257,19 +1264,7 @@ def _blocker_identity(blocker) -> str:
     )
 
 
-def _automatic_blockers(drawing) -> tuple[dict, ...]:
-    """Required placement failures on an automatically planned drawing.
-
-    The RECOGNITION-FREE critique, unlike the explicit path's `scale_blockers_for`, which also
-    materialises the ADR 0017 aggregate for later critique. A declared automatic build must
-    recognise nothing until asked (ADR 0011 / 0017), and placement drops are recorded during
-    the build so they survive the restriction — verified to return the same blockers as the
-    physical critique on the #1130 case study and on the side-drilled fixtures.
-    """
-    return _scale_blockers(drawing, physical=False)
-
-
-def _complete_automatic_plan(drawing: Drawing) -> Drawing:
+def _complete_automatic_plan(drawing: Drawing, *, issues=None) -> Drawing:
     """Give the automatic path the completeness the explicit path already has (#1250).
 
     `_scale_blockers` ran on the explicit-scale policy loop and on nothing else, so the two
@@ -1285,12 +1280,16 @@ def _complete_automatic_plan(drawing: Drawing) -> Drawing:
     settled drawing and records `plan_incomplete` at error severity. This makes `passed` false
     without introducing a second sheet/scale-selection policy ahead of #1262.
     """
-    blockers = _automatic_blockers(drawing)
+    # One materialised recognition-free lint feeds blockers, provenance, and the
+    # final decision. Corrective candidates pass their acceptance lint through so
+    # the selected winner is not immediately re-linted from scratch.
+    issues = tuple(drawing.lint(physical=False)) if issues is None else tuple(issues)
+    blockers = _scale_blockers_from_issues(issues)
     if not blockers:
         return drawing
 
     codes = ", ".join(sorted({item["code"] for item in blockers}))
-    dropped = [i for i in drawing.lint(physical=False) if _is_required_scale_drop(i)]
+    dropped = [i for i in issues if _is_required_scale_drop(i)]
     measurements = tuple(
         dict.fromkeys(mid for issue in dropped for mid in getattr(issue, "measurement_ids", ()))
     )
@@ -1315,14 +1314,25 @@ def _complete_automatic_plan(drawing: Drawing) -> Drawing:
             hole_requirement_ids=hole_requirements,
         )
     )
+    previous = getattr(drawing, "scale_decision", {})
+    previous_attempts = tuple(previous.get("attempts", ()))
+    previous_scales = tuple(previous.get("attempted_scales", ()))
+    incomplete_attempt = _scale_attempt(
+        drawing.scale,
+        "incomplete",
+        blockers,
+        reason="required_outcome_dropped",
+        views=drawing.views,
+        page=(drawing.page_w, drawing.page_h),
+    )
     drawing.scale_decision = _scale_decision(
         policy="automatic",
         requested=None,
         effective=drawing.scale,
         status="incomplete",
         blockers=blockers,
-        attempted=(drawing.scale,),
-        attempts=(_scale_attempt(drawing.scale, "incomplete", blockers),),
+        attempted=previous_scales + (drawing.scale,),
+        attempts=previous_attempts + (incomplete_attempt,),
     )
     warnings.warn(
         f"the automatically planned sheet drops required annotation outcomes ({codes}); "
@@ -1428,11 +1438,26 @@ def _scale_decision(
     }
 
 
-def _scale_attempt(scale: float, status: str, blockers=(), *, error: str | None = None) -> dict:
+def _scale_attempt(
+    scale: float,
+    status: str,
+    blockers=(),
+    *,
+    error: str | None = None,
+    reason: str | None = None,
+    views: Iterable[str] | None = None,
+    page: tuple[float, float] | None = None,
+) -> dict:
     """One plain-data trial in an explicit-scale decision."""
     attempt = {"scale": scale, "status": status, "blockers": tuple(blockers)}
     if error is not None:
         attempt["error"] = error
+    if reason is not None:
+        attempt["reason"] = reason
+    if views is not None:
+        attempt["views"] = tuple(views)
+    if page is not None:
+        attempt["page"] = tuple(page)
     return attempt
 
 
@@ -1446,6 +1471,21 @@ def _blocks_all_smaller_scales(blockers) -> bool:
     return any(
         item["code"] == "step_dim_dropped" and "too closely spaced" in item["message"]
         for item in blockers
+    )
+
+
+_AUTOMATIC_UPSCALE_TRIAL_LIMIT = 2
+
+
+def _has_detail_view(views) -> bool:
+    """Whether a resolved drawing/view mapping contains an automatic detail."""
+    return any(name.startswith("detail_") for name in views)
+
+
+def _is_expected_candidate_build_failure(exc: Exception) -> bool:
+    """Whether a speculative build may reject without hiding an invariant bug."""
+    return isinstance(exc, Standard_Failure) or (
+        isinstance(exc, ValueError) and "drawing geometry degenerates" in str(exc)
     )
 
 
@@ -1528,6 +1568,7 @@ def build_drawing(
         _view_constraints=_view_constraints,
     )
     analysis_base = None
+    latest_analysis = None
     critique_recognition = None
 
     built_arrangement = ARRANGEMENTS[0]
@@ -1536,6 +1577,8 @@ def build_drawing(
         candidate_scale: float | None,
         arrangements: tuple[str, ...] | None = None,
         views: tuple[str, ...] | None = None,
+        include_iso: bool | None = None,
+        page_override: str | tuple | None = None,
     ) -> Drawing:
         nonlocal analysis_base
 
@@ -1561,19 +1604,21 @@ def build_drawing(
             # `built_arrangement` tracks the LATEST, because the arrangement gate asks what
             # the attempt just built under. Read here rather than off the returned drawing:
             # engine modules must not touch `dwg._*` (ADR 0005 §2).
-            nonlocal analysis_base, built_arrangement
+            nonlocal analysis_base, built_arrangement, latest_analysis
             built_arrangement = value.arrangement
+            latest_analysis = value
             if analysis_base is None:
                 analysis_base = value
 
         built = one_pass(
             scale=candidate_scale,
+            page=page if page_override is None else page_override,
             _analysis_base=analysis_base,
             _analysis_sink=retain_analysis,
             _critique_recognition=critique_recognition,
             _arrangements=arrangements,
             _views=views,
-            _include_iso=_include_iso,
+            _include_iso=_include_iso if include_iso is None else include_iso,
             _view_constraints=_view_constraints,
         )
         _validate_authored_view_layout(built, _view_constraints)
@@ -1589,6 +1634,9 @@ def build_drawing(
     if scale is None:
         if scale_policy != "fallback":
             raise ValueError("scale_policy applies only when an explicit scale is supplied")
+        views_are_automatic = _view_constraints is None or (
+            isinstance(_view_constraints, ViewConstraints) and _view_constraints.is_automatic_only
+        )
         drawing = _build(None, views=_views)
         if built_arrangement != ARRANGEMENTS[0]:
             # The RECOGNITION-FREE critique, not `scale_blockers_for`: the gate must reach the
@@ -1603,6 +1651,253 @@ def build_drawing(
                 _build,
                 lambda built: _scale_blockers(built, physical=False),
             )
+        dimensions_are_automatic = auto_dims and drawing.model().authored_dimensions is None
+        original_scale = drawing.scale
+        original_page = (drawing.page_w, drawing.page_h)
+        replanned = False
+        replan_attempts = []
+        settled_issues = None
+        arrangement_decision = getattr(drawing, "arrangement_decision", None)
+        settled_arrangement = (
+            arrangement_decision["chosen"]
+            if arrangement_decision is not None
+            else built_arrangement
+        )
+
+        def _retain_arrangement(candidate):
+            # The corrective builds are confined to the settled arrangement.  Preserve
+            # the original decision record as well: it explains why that arrangement won,
+            # whereas a fresh one-attempt record would erase the rejected alternatives.
+            if arrangement_decision is not None:
+                candidate.arrangement_decision = arrangement_decision
+            return candidate
+
+        def _automatic_assessment(candidate):
+            # One lint pass feeds both structural and requirement gates.  Re-running lint
+            # here used to duplicate the most expensive post-build critique for every trial.
+            issues = tuple(candidate.lint(physical=False))
+            return issues, _scale_blockers_from_issues(issues)
+
+        def _record_attempt(
+            scale,
+            status,
+            blockers=(),
+            *,
+            reason,
+            candidate=None,
+            views=None,
+            page=None,
+            error=None,
+        ):
+            if candidate is not None:
+                views = candidate.views
+                page = (candidate.page_w, candidate.page_h)
+            replan_attempts.append(
+                _scale_attempt(
+                    scale,
+                    status,
+                    blockers,
+                    reason=reason,
+                    views=views,
+                    page=page,
+                    error=error,
+                )
+            )
+
+        def _qualify_candidate(candidate, *, require_axial_coverage=False):
+            """Run cheap semantic gates before the one full acceptance lint."""
+            if _has_detail_view(candidate.views):
+                return (), (), "recovery_detail_retained"
+            if require_axial_coverage:
+                assert latest_analysis is not None
+                if lint_axial_coverage(
+                    latest_analysis.part,
+                    candidate,
+                    prof=latest_analysis.prof,
+                ):
+                    return (), (), "axial_coverage_incomplete"
+            issues, blockers = _automatic_assessment(candidate)
+            if any(issue.severity == "error" for issue in issues):
+                return issues, blockers, "structural_error"
+            if blockers:
+                return issues, blockers, "required_outcome_dropped"
+            return issues, blockers, None
+
+        # #1155: the compose-time estimate conservatively reserves an enlarged
+        # detail for a crowded run.  Some larger preferred scales make that run
+        # readable inline, so the detail reservation disappears and the same page
+        # becomes feasible — GRM-04 is 2:1 under the estimate but complete at 5:1
+        # after its Y location re-homes from side-below to plan-right.  Measure
+        # those larger candidates only when the settled result actually contains
+        # that semantic recovery artifact: post-build occupied rectangles are not
+        # a scale-selection input.  A candidate may win only on the same sheet and
+        # settled arrangement, with no recovery detail or required placement loss.
+        if dimensions_are_automatic and views_are_automatic and _has_detail_view(drawing.views):
+            _record_attempt(
+                drawing.scale,
+                "detail_reservation_conservative",
+                reason="measured_upscale",
+                candidate=drawing,
+            )
+            candidate_scales = sorted(item for item in _SCALES if item > original_scale)[
+                :_AUTOMATIC_UPSCALE_TRIAL_LIMIT
+            ]
+            for candidate_scale in candidate_scales:
+                try:
+                    candidate_drawing = _build(
+                        candidate_scale,
+                        arrangements=(settled_arrangement,),
+                        page_override=original_page,
+                    )
+                except (ValueError, Standard_Failure) as exc:
+                    if not _is_expected_candidate_build_failure(exc):
+                        raise
+                    _log.info(
+                        "measured upscale %s:1 rejected (candidate build failed: %s)",
+                        candidate_scale,
+                        exc,
+                    )
+                    _record_attempt(
+                        candidate_scale,
+                        "error",
+                        reason="measured_upscale",
+                        views=drawing.views,
+                        page=original_page,
+                        error=str(exc),
+                    )
+                    continue
+                candidate_drawing = _retain_arrangement(candidate_drawing)
+                assert (candidate_drawing.page_w, candidate_drawing.page_h) == original_page
+                issues, blockers, rejection = _qualify_candidate(candidate_drawing)
+                if rejection is None:
+                    _record_attempt(
+                        candidate_scale,
+                        "complete",
+                        reason="measured_upscale",
+                        candidate=candidate_drawing,
+                    )
+                    drawing = candidate_drawing
+                    settled_issues = issues
+                    replanned = True
+                    break
+                _record_attempt(
+                    candidate_scale,
+                    "rejected",
+                    blockers,
+                    reason=rejection,
+                    candidate=candidate_drawing,
+                )
+
+        # #443: a pictorial view is useful context, but it cannot outrank the
+        # dimensions needed to manufacture a turned profile.  GRM-03 selected 2:1
+        # with ISO, collapsed its 0.5 + 2 mm head steps into an unowned 2.5 mm
+        # block, then had no room for the recovery detail.  Re-plan once without
+        # the optional ISO; scale selection reaches 5:1 and the two truthful step
+        # dimensions fit inline.  This is deliberately a coverage comparison, not
+        # suppression of ``axial_length_missing``: the candidate wins only after
+        # the same read-back check confirms every shoulder is located.
+        if (
+            dimensions_are_automatic
+            and _include_iso
+            and views_are_automatic
+            and "iso" in drawing.views
+        ):
+            assert latest_analysis is not None
+            original_has_axial_gap = bool(
+                lint_axial_coverage(
+                    latest_analysis.part,
+                    drawing,
+                    prof=latest_analysis.prof,
+                )
+            )
+            if original_has_axial_gap:
+                _record_attempt(
+                    drawing.scale,
+                    "axial_coverage_incomplete",
+                    reason="remove_optional_iso",
+                    candidate=drawing,
+                )
+                try:
+                    without_iso_proposal = _build(
+                        None,
+                        arrangements=(settled_arrangement,),
+                        include_iso=False,
+                    )
+                except (ValueError, Standard_Failure) as exc:
+                    if not _is_expected_candidate_build_failure(exc):
+                        raise
+                    _log.info("optional-ISO replan rejected (build failed: %s)", exc)
+                    _record_attempt(
+                        drawing.scale,
+                        "error",
+                        reason="remove_optional_iso",
+                        views=tuple(name for name in drawing.views if name != "iso"),
+                        page=original_page,
+                        error=str(exc),
+                    )
+                else:
+                    proposal_page = (
+                        without_iso_proposal.page_w,
+                        without_iso_proposal.page_h,
+                    )
+                    if proposal_page != original_page:
+                        _record_attempt(
+                            without_iso_proposal.scale,
+                            "scale_proposal",
+                            reason="remove_optional_iso",
+                            candidate=without_iso_proposal,
+                        )
+                        try:
+                            without_iso = _build(
+                                without_iso_proposal.scale,
+                                arrangements=(settled_arrangement,),
+                                include_iso=False,
+                                page_override=original_page,
+                            )
+                        except (ValueError, Standard_Failure) as exc:
+                            if not _is_expected_candidate_build_failure(exc):
+                                raise
+                            _log.info(
+                                "fixed-page optional-ISO replan rejected (build failed: %s)",
+                                exc,
+                            )
+                            _record_attempt(
+                                without_iso_proposal.scale,
+                                "error",
+                                reason="remove_optional_iso_fixed_page",
+                                views=without_iso_proposal.views,
+                                page=original_page,
+                                error=str(exc),
+                            )
+                            without_iso = None
+                    else:
+                        without_iso = without_iso_proposal
+
+                    if without_iso is not None:
+                        without_iso = _retain_arrangement(without_iso)
+                        assert (without_iso.page_w, without_iso.page_h) == original_page
+                        issues, blockers, rejection = _qualify_candidate(
+                            without_iso,
+                            require_axial_coverage=True,
+                        )
+                        if rejection is None:
+                            _record_attempt(
+                                without_iso.scale,
+                                "complete",
+                                reason="remove_optional_iso",
+                                candidate=without_iso,
+                            )
+                            drawing = without_iso
+                            settled_issues = issues
+                            replanned = True
+                        else:
+                            _record_attempt(
+                                without_iso.scale,
+                                "rejected",
+                                blockers,
+                                reason=rejection,
+                                candidate=without_iso,
+                            )
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.
@@ -1612,9 +1907,11 @@ def build_drawing(
             policy="automatic",
             requested=None,
             effective=drawing.scale,
-            status="automatic",
+            status="automatic_replanned" if replanned else "automatic",
+            attempted=tuple(item["scale"] for item in replan_attempts),
+            attempts=replan_attempts,
         )
-        return _complete_automatic_plan(drawing)
+        return _complete_automatic_plan(drawing, issues=settled_issues)
 
     requested_scale = float(scale)
 

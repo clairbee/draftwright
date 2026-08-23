@@ -4356,6 +4356,15 @@ class TestLintLocationCoverage:
         dwg = build_drawing(part, number="X")
         assert lint_location_coverage(part, dwg) == []
 
+        class ExternalDrawing:
+            """The documented lint duck contract deliberately has no model()."""
+
+            at = dwg.at
+            iter_annotations = dwg.iter_annotations
+            view_of = dwg.view_of
+
+        assert lint_location_coverage(part, ExternalDrawing()) == []
+
     @pytest.mark.timeout(60)
     def test_bare_scaffold_flags_missing_marks_and_location(self):
         from draftwright.linting import lint_location_coverage
@@ -4390,6 +4399,42 @@ class TestLintLocationCoverage:
         # A bore on the part's centre axis is located by centrelines, not a dim.
         part = Cylinder(15, 30) - Cylinder(4, 40)
         dwg = build_drawing(part, number="X", auto_dims=False)
+        assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
+    @pytest.mark.timeout(60)
+    def test_structured_location_is_owned_by_the_exact_hole_and_axis(self):
+        from types import SimpleNamespace
+
+        from build123d_drafting import Dimension
+
+        from draftwright.linting import lint_location_coverage
+
+        part = Box(100, 60, 12) - Pos(30, 0, 0) * Cylinder(4, 30)
+        dwg = build_drawing(part, number="X", auto_dims=False)
+        feature = next(item for item in dwg.model().features if item.kind == "hole")
+        point = feature.frame.origin
+        px, py, *_ = dwg.at("plan", *point)
+        # Its witness geometry aligns with the required X ordinate.  Because it also
+        # carries structured evidence, that wrong-axis semantic claim is authoritative
+        # and the same annotation may not rescue itself through geometric fallback.
+        dim = Dimension((px, py, 0), (px + 10, py, 0), "above", 8, dwg.draft)
+        dim.covers_hole_locations = ((feature, "location.location.y", point),)
+        # The registry is the public evidence seam this lint reads.  Register directly so
+        # the fixture can model an external producer's invalid semantic claim without using
+        # Drawing's private low-level placement primitive.
+        dwg.registry.add(dim, "wrong_axis", "plan", feature=feature)
+
+        assert any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
+        # Malformed structured evidence is not authoritative. External producers
+        # retain the documented geometric fallback when no fact can be decoded.
+        dim.covers_hole_locations = ((SimpleNamespace(feature=feature), point),)
+        assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
+        # The legacy two-tuple carries the same ownership through its measurement object.
+        dim.covers_hole_locations = (
+            (SimpleNamespace(feature=feature, parameter="location.location.x"), point),
+        )
         assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
 
 

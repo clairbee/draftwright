@@ -98,7 +98,7 @@ from yourmodule import build_thumbwheel_features as _obj
 features = _obj()
 part = features.body
 
-sheet = Sheet(part, title='DRAWING', number='DWG-001')
+sheet = Sheet(part, title='DRAWING', number='DWG-001', scale=5.0, page=(297.0, 210.0))
 hole1 = sheet.hole(diameter=1.6, at=(0.8, 0, 0), axis="x").depth(8)   # ⌀1.6 blind 8
 step1 = sheet.step(diameter=3, length=5.3, at=(-5.85, 0, 0), axis="x")   # ⌀3 × 5.3 step
 step2 = sheet.step(diameter=4, length=3.2, at=(-1.6, 0, 0), axis="x")   # ⌀4 × 3.2 step
@@ -110,6 +110,11 @@ sheet.authored_dimensions()
 sheet.dimension(hole1, "bore.diameter")
 sheet.dimension(hole1, "bore.depth")
 # ... twelve more dimension lines ...
+
+sheet.authored_views()
+sheet.view("front")
+sheet.view("plan")
+sheet.view("side")
 
 drawing = sheet.build()
 drawing.export('thumbwheel', formats=('pdf',))

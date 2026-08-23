@@ -136,8 +136,11 @@ class TestTheDecisionIsMadeOnceAndCarried:
         # Why the decision is carried rather than recomputed. `_layout_geometry` is a single
         # shared authority, but sharing a function is not sharing an INPUT: selection resolves
         # against estimated strip depths and placement against measured ones. Resolving at
-        # each call site costs the dense plate two location requirements on a sheet whose size
-        # does not change at all — so this is not a smaller-sheet effect.
+        # each call site costs the dense plate location requirements on a sheet whose size
+        # does not change at all — so this is not a smaller-sheet effect. The physical
+        # The semantic critique and compiler outcome both report this real loss.  The two
+        # codes are intentionally retained: one is physical coverage, the other is the exact
+        # failed compiler requirement.
         baseline = build_drawing(_dense_plate())
 
         original = compose_mod._layout_geometry
@@ -152,8 +155,8 @@ class TestTheDecisionIsMadeOnceAndCarried:
         drawing = build_drawing(_dense_plate())
         assert (drawing.page_w, drawing.page_h) == (baseline.page_w, baseline.page_h)
         assert _lint_codes(drawing) - _lint_codes(baseline) == {
-            "location_ref_dropped",
             "feature_not_located",
+            "location_ref_dropped",
         }
 
 

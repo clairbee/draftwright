@@ -33,10 +33,11 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
+from typing import Literal
 
 from build123d import Shape
 
-from draftwright.builder import detect_part_model
+from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.ir import ToleranceDecoration
 
 
@@ -1350,6 +1351,7 @@ def emit_sheet_script(
     object_candidates: Mapping[str, Shape] | None = None,
     source_part: Shape | None = None,
     formats: Sequence[str] = ("pdf",),
+    settled_layout: Mapping | None = None,
 ) -> str:
     """The generated declarative ``Sheet`` script text for a detected *model*.
 
@@ -1373,7 +1375,13 @@ def emit_sheet_script(
     reference: the only way to name one was its position, and the documented workflow is to
     comment a feature line out and re-run — which shifts every later index and silently
     retargets the declarations onto their neighbours. #931 and #932 removed positional
-    addressing from the artefact, so the declarations can now be written honestly."""
+    addressing from the artefact, so the declarations can now be written honestly.
+
+    ``settled_layout`` is supplied by :func:`generate_sheet_script` only when an automatic
+    semantic correction changed the initially composed scale or view set. The generated
+    script mirrors dimensions as an authored set, so that correction is deliberately gated
+    off on re-run; spelling the already-resolved scale/page/views preserves round-trip parity
+    without pretending an edited authored set is still automatic."""
     _validate_scale_policy(scale, scale_policy)
     # The script declares this model — `model` plus an envelope when the overall height would
     # otherwise be unnameable under the mirrored (authored) set. BEFORE the import scan, since
@@ -1417,12 +1425,18 @@ def emit_sheet_script(
         ctor.append(f"drawn_by={drawn_by!r}")
     if tolerance != "ISO 2768-m":
         ctor.append(f"tolerance={tolerance!r}")
-    if scale is not None:
-        ctor.append(f"scale={scale!r}")
+    emitted_scale = scale
+    if emitted_scale is None and settled_layout is not None:
+        emitted_scale = settled_layout["scale"]
+    if emitted_scale is not None:
+        ctor.append(f"scale={emitted_scale!r}")
     if scale_policy != "fallback":
         ctor.append(f"scale_policy={scale_policy!r}")
-    if page is not None:
-        ctor.append(f"page={page!r}")
+    emitted_page = page
+    if emitted_page is None and settled_layout is not None:
+        emitted_page = settled_layout["page"]
+    if emitted_page is not None:
+        ctor.append(f"page={emitted_page!r}")
     if material:
         ctor.append(f"material={material!r}")
     if date:
@@ -1504,8 +1518,21 @@ def emit_sheet_script(
         *_dimension_block(model, _names, _synth_env),
         "",
         "# ── Views ─────────────────────────────────────────────────────────────────────",
-        "# front / plan / side / iso are always produced.",
     ]
+    principal_views = tuple(
+        name
+        for name in (() if settled_layout is None else settled_layout["views"])
+        if name in {"front", "plan", "side", "iso"}
+    )
+    if principal_views and principal_views != ("front", "plan", "side", "iso"):
+        lines += [
+            "# The automatic build settled on this complete view set; it is declared so",
+            "# the editable authored-dimension mirror reproduces that resolved layout.",
+            "sheet.authored_views()",
+            *(f'sheet.view("{name}")' for name in principal_views),
+        ]
+    else:
+        lines.append("# front / plan / side / iso are produced automatically.")
     if _needs_section(model):
         lines.append("# Section A–A auto-triggers from the counterbore/blind bore above.")
     # Build and export as two statements, so the finalized Drawing has a name (#968). That is
@@ -1681,7 +1708,7 @@ def generate_sheet_script(
     frame: bool = False,
     zones: bool = False,
     projection: str | None = None,
-    pmi: str = "off",
+    pmi: Literal["off", "report", "annotate"] = "off",
     part_expr: str | None = None,
     object_candidates: Mapping[str, Shape] | None = None,
     formats: Sequence[str] = ("pdf",),
@@ -1717,6 +1744,41 @@ def generate_sheet_script(
         part_expr = f"from build123d import import_step\npart = import_step({abspath!r})"
 
     model = detect_part_model(step_file, pmi=pmi)
+    settled_layout = None
+    # The two current semantic correction passes apply to turned shoulder chains (#443)
+    # and prismatic step ladders that requested a recovery detail (#1155). Generated
+    # scripts mirror the selected dimensions as AUTHORED lines, correctly disabling those
+    # automatic-only retries on re-run. Resolve just these candidate families once during
+    # generation; if a correction actually wins, carry its result into the editable script.
+    # Ordinary parts retain the cheap detect-only generation path.
+    may_need_semantic_correction = model.orientation is not None or any(
+        feature.kind == "step_level" for feature in model.features
+    )
+    if scale is None and may_need_semantic_correction:
+        settled = build_drawing(
+            step_file,
+            title=title,
+            number=number,
+            tolerance=tolerance,
+            drawn_by=drawn_by,
+            page=page,
+            scale_policy=scale_policy,
+            material=material,
+            date=date,
+            revision=revision,
+            company=company,
+            frame=frame,
+            zones=zones,
+            projection=projection,
+            pmi=pmi,
+            model=model,
+        )
+        if settled.scale_decision.get("status") == "automatic_replanned":
+            settled_layout = {
+                "scale": settled.scale,
+                "page": (settled.page_w, settled.page_h),
+                "views": tuple(settled.views),
+            }
     script = emit_sheet_script(
         model,
         part_expr,
@@ -1739,6 +1801,7 @@ def generate_sheet_script(
         object_candidates=object_candidates,
         source_part=step_file if isinstance(step_file, Shape) else None,
         formats=formats,
+        settled_layout=settled_layout,
     )
     py_path = f"{stem}.py"
     Path(py_path).write_text(script, encoding="utf-8")  # the script has box-drawing / × / ← glyphs

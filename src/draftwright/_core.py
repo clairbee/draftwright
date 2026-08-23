@@ -57,6 +57,35 @@ from draftwright.layout import _greedy_strip_1d, _solve_strip_1d
 _log = logging.getLogger(__name__)
 
 
+def _decode_hole_location_fact(fact):
+    """Decode a current or legacy ``covers_hole_locations`` fact.
+
+    Current facts carry ``(feature, parameter, point)``. Legacy/external facts
+    carry ``(measurement, point)`` and derive ownership from the measurement.
+    Invalid or incomplete riders return ``None`` so consumers can retain their
+    geometric fallback instead of treating malformed metadata as authoritative.
+    """
+    try:
+        size = len(fact)
+    except TypeError:
+        return None
+    if size == 3:
+        feature, parameter, point = fact
+    elif size == 2:
+        measurement, point = fact
+        feature = getattr(measurement, "feature", None)
+        parameter = getattr(measurement, "parameter", None)
+    else:
+        return None
+    if feature is None or not isinstance(parameter, str):
+        return None
+    try:
+        HoleRef.of(point)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return feature, parameter, point
+
+
 def place_annotation(registry, items, obj, name=None, view=None, feature=None, measurement=None):
     """The annotation-placement primitive (#817): register *obj* under *name* — replacing any
     prior object of that name (dropped from the render list *items*) so a name maps to one
@@ -168,6 +197,19 @@ def _wrap_rows(header, data, ncols):
     return wide
 
 
+def _font_safe_text(value) -> str:
+    """Return the font-safe spelling used to measure and draw user text.
+
+    IBM Plex Mono does not contain U+2300 DIAMETER SIGN, so FreeType substitutes
+    its missing-glyph box.  The drafting surface already uses U+00F8 LATIN SMALL
+    LETTER O WITH STROKE for diameter labels; use that established glyph at the
+    shared render seams as well.  Keeping the substitution here makes free notes,
+    declared notes, title blocks, BOMs, revision tables, and hole tables measure
+    exactly the text they render while preserving the caller's semantic source data.
+    """
+    return str(value).replace("⌀", "ø")
+
+
 def _table_metrics(rows, font_size, pad_around_text, block_cols=None):
     """The sizing model of a data table: per-column left/right edges (page-mm,
     block gaps inserted), total width/height, row height and effective block
@@ -186,7 +228,11 @@ def _table_metrics(rows, font_size, pad_around_text, block_cols=None):
     bc = block_cols if (block_cols and ncol % block_cols == 0 and block_cols < ncol) else ncol
     block_gap = 3 * pad  # whitespace between side-by-side blocks
     col_w = [
-        max(max(_text_width(str(r[c]), fs) for r in rows) + 2 * pad, fs * 2.5) for c in range(ncol)
+        max(
+            max(_text_width(_font_safe_text(r[c]), fs) for r in rows) + 2 * pad,
+            fs * 2.5,
+        )
+        for c in range(ncol)
     ]
     # Per-column left/right edges, inserting block_gap before each new block.
     lefts, rights, cursor = [], [], 0.0
@@ -232,11 +278,12 @@ def _build_table(rows, draft, block_cols=None):
     for ri, row in enumerate(rows):  # rows[0] (header) sits at the top
         cy = total_h - (ri + 0.5) * row_h
         for ci, cell in enumerate(row):
-            if not str(cell):
+            display = _font_safe_text(cell)
+            if not display:
                 continue
             cx = (lefts[ci] + rights[ci]) / 2
             text = Text(
-                txt=str(cell),
+                txt=display,
                 font_size=fs,
                 font_path=PLEX_MONO,
                 align=(Align.CENTER, Align.CENTER),
@@ -1158,15 +1205,15 @@ def _make_title_block(dwg, a: Analysis):
     it, last) and :func:`_title_block_box` (which measures its footprint for GD&T avoidance, #481)
     so the two never drift."""
     tb = TitleBlock(
-        a.title,
-        a.number,
+        _font_safe_text(a.title),
+        _font_safe_text(a.number),
         scale=format_drawing_scale(a.SCALE),
-        general_tolerance=a.tolerance,
-        designed_by=_attribution_author(a.drawn_by),
-        material=a.material,
-        date=a.date,
-        revision=a.revision,
-        legal_owner=a.company,
+        general_tolerance=_font_safe_text(a.tolerance),
+        designed_by=_font_safe_text(_attribution_author(a.drawn_by)),
+        material=_font_safe_text(a.material),
+        date=_font_safe_text(a.date),
+        revision=_font_safe_text(a.revision),
+        legal_owner=_font_safe_text(a.company),
         width=a.TB_W,
         # Title block renders in condensed sans (the tight ISO 7200 cells), a
         # different face from the monospace dimensions — so it carries its own

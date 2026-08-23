@@ -1781,8 +1781,11 @@ def test_cross_hole_locations_retain_both_off_axis_measurement_identities():
         )
     )
     summary = drawing.lint_summary()
-    assert summary["by_code"] == {"off_axis_location_dropped": 1}
-    assert summary["geometry_issues"] == 1
+    assert summary["by_code"] == {
+        "feature_not_located": 1,
+        "off_axis_location_dropped": 1,
+    }
+    assert summary["geometry_issues"] == 2
     assert summary["quality"]["completeness"]["dropped"] == 1
 
 

@@ -322,3 +322,27 @@ The explicit-scale contract is therefore amended as follows:
 The unconditional `_MIN_RENDER_MM` safety floor and the advisory `_MIN_VIEW_MM` warning retain
 their prior meanings. This amendment narrows only the old “honour explicit scale” statement:
 caller-accepted geometric cramping is permitted, silent semantic incompleteness is not.
+
+## Amendment (2026-08-23) — bounded semantic correction after a recovery detail (#1155)
+
+The compose-time box estimate can conservatively reserve an automatic detail for a crowded
+dimension run even though a larger preferred scale would make that run legible inline. A
+finished automatic drawing that actually contains such a recovery detail may therefore trigger
+a bounded trial of larger preferred scales.
+
+This is post-build verification, not a second occupancy-based fitness function:
+
+1. the trigger is the semantic recovery-detail artifact itself; union area, OCC bounding-box
+   occupancy, page-size literals, and density thresholds are not scale-selection inputs;
+2. every candidate is confined to the settled page and arrangement and is compiled through the
+   ordinary compose/placement pipeline;
+3. a candidate wins only if the recovery detail disappears and a single lint pass proves no
+   structural error or required placement loss;
+4. the ladder has a hard two-candidate work budget. Only the known geometry-degeneration floor
+   and OCC failures reject a speculative candidate; unrelated `ValueError`s remain visible; and
+5. every attempted scale, page, view set, reason, rejection, and winner is recorded in the
+   structured scale decision. If no candidate passes, the original drawing remains the result.
+
+The box-math search and bounded measured-repack loop remain the layout authorities. This
+amendment permits a bounded semantic corrective trial around a known conservative recovery artifact;
+it does not license arbitrary post-build bbox optimisation.

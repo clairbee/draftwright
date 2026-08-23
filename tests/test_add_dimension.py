@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 from build123d import Box, Cylinder, Pos, Rot
 
-from draftwright import Sheet
+from draftwright import Sheet, build_drawing
 from draftwright.model import ControlFrame, Frame, HoleFeature, PartModel
 from draftwright.model.ir import RequestedDimension
 from draftwright.model.planner import plan_dimensions
@@ -45,6 +45,32 @@ def _plan(*requests, feature=None):
     )
     (group,) = plan_dimensions(model)
     return group
+
+
+@pytest.mark.parametrize("deferred", [False, True], ids=["live", "deferred"])
+def test_user_dimension_labels_are_font_safe(deferred):
+    drawing = build_drawing(Box(40, 25, 8), auto_dims=False)
+    envelope = next(feature for feature in drawing.model().features if feature.kind == "envelope")
+
+    if deferred:
+        with drawing.deferred():
+            drawing.dimension(
+                envelope,
+                "length",
+                role="width",
+                label="⌀4 x 3.2",
+                name="font_safe_dimension",
+            )
+    else:
+        drawing.dimension(
+            envelope,
+            "length",
+            role="width",
+            label="⌀4 x 3.2",
+            name="font_safe_dimension",
+        )
+
+    assert drawing.get_annotation("font_safe_dimension").label == "ø4 x 3.2"
 
 
 class TestPlannerIntentInput:

@@ -30,6 +30,34 @@ def test_notes_block_places_lint_clean():
     ]
 
 
+def test_notes_diameter_sign_uses_the_supported_drafting_glyph():
+    """#1275: U+2300 must not turn into the font's missing-glyph square.
+
+    Compare the public notes result with the established U+00F8 drafting spelling.
+    Equal table geometry proves the source glyph reached the same supported outline,
+    while the retained rows prove this render-time compatibility rule did not rewrite
+    the user's declaration.
+    """
+    source = (
+        Sheet(Box(20, 12, 4), page="A4")
+        .authored_dimensions()
+        .notes(["⌀4 x 3.2"], title=None, number=False)
+        .build()
+    )
+    control = (
+        Sheet(Box(20, 12, 4), page="A4")
+        .authored_dimensions()
+        .notes(["ø4 x 3.2"], title=None, number=False)
+        .build()
+    )
+
+    source_table = source.get_annotation("notes0")
+    control_table = control.get_annotation("notes0")
+    assert source_table.table_rows == (("⌀4 x 3.2",),)
+    assert source_table.table_size == pytest.approx(control_table.table_size)
+    assert source_table.bounding_box().size == pytest.approx(control_table.bounding_box().size)
+
+
 def test_four_row_notes_block_uses_clear_lower_left_a4_space_inside_frame():
     # #1145 real failure seam: the sheet-frame Compound spans the page, but it is
     # a boundary whose inset is already represented by analysis.margin—not a
