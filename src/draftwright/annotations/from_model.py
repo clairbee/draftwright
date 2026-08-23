@@ -1435,7 +1435,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
             directions=_DIAMETER_LEAD_DIRS[representative.frame.axis],
         )
 
-        def _wide_lanes(_raw=raw_candidates):
+        def _wide_lanes(_raw=raw_candidates, _owner=owner):
             # Short adjacent turned bands put their radial leaders directly under the axial
             # dimension chain.  The shared adapter adds nearby lanes; typed manufacturing
             # text also needs a bounded set of farther elbows so its shaft can clear those
@@ -1453,7 +1453,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
                             float(elbow[1]) + py * spacing * lane,
                             0,
                         ),
-                        owner,
+                        _owner,
                     )
 
         candidates = _wide_lanes()

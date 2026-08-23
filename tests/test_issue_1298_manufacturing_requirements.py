@@ -369,6 +369,22 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         "m_dia_x3": "ø5",
         "m_dia_x4": "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
     }
+    knurl_owner = next(
+        feature
+        for feature in drawing.model().features
+        if isinstance(getattr(feature, "knurl", None), KnurlRequirement)
+    )
+    thread_owner = next(
+        feature
+        for feature in drawing.model().features
+        if isinstance(getattr(feature, "thread", None), ThreadRequirement)
+    )
+    assert drawing.registry.feature_of("m_dia_x2") == knurl_owner
+    assert drawing.registry.feature_of("m_dia_x4") == thread_owner
+    assert "m_dia_x2" in drawing.annotations_of(knurl_owner)
+    assert "m_dia_x4" not in drawing.annotations_of(knurl_owner)
+    assert "m_dia_x4" in drawing.annotations_of(thread_owner)
+    assert "m_dia_x2" not in drawing.annotations_of(thread_owner)
     assert not [
         issue
         for issue in drawing.lint()
