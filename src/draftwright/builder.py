@@ -1911,6 +1911,14 @@ def build_drawing(
             attempted=tuple(item["scale"] for item in replan_attempts),
             attempts=replan_attempts,
         )
+        if replan_attempts and drawing.solve_trace is not None:
+            # Every corrective candidate was a full build, and each build writes the
+            # one shared trace path, so the file on disk may describe a *rejected*
+            # candidate rather than the drawing returned.  The settled drawing's own
+            # recorder holds the shipped build's records; give it the last write so
+            # DRAFTWRIGHT_TRACE always describes the drawing the caller receives
+            # (#736 — the same reason a successful finalize re-writes).
+            drawing.solve_trace.write()
         return _complete_automatic_plan(drawing, issues=settled_issues)
 
     requested_scale = float(scale)

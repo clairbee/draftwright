@@ -247,7 +247,13 @@ class TestADroppedSlotPositionSaysWhichMeasurementItLost:
 
 
 class TestTheReportedFixture:
-    """`nist_ctc_02` as filed. Slow-tier: CTC builds are slow-tier by policy (#153)."""
+    """`nist_ctc_02` as filed. Slow-tier: CTC builds are slow-tier by policy (#153).
+
+    Recognisers 0.3.1 deliberately rejects the fixture's material-filled recess candidate, so
+    it no longer contains a recognised slot. The synthetic fast cases above remain the
+    non-vacuous guards for slot-position ownership; this fixture still guards every claim it
+    does produce.
+    """
 
     @pytest.mark.slow
     def test_no_claim_on_the_reported_fixture_is_unconfirmed(self):
@@ -257,12 +263,3 @@ class TestTheReportedFixture:
         assert not [o for o in outcomes if o.state != "confirmed"], [
             (o.annotation, o.parameter_id, o.state) for o in outcomes if o.state != "confirmed"
         ]
-
-    @pytest.mark.slow
-    def test_the_slot_position_is_claimed_by_the_annotation_that_draws_it(self):
-        drawing = build_drawing(_CTC02, title="T", number="N-1")
-        claims = [c for c in _claims(drawing) if c.parameter_id == _SLOT_POSITION]
-        assert claims, "the fixture compiles no slot position; the loop below is vacuous"
-        for claim in claims:
-            assert claim.annotation.startswith("m_slot"), claim
-            assert claim.state == "confirmed", claim
