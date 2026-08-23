@@ -187,6 +187,46 @@ def test_internal_thread_retains_tap_drill_and_drill_point_as_typed_values():
     assert requirement.source_ids == ("manufacturing_requirement:#2004",)
 
 
+def test_internal_minimum_full_thread_cannot_exceed_tap_drill_depth():
+    hole = HoleFeature(
+        frame=Frame((0.0, 0.0, 0.0), "x"),
+        diameter=1.6,
+        depth=8.0,
+        through=False,
+    )
+    raw = _raw(
+        "internal_thread",
+        INTERNAL_TEXT.replace("6 mm minimum full thread", "9 mm minimum full thread"),
+        _reference(diameter=1.6, interval=(0.0, 8.0), sense="internal"),
+        "#2004",
+    )
+
+    lowered = lower_ap242_manufacturing_requirements(_model(hole, raw))
+
+    assert lowered.features[0].thread is None
+    fallback = next(feature for feature in lowered.features if isinstance(feature, PmiFeature))
+    assert fallback.lowering_blockers == ("thread minimum full thread cannot exceed drill depth",)
+
+    valid = (
+        lower_ap242_manufacturing_requirements(
+            _model(
+                hole,
+                _raw(
+                    "internal_thread",
+                    INTERNAL_TEXT,
+                    _reference(diameter=1.6, interval=(0.0, 8.0), sense="internal"),
+                    "#2004",
+                ),
+            )
+        )
+        .features[0]
+        .thread
+    )
+    assert isinstance(valid, ThreadRequirement)
+    with pytest.raises(ValueError, match="minimum full thread cannot exceed drill depth"):
+        replace(valid, minimum_full_thread=9.0)
+
+
 @pytest.mark.parametrize(
     ("text_depth", "source_depth", "hole_depth", "blocker"),
     [

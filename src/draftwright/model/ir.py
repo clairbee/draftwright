@@ -416,6 +416,13 @@ class ThreadRequirement:
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"thread {name} must be finite and positive")
             object.__setattr__(self, name, value)
+        if (
+            self.application == "internal"
+            and self.minimum_full_thread is not None
+            and self.drill_depth is not None
+            and self.minimum_full_thread > self.drill_depth
+        ):
+            raise ValueError("thread minimum full thread cannot exceed drill depth")
         if not str(self.text).strip():
             raise ValueError("thread source text must be non-empty")
         if not str(self.part21_id).strip():
