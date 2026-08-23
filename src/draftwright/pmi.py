@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -573,6 +573,51 @@ def _cylindrical_references(label, shape_tool):
     return tuple(unique.values()), tuple(dict.fromkeys(reasons))
 
 
+def _cylindrical_references_from_shapes(shapes, *, noun: str):
+    """Measure exact imported faces already resolved from Part21 identities."""
+    references: list[CylindricalReference] = []
+    reasons: list[str] = []
+    for shape in shapes:
+        try:
+            if shape.ShapeType() != TopAbs_FACE:
+                reasons.append(f"one {noun} reference is not a face")
+                continue
+            surface = BRepAdaptor_Surface(TopoDS.Face_s(shape))
+            if surface.GetType() != GeomAbs_Cylinder:
+                reasons.append(f"one {noun} reference face is not cylindrical")
+                continue
+            orientation = shape.Orientation()
+            sense: Literal["external", "internal"]
+            if orientation == TopAbs_FORWARD:
+                sense = "external"
+            elif orientation == TopAbs_REVERSED:
+                sense = "internal"
+            else:
+                reasons.append(f"one {noun} cylindrical reference has unsupported orientation")
+                continue
+            cylinder = surface.Cylinder()
+            axis = cylinder.Axis()
+            point = axis.Location()
+            direction = axis.Direction()
+            references.append(
+                CylindricalReference.canonical(
+                    axis_point=(point.X(), point.Y(), point.Z()),
+                    axis_direction=(direction.X(), direction.Y(), direction.Z()),
+                    radius=float(cylinder.Radius()),
+                    local_interval=(
+                        float(surface.FirstVParameter()),
+                        float(surface.LastVParameter()),
+                    ),
+                    sense=sense,
+                )
+            )
+        except Exception as exc:
+            reasons.append(f"one {noun} reference could not be measured ({_failure_reason(exc)})")
+    if not references and not reasons:
+        reasons.append(f"{noun} reference geometry is unavailable")
+    return tuple(references), tuple(dict.fromkeys(reasons))
+
+
 def _diameter_reference_blockers(
     references: tuple[CylindricalReference, ...], nominal: float, reasons: tuple[str, ...]
 ) -> tuple[str, ...]:
@@ -738,13 +783,19 @@ class _DatumTopologyResolver:
         self._items[item_id] = result
         return result, ""
 
-    def resolve(self, definition_id: str, item_ids: tuple[str, ...]):
+    def resolve(
+        self,
+        definition_id: str,
+        item_ids: tuple[str, ...],
+        *,
+        noun: str = "datum feature",
+    ):
         """Return exact imported faces, or reasons that make the definition unsafe."""
         cached = self._definitions.get(definition_id)
         if cached is not None:
             return cached, ()
         if not item_ids:
-            return (), ("datum feature has no Part21 representation items",)
+            return (), (f"{noun} has no Part21 representation items",)
 
         resolved = []
         reasons: list[str] = []
@@ -763,7 +814,7 @@ class _DatumTopologyResolver:
         for face_index in indices:
             owner = self._claims.get(face_index)
             if owner is not None and owner != definition_id:
-                reasons.append(f"one imported face is already claimed by datum feature {owner}")
+                reasons.append(f"one imported face is already claimed by {noun} {owner}")
         if reasons:
             return (), tuple(dict.fromkeys(reasons))
 
@@ -1194,6 +1245,35 @@ def _manufacturing_requirement_projection(
     return tuple(sources), tuple(records)
 
 
+_CYLINDRICAL_REQUIREMENT_KINDS = frozenset(("external_thread", "internal_thread", "knurl"))
+
+
+def _manufacturing_requirement_topology(records, step_reader) -> tuple[PmiRecord, ...]:
+    """Attach exact finite-cylinder evidence to supported manufacturing records."""
+    imported_faces = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(step_reader.OneShape(), TopAbs_FACE, imported_faces)
+    resolver = _DatumTopologyResolver(step_reader, imported_faces)
+    projected = []
+    for record in records:
+        if record.kind not in _CYLINDRICAL_REQUIREMENT_KINDS or record.lowering_blockers:
+            projected.append(record)
+            continue
+        shapes, topology_reasons = resolver.resolve(
+            record.part21_id,
+            record.reference_item_ids,
+            noun="manufacturing requirement",
+        )
+        references, geometry_reasons = _cylindrical_references_from_shapes(
+            shapes,
+            noun="manufacturing requirement",
+        )
+        blockers = tuple(
+            dict.fromkeys((*record.lowering_blockers, *topology_reasons, *geometry_reasons))
+        )
+        projected.append(replace(record, cylindrical_refs=references, lowering_blockers=blockers))
+    return tuple(projected)
+
+
 def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
     """Inventory and extract semantic PMI from an AP242 STEP file in one XCAF pass.
 
@@ -1257,6 +1337,23 @@ def extract_pmi_report(step_file: str | Path) -> PmiExtractionReport:
     main = doc.Main()
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(main)
     dt = XCAFDoc_DocumentTool.DimTolTool_s(main)
+
+    try:
+        requirement_records = _manufacturing_requirement_topology(
+            requirement_records,
+            reader.Reader(),
+        )
+    except Exception as exc:
+        reason = f"manufacturing requirement topology is unavailable ({_failure_reason(exc)})"
+        requirement_records = tuple(
+            replace(
+                record,
+                lowering_blockers=tuple(dict.fromkeys((*record.lowering_blockers, reason))),
+            )
+            if record.kind in _CYLINDRICAL_REQUIREMENT_KINDS
+            else record
+            for record in requirement_records
+        )
 
     records: list[PmiRecord] = []
     sources: list[PmiSourceEntity] = []

@@ -355,7 +355,15 @@ def read_countersink(cone) -> tuple[float, float]:
 
 
 def boss(
-    obj=None, *, diameter=None, height=None, at=None, axis=None, span=None, thread=None
+    obj=None,
+    *,
+    diameter=None,
+    height=None,
+    at=None,
+    axis=None,
+    span=None,
+    thread=None,
+    knurl=None,
 ) -> BossFeature:
     """An external cylindrical boss / OD. Either ``boss(cylinder)`` or
     ``boss(diameter=6, at=(0, 0, 0), axis="x")`` (parametric). An object supplies
@@ -383,6 +391,7 @@ def boss(
         height=height,
         span=span,
         thread=thread,
+        knurl=knurl,
     )
 
 
@@ -477,7 +486,15 @@ def external_spur_gear(
 
 
 def step(
-    obj=None, *, diameter=None, length=None, at=None, axis=None, span=None, thread=None
+    obj=None,
+    *,
+    diameter=None,
+    length=None,
+    at=None,
+    axis=None,
+    span=None,
+    thread=None,
+    knurl=None,
 ) -> StepFeature:
     """One axial segment of a turned profile — its OD + length. Either ``step(segment)``
     (⌀ from the cylindrical face, length + centre from the bbox along its axis) or
@@ -505,6 +522,7 @@ def step(
         diameter=diameter,
         span=span,
         thread=thread,
+        knurl=knurl,
     )
 
 

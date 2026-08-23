@@ -20,7 +20,7 @@ feature. `through` is read off the feature for exactly this reason.
 from __future__ import annotations
 
 from draftwright._geometry import _fmt
-from draftwright.model.ir import HoleFeature, PatternFeature
+from draftwright.model.ir import HoleFeature, PatternFeature, ThreadRequirement
 from draftwright.model.planner import DimensionGroup, DimensionId
 
 
@@ -369,6 +369,9 @@ def hole_callout_spec(group: DimensionGroup) -> dict | None:
     # defining call), then any pattern suffix: e.g. "M3x0.5" or "M3x0.5 EQ SP ON ø50 BC".
     hole = feat.member if isinstance(feat, PatternFeature) else feat
     thread = getattr(hole, "thread", None)
+    thread_source_ids = thread.source_ids if isinstance(thread, ThreadRequirement) else ()
+    if isinstance(thread, ThreadRequirement):
+        thread = thread.callout_suffix
     profile_suffix = None
     across = None
     if getattr(hole, "profile", None) == "double_d":
@@ -403,6 +406,10 @@ def hole_callout_spec(group: DimensionGroup) -> dict | None:
         # non-dimensional facts carried separately as structured callout coverage; neither
         # rendered text nor an invented dimensional identity certifies them.
         "measurements": _callout_measurements(group),
+        # Exact imported source(s) whose typed rider is printed by this compound callout.
+        # For a pattern the rider lives on ``member`` above, while its measurements belong
+        # to the pattern owner; carrying the source here preserves that intentional split.
+        "source_ids": tuple(thread_source_ids),
         # Structured coverage for physical critique. This is deliberately absent when the
         # A/F parameter was suppressed: ``DOUBLE-D`` without its defining A/F is incomplete.
         "profile_coverage": (

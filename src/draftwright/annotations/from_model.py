@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from itertools import chain, islice, tee
+from itertools import chain, groupby, islice, tee
 from typing import Any
 
 from build123d_drafting import DatumFeature, FeatureControlFrame, SurfaceFinish, TextBlock
@@ -114,9 +114,11 @@ from draftwright.model.ir import (
     ChamferFeature,
     FilletFeature,
     HoleFeature,
+    KnurlRequirement,
     PatternFeature,
     PocketFeature,
     SlotFeature,
+    ThreadRequirement,
 )
 from draftwright.view_plan import views_showing
 
@@ -200,6 +202,7 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
         terms.append(suffix)
     callout.label = " ".join(terms)
     callout.measurements = tuple(spec.get("measurements", ()))
+    callout.source_ids = tuple(spec.get("source_ids", ()))
     callout.covers_hole_requirements = tuple(
         requirement
         for requirement, covered in (
@@ -1356,6 +1359,146 @@ def _diameter_step_anchor(anchor, groups):
     return tuple(centred)
 
 
+def _manufacturing_suffix(thread, knurl=None) -> str | None:
+    """Renderer text for typed manufacturing aspects after the canonical diameter."""
+    terms = []
+    if isinstance(thread, ThreadRequirement):
+        terms.append(thread.callout_suffix)
+    elif thread:
+        terms.append(str(thread))
+    if isinstance(knurl, KnurlRequirement):
+        terms.append(knurl.callout_suffix)
+    return "; ".join(terms) or None
+
+
+_DIAMETER_LEAD_DIRS = {
+    "x": ((0, -1), (0, 1)),
+    "z": ((-1, 0), (1, 0)),
+}
+
+
+def _diameter_source_bounds(dwg, view, feature, diameter) -> tuple[float, float, float, float]:
+    """Projected cylindrical-envelope bounds for a typed diameter leader.
+
+    A profile-view diameter leader must start on the owning cylindrical band, not at the
+    feature centre.  Build the orthographic envelope from the feature's finite axial span and
+    both radial basis directions; the projection collapses the hidden radial direction and
+    leaves the truthful visible silhouette.  A span-less boss retains its declared centre,
+    which is the same fallback used by the legacy diameter row.
+    """
+    span = getattr(feature, "span", None)
+    centres = tuple(span) if span is not None else (feature.frame.origin,)
+    axis_index = "xyz".index(feature.frame.axis)
+    radius = float(diameter) / 2
+    points = []
+    for centre in centres:
+        points.append(dwg.at(view, *centre))
+        for radial_index in range(3):
+            if radial_index == axis_index:
+                continue
+            for sign in (-1, 1):
+                point = list(centre)
+                point[radial_index] += sign * radius
+                points.append(dwg.at(view, *point))
+    return (
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    )
+
+
+def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ctx) -> int:
+    """Route a typed thread/knurl diameter row through the shared leader solve.
+
+    The legacy row deliberately gives every item the widest label's pitch.  That is stable and
+    tidy for short diameter strings, but an authoritative manufacturing paragraph cannot share
+    that pitch without evicting its siblings.  Collect typed buckets into the global
+    feature-leader solve, which has independent label footprints and multiple clear lanes;
+    short plain buckets retain their byte-stable legacy row.
+    """
+    vb = dwg.view_bounds("front")
+    if vb is None:
+        return 0
+    reach = _leader_callout_reach(dwg.draft)
+    jobs = []
+    source_ids_by_name = {}
+    for index, (_anchor, dia, value_text, refs, dtol, suffix, groups) in indexed_buckets:
+        owner = next(iter(refs)) if len(refs) == 1 else None
+        representative = groups[0].facts
+        source_bounds = _diameter_source_bounds(dwg, "front", representative, dia)
+        raw_candidates = _radial_candidates(
+            dwg,
+            "front",
+            vb,
+            representative,
+            reach,
+            source_bounds=source_bounds,
+            directions=_DIAMETER_LEAD_DIRS[representative.frame.axis],
+        )
+
+        def _wide_lanes(_raw=raw_candidates, _owner=owner):
+            # Short adjacent turned bands put their radial leaders directly under the axial
+            # dimension chain.  The shared adapter adds nearby lanes; typed manufacturing
+            # text also needs a bounded set of farther elbows so its shaft can clear those
+            # fixed labels while its arrow remains on the same cylindrical rim.
+            spacing = dwg.draft.font_size + 2 * dwg.draft.pad_around_text
+            for tip, elbow, _provenance in _raw:
+                dx, dy = float(elbow[0]) - float(tip[0]), float(elbow[1]) - float(tip[1])
+                length = math.hypot(dx, dy) or 1.0
+                px, py = -dy / length, dx / length
+                for lane in (0, 8, -8):
+                    yield (
+                        tip,
+                        (
+                            float(elbow[0]) + px * spacing * lane,
+                            float(elbow[1]) + py * spacing * lane,
+                            0,
+                        ),
+                        _owner,
+                    )
+
+        candidates = _wide_lanes()
+        name = f"{prefix}{start + index}"
+        source_ids_by_name[name] = tuple(
+            dict.fromkeys(
+                source_id
+                for group in groups
+                for aspect in (
+                    group.facts.get("thread"),
+                    group.facts.get("knurl"),
+                )
+                for source_id in getattr(aspect, "source_ids", ())
+            )
+        )
+        jobs.append(
+            (
+                name,
+                "front",
+                vb,
+                f"ø{value_text}{_tol_suffix(dtol, dwg.draft)}" + (f" {suffix}" if suffix else ""),
+                candidates,
+                tuple(
+                    parameter.id
+                    for group in groups
+                    for parameter in group.dims
+                    if parameter.kind == "diameter"
+                ),
+            )
+        )
+    return _leader_callout_pass(
+        dwg,
+        a,
+        jobs,
+        noun="typed manufacturing diameter",
+        drop_code="diameter_dropped",
+        ctx=ctx,
+        geom_clear=True,
+        joint=True,
+        source_ids_by_name=source_ids_by_name,
+    )
+
+
 def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     """ø leaders for a turned part's external step/boss diameters, from the IR —
     one distinct callout per diameter, in a tidy row below the front view
@@ -1374,7 +1517,9 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     # diameter (insertion-ordered), so provenance (#412) can tag the callout with its
     # single owner — or leave it unowned when two distinct features share the diameter
     # (the #398c/#406 shared-value rule, so drop can't over-strip a sibling).
-    row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, {features}, tolerance]  (X-turned)
+    # Keep the compiler-approved text beside the numeric diameter.  Layout still needs the
+    # number for truthful rim geometry; only ``value_text`` may cross into a printed label.
+    row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, text, {features}, tolerance, ...]
     col_buckets: dict = {}  # Z-turned
     end_buckets: dict = {}  # Y-turned: radial leaders in the end-on front view
     for g in plan.of_kind("step", "boss"):
@@ -1385,11 +1530,13 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
             continue
         dia = dpd.value
         # An EXTERNAL thread (#859) makes a distinct callout: a threaded ⌀6 ("ø6 M6x1") and a
-        # plain ⌀6 are NOT the same label, so the bucket keys on (⌀, thread) — this never drops a
-        # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
-        # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
-        # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
-        thr = g.facts.get("thread")
+        # plain ⌀6 are NOT the same label. Plain entries key on (⌀, suffix, None) and retain
+        # byte-identical value deduplication; source-owned entries add their opaque canonical
+        # owner below. The first authored tolerance within one legitimate shared bucket wins.
+        thr = _manufacturing_suffix(
+            g.facts.get("thread"),
+            g.facts.get("knurl"),
+        )
         # A coincident plain ⌀ already drawn (a bore, another step) dedups only an UNTHREADED ⌀;
         # a threaded ⌀ is a distinct callout, so a bare ⌀8 mention must not suppress ø8 M8x1.25.
         if thr is None and any(abs(dia - m) <= tol for m in mentioned):
@@ -1398,30 +1545,41 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         if bucket is None:
             continue
         dtol = dpd.tolerance
-        dkey = (round(dia, 2), thr)
-        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr, []])
-        entry[2].add(g.ref)
-        entry[5].append(g)
-        if entry[3] is None:
-            entry[3] = dtol
+        typed_owner = (
+            g.ref
+            if isinstance(g.facts.get("thread"), ThreadRequirement)
+            or isinstance(g.facts.get("knurl"), KnurlRequirement)
+            else None
+        )
+        # Legacy plain diameters remain deduplicated by value.  A typed requirement is
+        # owned by one canonical feature and may share identical wording with another
+        # source-owned feature; include the opaque compiler owner so neither provenance
+        # nor public ``drop(feature)`` is collapsed into an unowned shared mark.
+        dkey = (round(dia, 2), thr, typed_owner)
+        entry = bucket.setdefault(dkey, [g.anchor, dia, dpd.value_text, set(), dtol, thr, []])
+        entry[3].add(g.ref)
+        entry[6].append(g)
+        if entry[4] is None:
+            entry[4] = dtol
 
-    def _items(buckets):
+    def _item(entry):
         # The trailing element is the ADR 0010 claim: one ø callout stands for every step
         # sharing this diameter, so it draws each of their diameter dims (#1002). It is the
         # same derivation the m_dia_y branch below already made; the row/column placers
         # threaded nothing, so every X- and Z-turned ø callout reached the sheet unclaimed
         # and no verifier could see it (#1227).
-        return [
-            (
-                _diameter_step_anchor(a, gs),
-                d,
-                next(iter(refs)) if len(refs) == 1 else None,
-                t,
-                thr,
-                tuple(pd.id for gp in gs for pd in gp.dims if pd.kind == "diameter"),
-            )
-            for a, d, refs, t, thr, gs in buckets.values()
-        ]
+        a, d, _value_text, refs, t, thr, gs = entry
+        return (
+            _diameter_step_anchor(a, gs),
+            d,
+            next(iter(refs)) if len(refs) == 1 else None,
+            t,
+            thr,
+            tuple(pd.id for gp in gs for pd in gp.dims if pd.kind == "diameter"),
+        )
+
+    def _items(buckets):
+        return [_item(entry) for entry in buckets.values()]
 
     # The placers name leaders m_dia_{x,z}{start+i} CONTIGUOUSLY from one start. The auto-pass
     # (only None) uses start=0 — byte-identical. The finalize path (only set) may run after
@@ -1441,9 +1599,42 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     start_y = _next_start("m_dia_y") if only is not None else 0
     start_z = _next_start("m_dia_z") if only is not None else 0
     trace = getattr(ctx, "trace", None)  # the immediate placers report to the trace too (#736)
-    placed = _diameter_row_below(
-        dwg, _items(row_buckets), start=start_x, trace=trace, ctx=ctx
-    ) + _diameter_column_left(dwg, _items(col_buckets), start=start_z, trace=trace, ctx=ctx)
+    indexed_row = list(enumerate(row_buckets.values()))
+
+    def _typed(entry):
+        return any(
+            isinstance(group.facts.get("thread"), ThreadRequirement)
+            or isinstance(group.facts.get("knurl"), KnurlRequirement)
+            for group in entry[6]
+        )
+
+    typed_entries = [(index, entry) for index, entry in indexed_row if _typed(entry)]
+    plain_entries = [(index, entry) for index, entry in indexed_row if not _typed(entry)]
+    placed = 0
+    # Preserve the legacy tidy row for short plain diameters. Split only where a typed
+    # bucket owns the intervening stable name; each contiguous run can then use the legacy
+    # solver without renumbering a source-owned callout.
+    for _, run in groupby(
+        enumerate(plain_entries),
+        key=lambda item: item[1][0] - item[0],
+    ):
+        entries = [entry for _ordinal, entry in run]
+        placed += _diameter_row_below(
+            dwg,
+            [_item(entry) for _index, entry in entries],
+            start=start_x + entries[0][0],
+            trace=trace,
+            ctx=ctx,
+        )
+    placed += _render_typed_diameter_leaders(
+        dwg,
+        a,
+        typed_entries,
+        prefix="m_dia_x",
+        start=start_x,
+        ctx=ctx,
+    )
+    placed += _diameter_column_left(dwg, _items(col_buckets), start=start_z, trace=trace, ctx=ctx)
 
     # A Y-axis step is end-on in the front view, so the X/Z profile-strip
     # leaders are geometrically inapplicable. Place one radial leader per
@@ -1468,7 +1659,7 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
                     hole_circles.append((px, py, diameter / 2 * a.SCALE))
             jobs = []
             covered_by_name = {}
-            for i, (_anchor, dia, refs, dtol, thr, feature_groups) in enumerate(
+            for i, (_anchor, dia, _value_text, refs, dtol, thr, feature_groups) in enumerate(
                 end_buckets.values()
             ):
                 representative = feature_groups[0].facts
@@ -1839,6 +2030,7 @@ def _leader_callout_pass(
     ctx,
     geom_clear=False,
     joint=False,
+    source_ids_by_name=None,
 ) -> int:
     """Place one machined-feature leader callout per job (#637/#740). A *job* is
     ``(name, view, vb, label, candidates, measurement)`` where *candidates* yields ``(tip,
@@ -1846,7 +2038,7 @@ def _leader_callout_pass(
     `DimensionId`s the callout's label draws — several, because these callouts are compound:
     a pocket prints width × length × depth, a groove width × ⌀ (#1002 r3, which found the
     whole machined-feature group recording nothing at all).
-    The five scoped post-drain adapters pass ``joint=True``. Their candidate geometry is
+    The six scoped post-drain adapters pass ``joint=True``. Their candidate geometry is
     collected before anything is emitted. Fixed-obstacle eligibility and pairwise conflicts
     use the same rendered occupancy as the old first-clear loop; the geometry-only layout
     solver then maximises placed jobs, minimises total leader length, and uses candidate order
@@ -1865,12 +2057,34 @@ def _leader_callout_pass(
     tried, obstacle count, placed tip/elbow or the drop reason. Post-#734 these
     callouts place after the drain, so without this the #733 story ("why did this
     pocket callout land here / drop") would be invisible to the trace."""
+    source_ids_by_name = source_ids_by_name or {}
     # Keep alternatives lazy until the bounded joint tier is known to be usable.
     # This matters for one grouped job with many members: counting jobs or
     # cross-job pairs alone cannot protect its collect-all OCC construction.
     jobs = [(*job[:4], iter(job[4]), job[5]) for job in jobs]
     if not jobs:
         return 0
+
+    def record_drop(
+        label,
+        measurement,
+        *,
+        source_ids=(),
+        reason="no_clear_room",
+    ) -> None:
+        """Record every pass drop through one provenance-preserving producer."""
+
+        validation = reason == "geometry_validation"
+        detail = "rendered geometry validation failed" if validation else "no clear room"
+        ctx.record_issue(
+            "warning",
+            drop_code,
+            f"{noun} callout {label} not placed ({detail})",
+            measurement=measurement,
+            source=tuple(source_ids),
+            outcome_stage="validation" if validation else "placement",
+        )
+
     if joint and getattr(ctx, "feature_leaders", None) is not None:
         for name, view, vb, label, raw_candidates, measurement in jobs:
             joint_candidates, fallback_candidates = tee(raw_candidates)
@@ -1930,6 +2144,22 @@ def _leader_callout_pass(
                     geom_clear=_geom_clear,
                 )
 
+            source_ids = tuple(source_ids_by_name.get(name, ()))
+
+            def _on_drop(
+                reason,
+                *,
+                _source_ids=source_ids,
+                _label=label,
+                _measurement=measurement,
+            ):
+                record_drop(
+                    _label,
+                    _measurement,
+                    source_ids=_source_ids,
+                    reason=reason,
+                )
+
             collect_feature_leader(
                 ctx,
                 FeatureLeaderJob(
@@ -1950,6 +2180,7 @@ def _leader_callout_pass(
                     # Policy B: the solver penalises the crossing and the
                     # emitter records a machine-readable warning (#1166).
                     allow_policy_b_fixed=True,
+                    on_drop=_on_drop if source_ids else None,
                 ),
             )
         return 0
@@ -2060,11 +2291,10 @@ def _leader_callout_pass(
                 trace_item(name, view, label, tried, len(obstacles), chosen)
                 placed_count += 1
             else:
-                ctx.record_issue(
-                    "warning",
-                    drop_code,
-                    f"{noun} callout {label} not placed (no clear room)",
-                    measurement=measurement,
+                record_drop(
+                    label,
+                    measurement,
+                    source_ids=source_ids_by_name.get(name, ()),
                 )
                 trace_item(name, view, label, tried, len(obstacles))
         return placed_count
@@ -2195,11 +2425,10 @@ def _leader_callout_pass(
             )
             placed_count += 1
             continue
-        ctx.record_issue(
-            "warning",
-            drop_code,
-            f"{noun} callout {label} not placed (no clear room)",
-            measurement=measurement,
+        record_drop(
+            label,
+            measurement,
+            source_ids=source_ids_by_name.get(name, ()),
         )
         trace_item(
             name,
@@ -2881,7 +3110,10 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
             continue
         dia = dpd.value
         dtol = dpd.tolerance
-        thr = getattr(b, "thread", None)  # external thread appends to the OD callout (#859)
+        thr = _manufacturing_suffix(
+            getattr(b, "thread", None),
+            getattr(b, "knurl", None),
+        )
         # A coincident plain ⌀ dedups only an UNTHREADED boss; a threaded ⌀ is a distinct callout,
         # so a bare ⌀8 mention (a bore, a step) must not suppress ø8 M8x1.25 (#859).
         if thr is None and any(abs(dia - m) <= 0.15 for m in mentioned):

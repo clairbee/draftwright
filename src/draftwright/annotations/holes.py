@@ -103,6 +103,7 @@ def _profiled_callout_leader(*, callout, **kw):
     leader.label = semantic_label
     leader.covers_profiles = getattr(callout, "covers_profiles", ())
     leader.covers_hole_requirements = getattr(callout, "covers_hole_requirements", ())
+    leader.source_ids = tuple(getattr(callout, "source_ids", ()))
     return leader
 
 
@@ -626,6 +627,7 @@ def _record_callout_drop(
         f"hole callout ø{_fmt(diam)} dropped from the {view} view ({reason})",
         measurement=measurements,
         hole_requirements=hole_requirements,
+        source=getattr(callout, "source_ids", ()),
         outcome_stage=outcome_stage,
     )
     # First-class escalation object alongside the lint code (ADR 0009 Amdt 1, #351 PR-2).

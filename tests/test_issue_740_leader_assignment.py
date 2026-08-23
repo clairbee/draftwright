@@ -19,7 +19,7 @@ from draftwright.layout import _assign_leader_candidates
 from draftwright.model import FilletFeature, Frame, GrooveFeature, PartModel, pocket
 
 
-def test_joint_assignment_is_scoped_to_the_five_post_drain_adapters():
+def test_joint_assignment_is_scoped_to_the_six_post_drain_adapters():
     root = Path(__file__).parents[1] / "src" / "draftwright" / "annotations"
 
     def call_sites(filename):
@@ -41,6 +41,7 @@ def test_joint_assignment_is_scoped_to_the_five_post_drain_adapters():
 
     assert call_sites("from_model.py") | call_sites("holes.py") == {
         ("from_model.py", "render_diameters", False),
+        ("from_model.py", "_render_typed_diameter_leaders", True),
         ("from_model.py", "render_chamfers", True),
         ("from_model.py", "render_fillets", True),
         ("from_model.py", "render_flats", True),
