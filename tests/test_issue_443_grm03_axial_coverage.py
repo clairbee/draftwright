@@ -13,11 +13,18 @@ def test_grm03_replans_optional_iso_for_truthful_step_lengths():
     assert "iso" not in drawing.views
     assert drawing.scale == 5.0
     assert drawing.scale_decision["status"] == "automatic_replanned"
-    assert drawing.scale_decision["attempted_scales"] == (2.0, 5.0)
+    assert drawing.scale_decision["attempted_scales"] == (2.0, 5.0, 5.0)
     assert [item["views"] for item in drawing.scale_decision["attempts"]] == [
         ("front", "plan", "side", "iso"),
         ("front", "plan", "side"),
+        ("front", "plan", "side"),
     ]
+    assert [item["status"] for item in drawing.scale_decision["attempts"]] == [
+        "axial_coverage_incomplete",
+        "scale_proposal",
+        "complete",
+    ]
+    assert all(item["page"] == (297.0, 210.0) for item in drawing.scale_decision["attempts"])
     step_lengths = {
         drawing.get_annotation(name).label
         for name in drawing.annotations()

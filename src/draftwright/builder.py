@@ -1322,14 +1322,27 @@ def _complete_automatic_plan(drawing: Drawing) -> Drawing:
             hole_requirement_ids=hole_requirements,
         )
     )
+    previous = getattr(drawing, "scale_decision", {})
+    previous_attempts = tuple(previous.get("attempts", ()))
+    previous_scales = tuple(previous.get("attempted_scales", ()))
+    incomplete_attempt = _scale_attempt(
+        drawing.scale,
+        "incomplete",
+        blockers,
+        reason="required_outcome_dropped",
+        views=getattr(drawing, "views", None),
+        page=(drawing.page_w, drawing.page_h)
+        if hasattr(drawing, "page_w") and hasattr(drawing, "page_h")
+        else None,
+    )
     drawing.scale_decision = _scale_decision(
         policy="automatic",
         requested=None,
         effective=drawing.scale,
         status="incomplete",
         blockers=blockers,
-        attempted=(drawing.scale,),
-        attempts=(_scale_attempt(drawing.scale, "incomplete", blockers),),
+        attempted=previous_scales + (drawing.scale,),
+        attempts=previous_attempts + (incomplete_attempt,),
     )
     warnings.warn(
         f"the automatically planned sheet drops required annotation outcomes ({codes}); "
@@ -1787,7 +1800,7 @@ def build_drawing(
                     )
                 )
                 try:
-                    without_iso = _build(
+                    without_iso_proposal = _build(
                         None,
                         arrangements=(settled_arrangement,),
                         include_iso=False,
@@ -1805,59 +1818,91 @@ def build_drawing(
                         )
                     )
                 else:
-                    without_iso = _retain_arrangement(without_iso)
-                    same_page = (without_iso.page_w, without_iso.page_h) == original_page
-                    issues, blockers = _automatic_assessment(without_iso)
-                    structural_error = any(issue.severity == "error" for issue in issues)
-                    candidate_has_detail = any(
-                        name.startswith("detail_") for name in without_iso.views
+                    proposal_page = (
+                        without_iso_proposal.page_w,
+                        without_iso_proposal.page_h,
                     )
-                    candidate_has_axial_gap = bool(
-                        lint_axial_coverage(
-                            latest_analysis.part,
-                            without_iso,
-                            prof=latest_analysis.prof,
+                    replan_attempts.append(
+                        _scale_attempt(
+                            without_iso_proposal.scale,
+                            "scale_proposal",
+                            reason="remove_optional_iso",
+                            views=without_iso_proposal.views,
+                            page=proposal_page,
                         )
                     )
-                    if (
-                        not candidate_has_axial_gap
-                        and same_page
-                        and not candidate_has_detail
-                        and not structural_error
-                        and not blockers
-                    ):
+                    try:
+                        without_iso = _build(
+                            without_iso_proposal.scale,
+                            arrangements=(settled_arrangement,),
+                            include_iso=False,
+                            page_override=original_page,
+                        )
+                    except (ValueError, Standard_Failure) as exc:
+                        _log.info(
+                            "fixed-page optional-ISO replan rejected (build failed: %s)", exc
+                        )
                         replan_attempts.append(
                             _scale_attempt(
-                                without_iso.scale,
-                                "complete",
-                                reason="remove_optional_iso",
-                                views=without_iso.views,
+                                without_iso_proposal.scale,
+                                "error",
+                                error=str(exc),
+                                reason="remove_optional_iso_fixed_page",
+                                views=without_iso_proposal.views,
                                 page=original_page,
                             )
                         )
-                        drawing = without_iso
-                        replanned = True
                     else:
-                        replan_attempts.append(
-                            _scale_attempt(
-                                without_iso.scale,
-                                "rejected",
-                                blockers,
-                                reason=(
-                                    "axial_coverage_incomplete"
-                                    if candidate_has_axial_gap
-                                    else "page_changed"
-                                    if not same_page
-                                    else "recovery_detail_introduced"
-                                    if candidate_has_detail
-                                    else "structural_error"
-                                    if structural_error
-                                    else "required_outcome_dropped"
-                                ),
-                                views=without_iso.views,
-                                page=original_page,
+                        without_iso = _retain_arrangement(without_iso)
+                        assert (without_iso.page_w, without_iso.page_h) == original_page
+                        issues, blockers = _automatic_assessment(without_iso)
+                        structural_error = any(issue.severity == "error" for issue in issues)
+                        candidate_has_detail = any(
+                            name.startswith("detail_") for name in without_iso.views
+                        )
+                        candidate_has_axial_gap = bool(
+                            lint_axial_coverage(
+                                latest_analysis.part,
+                                without_iso,
+                                prof=latest_analysis.prof,
                             )
                         )
+                        if (
+                            not candidate_has_axial_gap
+                            and not candidate_has_detail
+                            and not structural_error
+                            and not blockers
+                        ):
+                            replan_attempts.append(
+                                _scale_attempt(
+                                    without_iso.scale,
+                                    "complete",
+                                    reason="remove_optional_iso_fixed_page",
+                                    views=without_iso.views,
+                                    page=original_page,
+                                )
+                            )
+                            drawing = without_iso
+                            replanned = True
+                        else:
+                            replan_attempts.append(
+                                _scale_attempt(
+                                    without_iso.scale,
+                                    "rejected",
+                                    blockers,
+                                    reason=(
+                                        "axial_coverage_incomplete"
+                                        if candidate_has_axial_gap
+                                        else "recovery_detail_introduced"
+                                        if candidate_has_detail
+                                        else "structural_error"
+                                        if structural_error
+                                        else "required_outcome_dropped"
+                                    ),
+                                    views=without_iso.views,
+                                    page=original_page,
+                                )
+                            )
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.

@@ -4404,7 +4404,11 @@ class TestLintLocationCoverage:
         dwg = build_drawing(part, number="X", auto_dims=False)
         feature = next(item for item in dwg.model().features if item.kind == "hole")
         point = feature.frame.origin
-        dim = Dimension((-1000, -1000, 0), (-990, -1000, 0), "above", 8, dwg.draft)
+        px, py, *_ = dwg.at("plan", *point)
+        # Its witness geometry aligns with the required X ordinate.  Because it also
+        # carries structured evidence, that wrong-axis semantic claim is authoritative
+        # and the same annotation may not rescue itself through geometric fallback.
+        dim = Dimension((px, py, 0), (px + 10, py, 0), "above", 8, dwg.draft)
         dim.covers_hole_locations = ((feature, "location.location.y", point),)
         # The registry is the public evidence seam this lint reads.  Register directly so
         # the fixture can model an external producer's invalid semantic claim without using

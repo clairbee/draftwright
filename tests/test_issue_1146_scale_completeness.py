@@ -60,6 +60,17 @@ def test_automatic_incomplete_summary_preserves_every_provenance_channel():
         scale=1.0,
         registry=registry,
         lint=lambda physical=False: tuple(registry.issues),
+        scale_decision={
+            "attempted_scales": (2.0,),
+            "attempts": (
+                {
+                    "scale": 2.0,
+                    "status": "rejected",
+                    "blockers": (),
+                    "reason": "synthetic_corrective_trial",
+                },
+            ),
+        },
     )
 
     with pytest.warns(ScaleCompletenessWarning, match="returning the incomplete drawing"):
@@ -67,7 +78,11 @@ def test_automatic_incomplete_summary_preserves_every_provenance_channel():
 
     assert returned is drawing
     assert drawing.scale_decision["status"] == "incomplete"
-    assert drawing.scale_decision["attempted_scales"] == (1.0,)
+    assert drawing.scale_decision["attempted_scales"] == (2.0, 1.0)
+    assert [item["status"] for item in drawing.scale_decision["attempts"]] == [
+        "rejected",
+        "incomplete",
+    ]
     summary = registry.issues[-1]
     assert summary.code == "plan_incomplete"
     assert summary.measurement_ids == ()

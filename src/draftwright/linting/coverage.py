@@ -403,8 +403,13 @@ def lint_location_coverage(
             c = ann.center()
             marks.setdefault(view, []).append((c.X, c.Y))
         elif isinstance(ann, Dimension):
-            dim_verts.setdefault(view, []).extend(_dim_vertices(ann))
-            for fact in getattr(ann, "covers_hole_locations", ()):
+            facts = tuple(getattr(ann, "covers_hole_locations", ()))
+            # Structured compiler evidence is authoritative.  Letting the same
+            # annotation fall back to its witness geometry would allow a wrong
+            # feature/axis tag to self-certify merely by sharing an ordinate.
+            if not facts:
+                dim_verts.setdefault(view, []).extend(_dim_vertices(ann))
+            for fact in facts:
                 if len(fact) == 3:
                     feature, parameter, point = fact
                 elif len(fact) == 2:  # compatibility with legacy/external structured facts
