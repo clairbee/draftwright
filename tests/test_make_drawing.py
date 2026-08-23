@@ -4406,7 +4406,10 @@ class TestLintLocationCoverage:
         point = feature.frame.origin
         dim = Dimension((-1000, -1000, 0), (-990, -1000, 0), "above", 8, dwg.draft)
         dim.covers_hole_locations = ((feature, "location.location.y", point),)
-        dwg._add(dim, "wrong_axis", view="plan", feature=feature)
+        # The registry is the public evidence seam this lint reads.  Register directly so
+        # the fixture can model an external producer's invalid semantic claim without using
+        # Drawing's private low-level placement primitive.
+        dwg.registry.add(dim, "wrong_axis", "plan", feature=feature)
 
         assert any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
 
