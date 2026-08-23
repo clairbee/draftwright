@@ -2038,7 +2038,7 @@ def _leader_callout_pass(
     `DimensionId`s the callout's label draws — several, because these callouts are compound:
     a pocket prints width × length × depth, a groove width × ⌀ (#1002 r3, which found the
     whole machined-feature group recording nothing at all).
-    The five scoped post-drain adapters pass ``joint=True``. Their candidate geometry is
+    The six scoped post-drain adapters pass ``joint=True``. Their candidate geometry is
     collected before anything is emitted. Fixed-obstacle eligibility and pairwise conflicts
     use the same rendered occupancy as the old first-clear loop; the geometry-only layout
     solver then maximises placed jobs, minimises total leader length, and uses candidate order
@@ -2064,6 +2064,27 @@ def _leader_callout_pass(
     jobs = [(*job[:4], iter(job[4]), job[5]) for job in jobs]
     if not jobs:
         return 0
+
+    def record_drop(
+        label,
+        measurement,
+        *,
+        source_ids=(),
+        reason="no_clear_room",
+    ) -> None:
+        """Record every pass drop through one provenance-preserving producer."""
+
+        validation = reason == "geometry_validation"
+        detail = "rendered geometry validation failed" if validation else "no clear room"
+        ctx.record_issue(
+            "warning",
+            drop_code,
+            f"{noun} callout {label} not placed ({detail})",
+            measurement=measurement,
+            source=tuple(source_ids),
+            outcome_stage="validation" if validation else "placement",
+        )
+
     if joint and getattr(ctx, "feature_leaders", None) is not None:
         for name, view, vb, label, raw_candidates, measurement in jobs:
             joint_candidates, fallback_candidates = tee(raw_candidates)
@@ -2132,20 +2153,11 @@ def _leader_callout_pass(
                 _label=label,
                 _measurement=measurement,
             ):
-                detail = (
-                    "rendered geometry validation failed"
-                    if reason == "geometry_validation"
-                    else "no clear room"
-                )
-                ctx.record_issue(
-                    "warning",
-                    drop_code,
-                    f"{noun} callout {_label} not placed ({detail})",
-                    measurement=_measurement,
-                    source=_source_ids,
-                    outcome_stage=(
-                        "validation" if reason == "geometry_validation" else "placement"
-                    ),
+                record_drop(
+                    _label,
+                    _measurement,
+                    source_ids=_source_ids,
+                    reason=reason,
                 )
 
             collect_feature_leader(
@@ -2279,13 +2291,10 @@ def _leader_callout_pass(
                 trace_item(name, view, label, tried, len(obstacles), chosen)
                 placed_count += 1
             else:
-                ctx.record_issue(
-                    "warning",
-                    drop_code,
-                    f"{noun} callout {label} not placed (no clear room)",
-                    measurement=measurement,
-                    source=source_ids_by_name.get(name, ()),
-                    outcome_stage="placement",
+                record_drop(
+                    label,
+                    measurement,
+                    source_ids=source_ids_by_name.get(name, ()),
                 )
                 trace_item(name, view, label, tried, len(obstacles))
         return placed_count
@@ -2416,13 +2425,10 @@ def _leader_callout_pass(
             )
             placed_count += 1
             continue
-        ctx.record_issue(
-            "warning",
-            drop_code,
-            f"{noun} callout {label} not placed (no clear room)",
-            measurement=measurement,
-            source=source_ids_by_name.get(name, ()),
-            outcome_stage="placement",
+        record_drop(
+            label,
+            measurement,
+            source_ids=source_ids_by_name.get(name, ()),
         )
         trace_item(
             name,
