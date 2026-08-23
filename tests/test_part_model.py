@@ -295,37 +295,29 @@ class TestOpenClosed:
 
 
 def test_feature_detection_runs_once_per_build(monkeypatch):
-    """ADR 0008 Amendment 5 / #244 — one feature inventory: _analyse detects, and
-    build_part_model consumes those results, so each find_* runs ONCE per build
-    (was: holes/patterns/slots 2×, turned steps 3×)."""
-    import b123d_recognisers.result as rmod
+    """ADR 0008 Amendment 5 / #244 — one aggregate inventory per build.
+
+    The recogniser package owns its internal family orchestration; Draftwright's contract is
+    the single public ``build_recognition_result`` call whose result every consumer reuses.
+    """
     from build123d import Cylinder, Pos, Rotation
 
-    import draftwright.model.detect as dmod
+    import draftwright.analysis as amod
     from draftwright import build_drawing
 
-    counts: dict[str, int] = {}
-    for name in (
-        "recognise_holes",
-        "recognise_hole_patterns",
-        "recognise_slots",
-        "recognise_turned_steps",
-    ):
-        for mod in (rmod, dmod):
-            orig = getattr(mod, name)
+    calls = 0
+    original = amod.build_recognition_result
 
-            def wrap(*a, _orig=orig, _n=name, **k):
-                counts[_n] = counts.get(_n, 0) + 1
-                return _orig(*a, **k)
+    def wrap(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
 
-            monkeypatch.setattr(mod, name, wrap)
+    monkeypatch.setattr(amod, "build_recognition_result", wrap)
 
-    # A turned X shaft exercises holes/patterns/slots + the turned profile.
+    # A turned X shaft exercises the detected path, including a repack when required.
     build_drawing(Rotation(0, 90, 0) * (Cylinder(15, 30) + Pos(0, 0, 30) * Cylinder(8, 30)))
-    assert counts.get("recognise_holes") == 1
-    assert counts.get("recognise_hole_patterns") == 1
-    assert counts.get("recognise_slots") == 1
-    assert counts.get("recognise_turned_steps") == 1
+    assert calls == 1
 
 
 def test_lint_reuses_the_build_inventory(monkeypatch):
