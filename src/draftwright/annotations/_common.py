@@ -1761,14 +1761,24 @@ class PlacementContext:
         """Place an annotation onto the drawing through this context (#817) — the render passes'
         door to the placement primitive, so a pass never reaches into the ``Drawing`` (ADR 0005
         §2). Registers *obj* under *name* (owning *view* + source *feature*) and appends it to the
-        render list. Returns *obj*."""
+        render list. Opaque compiler provenance is resolved here, at the placement boundary,
+        so public ``annotations_of(IR feature)`` / ``drop(IR feature)`` keep their value-based
+        contract for immediate passes as well as corridor-drained candidates. Returns *obj*."""
         if self.items is None:
             raise ValueError(
                 "PlacementContext.place() needs the drawing's render list — construct the context "
                 "with items=dwg.items (the orchestrator and Drawing verbs already do; a unit test "
                 "calling a render helper must pass it too)."
             )
-        return place_annotation(self.registry, self.items, obj, name, view, feature, measurement)
+        return place_annotation(
+            self.registry,
+            self.items,
+            obj,
+            name,
+            view,
+            resolve_feature(feature),
+            measurement,
+        )
 
     def feature_of_hole_at(self, location):
         """The IR hole/pattern feature whose member sits at model-space *location*, or ``None``

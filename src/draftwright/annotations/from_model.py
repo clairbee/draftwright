@@ -114,9 +114,11 @@ from draftwright.model.ir import (
     ChamferFeature,
     FilletFeature,
     HoleFeature,
+    KnurlRequirement,
     PatternFeature,
     PocketFeature,
     SlotFeature,
+    ThreadRequirement,
 )
 from draftwright.view_plan import views_showing
 
@@ -1356,6 +1358,18 @@ def _diameter_step_anchor(anchor, groups):
     return tuple(centred)
 
 
+def _manufacturing_suffix(thread, knurl=None) -> str | None:
+    """Renderer text for typed manufacturing aspects after the canonical diameter."""
+    terms = []
+    if isinstance(thread, ThreadRequirement):
+        terms.append(thread.callout_suffix)
+    elif thread:
+        terms.append(str(thread))
+    if isinstance(knurl, KnurlRequirement):
+        terms.append(knurl.callout_suffix)
+    return "; ".join(terms) or None
+
+
 def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     """ø leaders for a turned part's external step/boss diameters, from the IR —
     one distinct callout per diameter, in a tidy row below the front view
@@ -1389,7 +1403,10 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
         # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
         # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
-        thr = g.facts.get("thread")
+        thr = _manufacturing_suffix(
+            g.facts.get("thread"),
+            g.facts.get("knurl"),
+        )
         # A coincident plain ⌀ already drawn (a bore, another step) dedups only an UNTHREADED ⌀;
         # a threaded ⌀ is a distinct callout, so a bare ⌀8 mention must not suppress ø8 M8x1.25.
         if thr is None and any(abs(dia - m) <= tol for m in mentioned):
@@ -2881,7 +2898,10 @@ def render_boss_diameters(dwg, plan, a, *, ctx) -> int:
             continue
         dia = dpd.value
         dtol = dpd.tolerance
-        thr = getattr(b, "thread", None)  # external thread appends to the OD callout (#859)
+        thr = _manufacturing_suffix(
+            getattr(b, "thread", None),
+            getattr(b, "knurl", None),
+        )
         # A coincident plain ⌀ dedups only an UNTHREADED boss; a threaded ⌀ is a distinct callout,
         # so a bare ⌀8 mention (a bore, a step) must not suppress ø8 M8x1.25 (#859).
         if thr is None and any(abs(dia - m) <= 0.15 for m in mentioned):

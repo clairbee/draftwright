@@ -20,7 +20,7 @@ feature. `through` is read off the feature for exactly this reason.
 from __future__ import annotations
 
 from draftwright._geometry import _fmt
-from draftwright.model.ir import HoleFeature, PatternFeature
+from draftwright.model.ir import HoleFeature, PatternFeature, ThreadRequirement
 from draftwright.model.planner import DimensionGroup, DimensionId
 
 
@@ -369,6 +369,8 @@ def hole_callout_spec(group: DimensionGroup) -> dict | None:
     # defining call), then any pattern suffix: e.g. "M3x0.5" or "M3x0.5 EQ SP ON ø50 BC".
     hole = feat.member if isinstance(feat, PatternFeature) else feat
     thread = getattr(hole, "thread", None)
+    if isinstance(thread, ThreadRequirement):
+        thread = thread.callout_suffix
     profile_suffix = None
     across = None
     if getattr(hole, "profile", None) == "double_d":

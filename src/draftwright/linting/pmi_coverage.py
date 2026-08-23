@@ -8,6 +8,8 @@ from typing import Literal
 from draftwright.linting.issues import LintIssue
 from draftwright.pmi import PmiExtractionReport
 
+_SUPPORTED_MANUFACTURING_REQUIREMENTS = frozenset(("external_thread", "internal_thread", "knurl"))
+
 
 def _registry_subject(feature):
     """The feature a placed annotation is registered against for source-bearing IR."""
@@ -35,9 +37,8 @@ def _registry_names_for_feature(registry, feature) -> list:
 def _registry_names_for_decoration(registry, key: tuple) -> list:
     """Canonical annotations that draw the exact decorated parameter."""
     feature = key[0]
-    if len(key) >= 3 and key[1] == "nominal_requirement":
+    if len(key) >= 3 and key[1] in ("nominal_requirement", "manufacturing_requirement"):
         parameter = str(key[2])
-        kind = parameter.rsplit(".", 1)[-1]
     else:
         kind = str(key[1]) if len(key) > 1 else ""
         role = str(key[2]) if len(key) > 2 else ""
@@ -68,7 +69,7 @@ def _source_category_counts(report: PmiExtractionReport) -> dict[str, int]:
     return dict(sorted(Counter(source.category for source in report.sources).items()))
 
 
-def _decorated_source_features(decorations) -> list[tuple[tuple, tuple[str, ...]]]:
+def _decorated_source_features(decorations, *, features=()) -> list[tuple[tuple, tuple[str, ...]]]:
     """Imported requirement provenance carried by canonical feature decorations (#1116)."""
     out = []
     for key, value in (decorations or {}).items():
@@ -77,6 +78,39 @@ def _decorated_source_features(decorations) -> list[tuple[tuple, tuple[str, ...]
         source_ids = _source_ids(value)
         if source_ids:
             out.append((key, source_ids))
+    for feature in features:
+        owner = feature
+        target = getattr(feature, "member", feature)
+        thread = getattr(target, "thread", None)
+        source_ids = _source_ids(thread)
+        if source_ids and feature.kind in ("hole", "pattern"):
+            out.append(
+                (
+                    (owner, "manufacturing_requirement", "bore.diameter", "thread"),
+                    source_ids,
+                )
+            )
+        knurl = getattr(target, "knurl", None)
+        source_ids = _source_ids(knurl)
+        if source_ids:
+            parameter = "step.diameter" if feature.kind == "step" else "boss.diameter"
+            out.append(
+                (
+                    (owner, "manufacturing_requirement", parameter, "knurl"),
+                    source_ids,
+                )
+            )
+        if feature.kind in ("step", "boss"):
+            thread = getattr(feature, "thread", None)
+            source_ids = _source_ids(thread)
+            if source_ids:
+                parameter = "step.diameter" if feature.kind == "step" else "boss.diameter"
+                out.append(
+                    (
+                        (owner, "manufacturing_requirement", parameter, "thread"),
+                        source_ids,
+                    )
+                )
     return out
 
 
@@ -134,7 +168,7 @@ def pmi_stage_summary(
         for feature in features
         if set(_source_ids(feature)) & extracted and getattr(feature, "kind", None) != "pmi"
     ]
-    decorated = _decorated_source_features(decorations)
+    decorated = _decorated_source_features(decorations, features=features)
     lowered_features.extend(key[0] for key, source_ids in decorated if set(source_ids) & extracted)
     lowered = {source_id for feature in lowered_features for source_id in _source_ids(feature)}
     lowered.update(
@@ -217,12 +251,11 @@ def lint_pmi_lowering(
     if report is None or mode == "off":
         return []
 
-    severity: Literal["error", "info"] = "error" if mode == "annotate" else "info"
     by_source: dict[str, list[object]] = {}
     for feature in features:
         for source_id in _source_ids(feature):
             by_source.setdefault(source_id, []).append(feature)
-    for key, source_ids in _decorated_source_features(decorations):
+    for key, source_ids in _decorated_source_features(decorations, features=features):
         for source_id in source_ids:
             by_source.setdefault(source_id, []).append(key[0])
 
@@ -236,6 +269,17 @@ def lint_pmi_lowering(
                 f"remains a raw {record.kind!r} PMI fallback in the typed IR"
                 if lowered
                 else "did not produce a typed IR feature"
+            )
+            unsupported_manufacturing = (
+                record.source_category == "manufacturing_requirement"
+                and record.kind not in _SUPPORTED_MANUFACTURING_REQUIREMENTS
+            )
+            severity: Literal["error", "warning", "info"] = (
+                "info"
+                if mode != "annotate"
+                else "warning"
+                if unsupported_manufacturing
+                else "error"
             )
             issues.append(
                 LintIssue(
@@ -281,7 +325,7 @@ def lint_pmi_rendering(features, registry, mode: str, *, decorations=None) -> li
         if getattr(feature, "kind", None) != "pmi":
             for source_id in _source_ids(feature):
                 by_source.setdefault(source_id, []).append(feature)
-    for key, source_ids in _decorated_source_features(decorations):
+    for key, source_ids in _decorated_source_features(decorations, features=features):
         for source_id in source_ids:
             by_source.setdefault(source_id, []).append(key)
 

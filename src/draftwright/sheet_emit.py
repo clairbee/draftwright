@@ -38,7 +38,12 @@ from typing import Literal
 from build123d import Shape
 
 from draftwright.builder import build_drawing, detect_part_model
-from draftwright.model.ir import NominalRequirement, ToleranceDecoration
+from draftwright.model.ir import (
+    KnurlRequirement,
+    NominalRequirement,
+    ThreadRequirement,
+    ToleranceDecoration,
+)
 
 
 @dataclass(frozen=True)
@@ -218,6 +223,61 @@ def _cylindrical_refs_arg(references) -> str:
     return "(" + ", ".join(values) + ("," if len(values) == 1 else "") + ")"
 
 
+def _cylindrical_refs_expr(references) -> str:
+    values = [
+        "CylindricalReference("
+        f"axis_origin={reference.axis_origin!r}, "
+        f"axis_direction={reference.axis_direction!r}, "
+        f"radius={reference.radius!r}, "
+        f"axial_interval={reference.axial_interval!r}, "
+        f"sense={reference.sense!r})"
+        for reference in references
+    ]
+    return "(" + ", ".join(values) + ("," if len(values) == 1 else "") + ")"
+
+
+def _thread_requirement_expr(requirement: ThreadRequirement) -> str:
+    return (
+        "ThreadRequirement("
+        f"application={requirement.application!r}, designation={requirement.designation!r}, "
+        f"nominal_diameter={requirement.nominal_diameter!r}, pitch={requirement.pitch!r}, "
+        f"tolerance_class={requirement.tolerance_class!r}, hand={requirement.hand!r}, "
+        f"text={requirement.text!r}, source_ids={requirement.source_ids!r}, "
+        f"part21_id={requirement.part21_id!r}, shape_aspect_ids={requirement.shape_aspect_ids!r}, "
+        f"reference_item_ids={requirement.reference_item_ids!r}, "
+        f"cylindrical_refs={_cylindrical_refs_expr(requirement.cylindrical_refs)}, "
+        f"full_available_length={requirement.full_available_length!r}, "
+        f"minimum_full_thread={requirement.minimum_full_thread!r}, "
+        f"drill_diameter={requirement.drill_diameter!r}, drill_depth={requirement.drill_depth!r}, "
+        f"drill_point_angle={requirement.drill_point_angle!r}, source={requirement.source!r})"
+    )
+
+
+def _knurl_requirement_expr(requirement: KnurlRequirement) -> str:
+    return (
+        "KnurlRequirement("
+        f"pattern={requirement.pattern!r}, pitch={requirement.pitch!r}, "
+        f"full_width={requirement.full_width!r}, text={requirement.text!r}, "
+        f"source_ids={requirement.source_ids!r}, part21_id={requirement.part21_id!r}, "
+        f"shape_aspect_ids={requirement.shape_aspect_ids!r}, "
+        f"reference_item_ids={requirement.reference_item_ids!r}, "
+        f"cylindrical_refs={_cylindrical_refs_expr(requirement.cylindrical_refs)}, "
+        f"edge_chamfer={requirement.edge_chamfer!r}, "
+        f"maximum_diameter={requirement.maximum_diameter!r}, "
+        f"processes={requirement.processes!r}, source={requirement.source!r})"
+    )
+
+
+def _thread_arg(thread) -> str:
+    return (
+        _thread_requirement_expr(thread) if isinstance(thread, ThreadRequirement) else repr(thread)
+    )
+
+
+def _knurl_arg(knurl: KnurlRequirement) -> str:
+    return _knurl_requirement_expr(knurl)
+
+
 def _tuple_arg(values) -> str:
     vals = [str(_n(v)) for v in values]
     if len(vals) == 1:
@@ -262,7 +322,7 @@ def _hole_line(f, object_ref: str | None = None, *, exact_parameter: str | None 
     if f.csink:
         kw.append(f"csink=({_n(f.csink[0])}, {_n(f.csink[1])})")
     if getattr(f, "thread", None):  # internal thread round-trips too (#859, symmetric with steps)
-        kw.append(f"thread={f.thread!r}")
+        kw.append(f"thread={_thread_arg(f.thread)}")
     # Blindness is a FACT on the feature, so it round-trips whether or not a depth was
     # measured. Guarding it on `depth is not None` emitted neither `through=False` nor a
     # depth for a `HoleFeature(through=False, depth=None)`, and `declare.hole` defaults
@@ -314,7 +374,7 @@ def _member_hole_str(m, *, exact_parameter: str | None = None) -> str:
     if m.csink:
         kw.append(f"csink=({_n(m.csink[0])}, {_n(m.csink[1])})")
     if getattr(m, "thread", None):  # a patterned threaded bore keeps its thread on re-run (#859)
-        kw.append(f"thread={m.thread!r}")
+        kw.append(f"thread={_thread_arg(m.thread)}")
     # `through=False` independent of the depth — see `_hole_line` (#878).
     if not m.through:
         if m.depth is not None:
@@ -429,6 +489,11 @@ def _raw_pmi_expr(f) -> str:
     shape_aspect_ids = (
         f", shape_aspect_ids={f.shape_aspect_ids!r}" if getattr(f, "shape_aspect_ids", ()) else ""
     )
+    cylindrical_refs = (
+        f", cylindrical_refs={_cylindrical_refs_expr(f.cylindrical_refs)}"
+        if getattr(f, "cylindrical_refs", ())
+        else ""
+    )
     return (
         "PmiFeature("
         f"frame=Frame({_pt(f.frame.origin)}, {f.frame.axis!r}), "
@@ -436,7 +501,7 @@ def _raw_pmi_expr(f) -> str:
         f"dominant_axis={f.dominant_axis!r}, ref_bbox={_bbox_arg(f.ref_bbox)}, "
         f"ref_pts=tuple({_pts_arg(f.ref_pts)}){source_id}{datum_refs}{part21_id}"
         f"{source_category}{gtol_modifiers}{lowering_blockers}{source_ids}{datum_contexts}"
-        f"{reference_item_ids}{reference_axis}{semantic_name}{shape_aspect_ids}"
+        f"{reference_item_ids}{reference_axis}{semantic_name}{shape_aspect_ids}{cylindrical_refs}"
         ")"
     )
 
@@ -581,8 +646,9 @@ def _feature_line(
         return _hole_line(f, object_ref, exact_parameter=exact_parameter)
     if k == "boss":
         thr = (
-            f", thread={f.thread!r}" if getattr(f, "thread", None) else ""
+            f", thread={_thread_arg(f.thread)}" if getattr(f, "thread", None) else ""
         )  # external thread (#859)
+        knurl = f", knurl={_knurl_arg(f.knurl)}" if getattr(f, "knurl", None) else ""
         # The HEIGHT round-trips too (#938). Dropping it made the declared boss carry only
         # `boss.diameter` while the detected one also carries `boss_height.length`, so the
         # regenerated model could not express a dimension its source had — silently before
@@ -603,12 +669,12 @@ def _feature_line(
             else ""
         )
         if object_ref is not None:
-            return f"sheet.diameter({object_ref}{thr})"
+            return f"sheet.diameter({object_ref}{thr}{knurl})"
         return (
             "sheet.diameter("
             f"diameter={_parameter_n(f.diameter, 'boss.diameter', exact_parameter)}"
             f"{height}{span}, "
-            f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
+            f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr}{knurl})'
         )
     if k == "polygonal_boss":
         span = f"({_pt(f.span[0])}, {_pt(f.span[1])})"
@@ -646,15 +712,16 @@ def _feature_line(
         )
     if k == "step":
         thr = (
-            f", thread={f.thread!r}" if getattr(f, "thread", None) else ""
+            f", thread={_thread_arg(f.thread)}" if getattr(f, "thread", None) else ""
         )  # external thread (#859)
+        knurl = f", knurl={_knurl_arg(f.knurl)}" if getattr(f, "knurl", None) else ""
         if object_ref is not None:
-            return f"sheet.step({object_ref}{thr})"
+            return f"sheet.step({object_ref}{thr}{knurl})"
         return (
             "sheet.step("
             f"diameter={_parameter_n(f.diameter, 'step.diameter', exact_parameter)}, "
             f"length={_n(f.length)}, "
-            f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
+            f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr}{knurl})'
         )
     if k == "slot":
         lo, hi = _n(f.lo), _n(f.hi)
@@ -1507,10 +1574,23 @@ def emit_sheet_script(
         model_imports.update(["EnvelopeFeature", "Frame"])
     if any(f.kind == "pmi" for f in model.features):
         model_imports.update(["Frame", "PmiFeature"])
+    if any(f.kind == "pmi" and getattr(f, "cylindrical_refs", ()) for f in model.features):
+        model_imports.add("CylindricalReference")
     if any(f.kind == "control_frame" for f in model.features):
         model_imports.update(["ControlFrame", "Frame"])
     if any(f.kind == "datum_ref" for f in model.features):
         model_imports.update(["DatumRef", "Frame"])
+    typed_aspects = [
+        aspect
+        for feature in model.features
+        for target in (getattr(feature, "member", feature),)
+        for aspect in (getattr(target, "thread", None), getattr(target, "knurl", None))
+        if isinstance(aspect, (ThreadRequirement, KnurlRequirement))
+    ]
+    if any(isinstance(aspect, ThreadRequirement) for aspect in typed_aspects):
+        model_imports.update(["CylindricalReference", "ThreadRequirement"])
+    if any(isinstance(aspect, KnurlRequirement) for aspect in typed_aspects):
+        model_imports.update(["CylindricalReference", "KnurlRequirement"])
     if any(
         f.kind in ("control_frame", "datum_ref")
         and getattr(getattr(f, "origin", None), "kind", None) == "pmi"
