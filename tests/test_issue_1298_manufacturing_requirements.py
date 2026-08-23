@@ -187,6 +187,51 @@ def test_internal_thread_retains_tap_drill_and_drill_point_as_typed_values():
     assert requirement.source_ids == ("manufacturing_requirement:#2004",)
 
 
+@pytest.mark.parametrize(
+    ("text_depth", "source_depth", "hole_depth", "blocker"),
+    [
+        (7.0, 8.0, 8.0, "manufacturing requirement text disagrees with source cylinder"),
+        (
+            7.0,
+            7.0,
+            8.0,
+            "unmatched manufacturing requirement: no canonical feature matches source topology",
+        ),
+        (
+            8.0,
+            8.0,
+            7.0,
+            "unmatched manufacturing requirement: no canonical feature matches source topology",
+        ),
+    ],
+)
+def test_internal_tap_drill_depth_must_match_text_source_cylinder_and_blind_hole(
+    text_depth, source_depth, hole_depth, blocker
+):
+    hole = HoleFeature(
+        frame=Frame((0.0, 0.0, 0.0), "x"),
+        diameter=1.6,
+        depth=hole_depth,
+        through=False,
+    )
+    text = INTERNAL_TEXT.replace(
+        "tapping drill x 8 mm",
+        f"tapping drill x {text_depth:g} mm",
+    )
+    raw = _raw(
+        "internal_thread",
+        text,
+        _reference(diameter=1.6, interval=(0.0, source_depth), sense="internal"),
+        "#2004",
+    )
+
+    lowered = lower_ap242_manufacturing_requirements(_model(hole, raw))
+
+    assert lowered.features[0].thread is None
+    fallback = next(feature for feature in lowered.features if isinstance(feature, PmiFeature))
+    assert fallback.lowering_blockers == (blocker,)
+
+
 def test_knurl_is_a_typed_aspect_on_the_topology_owned_step():
     head = _step(10.0, 0.0, 2.0)
     raw = _raw(
@@ -350,7 +395,7 @@ def test_typed_internal_thread_and_knurl_render_manufacturing_complete_labels_on
     assert not [issue for issue in knurled.lint() if issue.code == "pmi_not_rendered"]
 
 
-def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_solve(monkeypatch):
+def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_solve():
     align = (Align.CENTER, Align.CENTER, Align.MIN)
     segments = [
         Pos(lo, 0, 0) * Cylinder(diameter / 2, hi - lo, align=align).rotate(Axis.Y, 90)
@@ -386,17 +431,6 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
     ]
     model = lower_ap242_manufacturing_requirements(PartModel(part.bounding_box(), "x", features))
 
-    import draftwright.annotations.from_model as from_model
-
-    original_leader_pass = from_model._leader_callout_pass
-    typed_source_ids = {}
-
-    def capture_sources(*args, **kwargs):
-        if kwargs.get("noun") == "typed manufacturing diameter":
-            typed_source_ids.update(kwargs.get("source_ids_by_name", {}))
-        return original_leader_pass(*args, **kwargs)
-
-    monkeypatch.setattr(from_model, "_leader_callout_pass", capture_sources)
     drawing = build_drawing(part, model=model, pmi="annotate", page="A1")
 
     assert {
@@ -412,10 +446,6 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         ),
         "m_dia_x3": "ø5",
         "m_dia_x4": "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
-    }
-    assert typed_source_ids == {
-        "m_dia_x2": ("manufacturing_requirement:#2008",),
-        "m_dia_x4": ("manufacturing_requirement:#2000",),
     }
     knurl_owner = next(
         feature
@@ -456,45 +486,136 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         assert abs(tip_y - axis_y) == pytest.approx(diameter / 2 * drawing.scale)
 
 
-def test_shared_typed_diameter_drop_records_its_exact_source():
-    from types import SimpleNamespace
+def test_identical_typed_threads_on_distinct_owners_keep_two_owned_annotations():
+    align = (Align.CENTER, Align.CENTER, Align.MIN)
+    segments = [
+        Pos(lo, 0, 0) * Cylinder(diameter / 2, hi - lo, align=align).rotate(Axis.Y, 90)
+        for diameter, lo, hi in ((3.0, 0.0, 5.0), (5.0, 5.0, 10.0), (3.0, 10.0, 15.0))
+    ]
+    part = segments[0]
+    for segment in segments[1:]:
+        part += segment
+    model = lower_ap242_manufacturing_requirements(
+        PartModel(
+            part.bounding_box(),
+            "x",
+            [
+                _step(3.0, 0.0, 5.0),
+                _step(5.0, 5.0, 10.0),
+                _step(3.0, 10.0, 15.0),
+                _raw(
+                    "external_thread",
+                    EXTERNAL_TEXT,
+                    _reference(diameter=3.0, interval=(0.2, 4.8), sense="external"),
+                    "#2100",
+                ),
+                _raw(
+                    "external_thread",
+                    EXTERNAL_TEXT,
+                    _reference(diameter=3.0, interval=(10.2, 14.8), sense="external"),
+                    "#2104",
+                ),
+            ],
+        )
+    )
+    drawing = build_drawing(part, model=model, pmi="annotate", page="A1")
+    owners = {
+        feature.thread.source_ids[0]: feature
+        for feature in drawing.model().features
+        if isinstance(getattr(feature, "thread", None), ThreadRequirement)
+    }
+    expected_label = "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH"
+    names_by_source = {
+        source_id: [
+            name
+            for name, annotation in drawing.annotations_of(owner).items()
+            if getattr(annotation, "label", "") == expected_label
+        ]
+        for source_id, owner in owners.items()
+    }
 
-    from build123d_drafting.helpers import Draft
+    assert set(owners) == {
+        "manufacturing_requirement:#2100",
+        "manufacturing_requirement:#2104",
+    }
+    assert all(len(names) == 1 for names in names_by_source.values())
+    assert len({names[0] for names in names_by_source.values()}) == 2
+    assert all(
+        drawing.registry.feature_of(names[0]) == owners[source_id]
+        for source_id, names in names_by_source.items()
+    )
 
-    from draftwright.annotations._common import PlacementContext
-    from draftwright.annotations.from_model import _leader_callout_pass
-    from draftwright.linting.coverage import CoverageState
+    first_source, second_source = tuple(sorted(owners))
+    first_name = names_by_source[first_source][0]
+    second_name = names_by_source[second_source][0]
+    drawing.drop(owners[first_source])
+    assert first_name not in drawing.annotations()
+    assert second_name in drawing.annotations_of(owners[second_source])
+
+
+def test_source_owned_feature_drop_is_one_reconciled_pmi_drop():
+    from draftwright.linting import LintIssue
+    from draftwright.linting.pmi_coverage import lint_pmi_rendering, pmi_stage_summary
+    from draftwright.pmi import PmiSourceEntity
     from draftwright.registry import AnnotationRegistry
 
-    ctx = PlacementContext(
-        registry=AnnotationRegistry(),
-        coverage=CoverageState(),
-        feature_leaders=[],
-    )
     source_id = "manufacturing_requirement:#2000"
-    assert (
-        _leader_callout_pass(
-            SimpleNamespace(draft=Draft()),
-            SimpleNamespace(),
-            [("m_dia_x0", "front", (0.0, 0.0, 100.0, 100.0), "ø3 M3", (), ())],
-            noun="typed manufacturing diameter",
-            drop_code="diameter_dropped",
-            ctx=ctx,
-            geom_clear=True,
-            joint=True,
-            source_ids_by_name={"m_dia_x0": (source_id,)},
-        )
-        == 0
+    owner = _step(3.0, 0.0, 10.0)
+    raw = _raw(
+        "external_thread",
+        EXTERNAL_TEXT,
+        _reference(diameter=3.0, interval=(0.0, 10.0), sense="external"),
+        "#2000",
     )
-    assert ctx.feature_leaders is not None
-    assert len(ctx.feature_leaders) == 1
-    assert ctx.feature_leaders[0].on_drop is not None
-    ctx.feature_leaders[0].on_drop("no_clear_room")
+    model = lower_ap242_manufacturing_requirements(_model(owner, raw))
+    report = PmiExtractionReport(
+        sources=(PmiSourceEntity(source_id, "manufacturing_requirement", 2000, "extracted"),),
+        records=(
+            PmiRecord(
+                "external_thread",
+                None,
+                0.0,
+                label=EXTERNAL_TEXT,
+                source_id=source_id,
+                source_category="manufacturing_requirement",
+            ),
+        ),
+    )
+    registry = AnnotationRegistry()
+    registry.record_issue(
+        LintIssue(
+            severity="warning",
+            code="diameter_dropped",
+            message="typed diameter had no clear route",
+            source_ids=(source_id,),
+            outcome_stage="placement",
+        )
+    )
 
-    issue = ctx.registry.issues[0]
-    assert issue.code == "diameter_dropped"
-    assert issue.source_ids == (source_id,)
-    assert issue.outcome_stage == "placement"
+    assert pmi_stage_summary(
+        report,
+        model.features,
+        registry,
+        "annotate",
+        decorations=model.decorations,
+    ) == {
+        "mode": "annotate",
+        "sources": 1,
+        "by_category": {"manufacturing_requirement": 1},
+        "extracted": 1,
+        "lowered": 1,
+        "rendered": 0,
+        "dropped": 1,
+    }
+    assert (
+        lint_pmi_rendering(
+            model.features,
+            registry,
+            "annotate",
+            decorations=model.decorations,
+        )
+        == []
+    )
 
 
 def test_known_unsupported_manufacturing_intent_is_explicit_without_error_lint():

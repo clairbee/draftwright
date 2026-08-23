@@ -1423,7 +1423,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
     reach = _leader_callout_reach(dwg.draft)
     jobs = []
     source_ids_by_name = {}
-    for index, (_anchor, dia, refs, dtol, suffix, groups) in indexed_buckets:
+    for index, (_anchor, dia, value_text, refs, dtol, suffix, groups) in indexed_buckets:
         owner = next(iter(refs)) if len(refs) == 1 else None
         representative = groups[0].facts
         source_bounds = _diameter_source_bounds(dwg, "front", representative, dia)
@@ -1463,9 +1463,10 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
         source_ids_by_name[name] = tuple(
             dict.fromkeys(
                 source_id
+                for group in groups
                 for aspect in (
-                    getattr(representative, "thread", None),
-                    getattr(representative, "knurl", None),
+                    group.facts.get("thread"),
+                    group.facts.get("knurl"),
                 )
                 for source_id in getattr(aspect, "source_ids", ())
             )
@@ -1475,7 +1476,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
                 name,
                 "front",
                 vb,
-                f"ø{_fmt(dia)}{_tol_suffix(dtol, dwg.draft)}" + (f" {suffix}" if suffix else ""),
+                f"ø{value_text}{_tol_suffix(dtol, dwg.draft)}" + (f" {suffix}" if suffix else ""),
                 candidates,
                 tuple(
                     parameter.id
@@ -1516,7 +1517,9 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
     # diameter (insertion-ordered), so provenance (#412) can tag the callout with its
     # single owner — or leave it unowned when two distinct features share the diameter
     # (the #398c/#406 shared-value rule, so drop can't over-strip a sibling).
-    row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, {features}, tolerance]  (X-turned)
+    # Keep the compiler-approved text beside the numeric diameter.  Layout still needs the
+    # number for truthful rim geometry; only ``value_text`` may cross into a printed label.
+    row_buckets: dict = {}  # round(dia,2) -> [anchor, dia, text, {features}, tolerance, ...]
     col_buckets: dict = {}  # Z-turned
     end_buckets: dict = {}  # Y-turned: radial leaders in the end-on front view
     for g in plan.of_kind("step", "boss"):
@@ -1527,10 +1530,9 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
             continue
         dia = dpd.value
         # An EXTERNAL thread (#859) makes a distinct callout: a threaded ⌀6 ("ø6 M6x1") and a
-        # plain ⌀6 are NOT the same label, so the bucket keys on (⌀, thread) — this never drops a
-        # thread on a shared ⌀, and a threadless model keys every entry on (⌀, None) exactly as
-        # before (byte-identical). entry = [anchor, dia, {features}, ± tolerance, thread]. A
-        # callout is per (axis, ⌀, thread); the first authored tolerance on a shared ⌀ wins.
+        # plain ⌀6 are NOT the same label. Plain entries key on (⌀, suffix, None) and retain
+        # byte-identical value deduplication; source-owned entries add their opaque canonical
+        # owner below. The first authored tolerance within one legitimate shared bucket wins.
         thr = _manufacturing_suffix(
             g.facts.get("thread"),
             g.facts.get("knurl"),
@@ -1543,12 +1545,22 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         if bucket is None:
             continue
         dtol = dpd.tolerance
-        dkey = (round(dia, 2), thr)
-        entry = bucket.setdefault(dkey, [g.anchor, dia, set(), dtol, thr, []])
-        entry[2].add(g.ref)
-        entry[5].append(g)
-        if entry[3] is None:
-            entry[3] = dtol
+        typed_owner = (
+            g.ref
+            if isinstance(g.facts.get("thread"), ThreadRequirement)
+            or isinstance(g.facts.get("knurl"), KnurlRequirement)
+            else None
+        )
+        # Legacy plain diameters remain deduplicated by value.  A typed requirement is
+        # owned by one canonical feature and may share identical wording with another
+        # source-owned feature; include the opaque compiler owner so neither provenance
+        # nor public ``drop(feature)`` is collapsed into an unowned shared mark.
+        dkey = (round(dia, 2), thr, typed_owner)
+        entry = bucket.setdefault(dkey, [g.anchor, dia, dpd.value_text, set(), dtol, thr, []])
+        entry[3].add(g.ref)
+        entry[6].append(g)
+        if entry[4] is None:
+            entry[4] = dtol
 
     def _item(entry):
         # The trailing element is the ADR 0010 claim: one ø callout stands for every step
@@ -1556,7 +1568,7 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         # same derivation the m_dia_y branch below already made; the row/column placers
         # threaded nothing, so every X- and Z-turned ø callout reached the sheet unclaimed
         # and no verifier could see it (#1227).
-        a, d, refs, t, thr, gs = entry
+        a, d, _value_text, refs, t, thr, gs = entry
         return (
             _diameter_step_anchor(a, gs),
             d,
@@ -1593,7 +1605,7 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
         return any(
             isinstance(group.facts.get("thread"), ThreadRequirement)
             or isinstance(group.facts.get("knurl"), KnurlRequirement)
-            for group in entry[5]
+            for group in entry[6]
         )
 
     typed_entries = [(index, entry) for index, entry in indexed_row if _typed(entry)]
@@ -1647,7 +1659,7 @@ def render_diameters(dwg, plan, a, tol: float = 0.15, *, ctx, only=None) -> int:
                     hole_circles.append((px, py, diameter / 2 * a.SCALE))
             jobs = []
             covered_by_name = {}
-            for i, (_anchor, dia, refs, dtol, thr, feature_groups) in enumerate(
+            for i, (_anchor, dia, _value_text, refs, dtol, thr, feature_groups) in enumerate(
                 end_buckets.values()
             ):
                 representative = feature_groups[0].facts

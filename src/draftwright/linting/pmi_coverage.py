@@ -69,6 +69,23 @@ def _source_category_counts(report: PmiExtractionReport) -> dict[str, int]:
     return dict(sorted(Counter(source.category for source in report.sources).items()))
 
 
+def _source_drop_ids(registry) -> set[str]:
+    """External sources with a specific placement/validation drop outcome.
+
+    Imported PMI does not render through one dedicated pass: a typed thread, knurl, datum,
+    or dimension enters the ordinary feature renderer and therefore keeps that renderer's
+    specific ``*_dropped`` code.  Exact source provenance, rather than the generic code
+    ``pmi_dropped``, is what makes the outcome a PMI drop.
+    """
+    return {
+        source_id
+        for issue in registry.issues
+        if str(getattr(issue, "code", "")) == "pmi_dropped"
+        or str(getattr(issue, "code", "")).endswith("_dropped")
+        for source_id in getattr(issue, "source_ids", ())
+    }
+
+
 def _decorated_source_features(decorations, *, features=()) -> list[tuple[tuple, tuple[str, ...]]]:
     """Imported requirement provenance carried by canonical feature decorations (#1116)."""
     out = []
@@ -190,13 +207,7 @@ def pmi_stage_summary(
         for source_id in source_ids
         if source_id in extracted
     )
-    dropped = {
-        source_id
-        for issue in registry.issues
-        if getattr(issue, "code", None) == "pmi_dropped"
-        for source_id in getattr(issue, "source_ids", ())
-        if source_id in lowered
-    }
+    dropped = _source_drop_ids(registry) & lowered
     return {
         "mode": mode,
         "sources": len(report.sources),
@@ -314,8 +325,9 @@ def lint_pmi_rendering(features, registry, mode: str, *, decorations=None) -> li
     """Report source-bearing typed PMI that produced no annotation or placement drop.
 
     ADR 0010's registry is the existing annotation-to-feature provenance owner. A placement
-    rejection is already a structured ``pmi_dropped`` build issue, so this reconciliation is
-    derived from those two outcomes rather than maintained in a parallel ledger.
+    rejection is already a structured source-bearing ``*_dropped`` build issue (the code stays
+    specific to the ordinary renderer typed PMI entered), so this reconciliation is derived
+    from those two outcomes rather than maintained in a parallel ledger.
     """
     if mode != "annotate":
         return []
@@ -329,12 +341,7 @@ def lint_pmi_rendering(features, registry, mode: str, *, decorations=None) -> li
         for source_id in source_ids:
             by_source.setdefault(source_id, []).append(key)
 
-    dropped = {
-        source_id
-        for issue in registry.issues
-        if getattr(issue, "code", None) == "pmi_dropped"
-        for source_id in getattr(issue, "source_ids", ())
-    }
+    dropped = _source_drop_ids(registry)
     already_reported = {
         source_id
         for issue in registry.issues

@@ -656,14 +656,26 @@ def _manufacturing_owner_matches(requirement, feature, bbox) -> bool:
         if isinstance(feature, PatternFeature):
             hole = feature.member
             members = tuple(feature.members) or (hole.frame.origin,)
-            return len(members) == 1 and _internal_member_matches(
-                reference, hole, members[0], bbox
+            return (
+                len(members) == 1
+                and not hole.through
+                and hole.depth is not None
+                and requirement.drill_depth is not None
+                and _same_number(requirement.drill_depth, hole.depth, abs_tol=0.01)
+                and _internal_member_matches(reference, hole, members[0], bbox)
             )
-        return isinstance(feature, HoleFeature) and _internal_member_matches(
-            reference,
-            feature,
-            (tuple(feature.members) or (feature.frame.origin,))[0],
-            bbox,
+        return (
+            isinstance(feature, HoleFeature)
+            and not feature.through
+            and feature.depth is not None
+            and requirement.drill_depth is not None
+            and _same_number(requirement.drill_depth, feature.depth, abs_tol=0.01)
+            and _internal_member_matches(
+                reference,
+                feature,
+                (tuple(feature.members) or (feature.frame.origin,))[0],
+                bbox,
+            )
         )
     return isinstance(feature, (StepFeature, BossFeature)) and _external_owner_matches(
         reference, feature
@@ -746,6 +758,20 @@ def lower_ap242_manufacturing_requirements(model: PartModel) -> PartModel:
             reference is None
             or expected_diameter is None
             or not _same_number(reference.diameter, expected_diameter, abs_tol=0.01)
+        ):
+            blocked[index] = "manufacturing requirement text disagrees with source cylinder"
+            continue
+        if (
+            isinstance(requirement, ThreadRequirement)
+            and requirement.application == "internal"
+            and (
+                requirement.drill_depth is None
+                or not _same_number(
+                    reference.axial_interval[1] - reference.axial_interval[0],
+                    requirement.drill_depth,
+                    abs_tol=0.01,
+                )
+            )
         ):
             blocked[index] = "manufacturing requirement text disagrees with source cylinder"
             continue
