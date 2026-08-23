@@ -839,13 +839,16 @@ def test_exact_grm03_renders_complete_source_owned_manufacturing_drawing_once():
             "CUT/FORMED PERMITTED",
         ),
     }
-    typed_owners = {}
+    typed_occurrences = []
     for feature in drawing.model().features:
         for requirement in (getattr(feature, "thread", None), getattr(feature, "knurl", None)):
             if isinstance(requirement, (ThreadRequirement, KnurlRequirement)):
                 for source_id in requirement.source_ids:
-                    typed_owners[source_id] = feature
-    assert set(typed_owners) == set(expected_manufacturing)
+                    typed_occurrences.append((source_id, feature))
+    assert sorted(source_id for source_id, _feature in typed_occurrences) == sorted(
+        expected_manufacturing
+    )
+    typed_owners = dict(typed_occurrences)
     for source_id, (expected_name, expected_label) in expected_manufacturing.items():
         owner = typed_owners[source_id]
         matches = [
@@ -863,12 +866,13 @@ def test_exact_grm03_renders_complete_source_owned_manufacturing_drawing_once():
         "dimension:0:1:4:9": ("pmi_x_3", "3"),
         "dimension:0:1:4:10": ("pmi_x_4", "20"),
     }
-    axial_owners = {
-        feature.source_id: feature
+    axial_occurrences = [
+        (feature.source_id, feature)
         for feature in drawing.model().features
         if isinstance(feature, AuthoredDimension) and feature.source_id in expected_axial
-    }
-    assert set(axial_owners) == set(expected_axial)
+    ]
+    assert sorted(source_id for source_id, _feature in axial_occurrences) == sorted(expected_axial)
+    axial_owners = dict(axial_occurrences)
     for source_id, (expected_name, expected_label) in expected_axial.items():
         owner = axial_owners[source_id]
         matches = [
