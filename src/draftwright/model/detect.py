@@ -254,6 +254,7 @@ def build_pmi_features(
                     source_kind=r.kind,
                     source_id=r.source_id,
                     lowering_blockers=r.lowering_blockers,
+                    rendering_blockers=r.rendering_blockers,
                 )
             )
             continue

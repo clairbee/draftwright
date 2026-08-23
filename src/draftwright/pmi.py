@@ -175,22 +175,24 @@ class PmiRecord:
         lower_tol:      Lower tolerance in mm, or ``None``.
         lower_bound:    Lower limit of a range dimension, in the same units as ``value``.
         upper_bound:    Upper limit of a range dimension, in the same units as ``value``.
-        ref_pts:        Bounding-box centroids of referenced geometry in global
-                        STEP space (same coordinate frame as the imported solid).
+        ref_pts:        Reference stations in global STEP space (same coordinate frame as
+                        the imported solid). For a linear or thickness dimension these are
+                        the centroids of its authored reference groups; other records retain
+                        the per-shape bounding-box centroids.
         ref_bbox:       Combined axis-aligned bbox of ALL referenced shapes:
-                        ``(xmin, ymin, zmin, xmax, ymax, zmax)``.  Used by
-                        ``_annotate_pmi`` for witness-point placement — the outer
-                        edges of the referenced geometry give the correct measurement
-                        span rather than the shorter centroid-to-centroid distance.
-        dominant_axis:  ``'X'``, ``'Y'``, ``'Z'``, or ``'?'`` — the direction
-                        in which the dimension primarily spans (based on the outer
-                        bbox extent, not the centroid difference).
+                        ``(xmin, ymin, zmin, xmax, ymax, zmax)``. Linear rendering uses
+                        it for transverse witness support only; the authored stations,
+                        not this outer envelope, own the measured span.
+        dominant_axis:  ``'X'``, ``'Y'``, ``'Z'``, or ``'?'`` — a linear/thickness
+                        dimension's proven reference-station direction; for other records,
+                        the referenced geometry's largest bbox extent.
         label:          Ready-to-use annotation label (e.g. ``"ø35"``, ``"60"``).
         datum_refs:     Ordered datum letters referenced by a geometric tolerance.
         part21_id:      Part21 entity id supplying an overlaid tolerance magnitude.
         source_category: Source inventory category; structural evidence for concept lowering.
         gtol_modifiers: Stable names for the source geometric-tolerance modifier sequence.
         lowering_blockers: Missing/unrepresented facts that make concept lowering unsafe.
+        rendering_blockers: Source-geometry facts that make a typed dimension unsafe to draw.
         source_ids:     All source occurrences represented by one projected definition.
         datum_contexts: Tolerance semantic names in which a datum definition is referenced.
         reference_item_ids: Exact Part21 representation items bound to a datum feature.
@@ -227,6 +229,9 @@ class PmiRecord:
     reference_axis: str = ""
     semantic_name: str = ""
     shape_aspect_ids: tuple[str, ...] = ()
+    # Kept separate from ``lowering_blockers``: an imported requirement may fail to enrich a
+    # canonical owner yet remain a truthful standalone dimension (#1116/#1209).
+    rendering_blockers: tuple[str, ...] = ()
 
 
 PmiExtractionOutcome = Literal[
@@ -287,6 +292,83 @@ def _dominant_from_bbox(bbox: tuple[float, float, float, float, float, float]) -
     spans = [("X", abs(xmax - xmin)), ("Y", abs(ymax - ymin)), ("Z", abs(zmax - zmin))]
     dom = max(spans, key=lambda t: t[1])
     return dom[0] if dom[1] > 1e-6 else "?"
+
+
+_LINEAR_AXIS_ABS_TOL = 0.005
+_LINEAR_AXIS_REL_TOL = 1e-3
+_LINEAR_VALUE_ABS_TOL = 0.01
+_LINEAR_VALUE_REL_TOL = 5e-4
+
+
+def _linear_reference_stations(
+    stations: tuple[tuple[float, float, float] | None, ...], nominal: float
+) -> tuple[tuple[tuple[float, float, float], ...], str, tuple[str, ...]]:
+    """Prove a truthful principal-axis span from the two authored reference groups.
+
+    A merged bbox answers how large the referenced faces are, not which direction relates
+    them. Circular end faces in GRM-03 are wider than their axial separation, which made
+    short X dimensions render across Y. Conversely, CTC-04 includes a genuinely oblique
+    relationship and one dimension whose second group XCAF does not transfer. Those must
+    remain explicit omissions rather than being guessed from the nominal value (#1209).
+    """
+    measurable = tuple(station for station in stations if station is not None)
+    if len(stations) != 2 or len(measurable) != 2:
+        return (
+            measurable,
+            "?",
+            ("linear dimension needs two measurable authored reference groups",),
+        )
+
+    first, second = measurable
+    delta = tuple(second[index] - first[index] for index in range(3))
+    magnitudes = tuple(abs(value) for value in delta)
+    axis_index = max(range(3), key=magnitudes.__getitem__)
+    primary = magnitudes[axis_index]
+    if primary <= 1e-9:
+        return measurable, "?", ("linear reference groups occupy the same station",)
+
+    transverse = max(value for index, value in enumerate(magnitudes) if index != axis_index)
+    direction_tol = max(_LINEAR_AXIS_ABS_TOL, primary * _LINEAR_AXIS_REL_TOL)
+    if transverse > direction_tol:
+        return (
+            measurable,
+            "?",
+            (
+                "linear reference relationship is not principal-axis aligned "
+                f"(delta=({delta[0]:.6g}, {delta[1]:.6g}, {delta[2]:.6g}) mm)",
+            ),
+        )
+
+    axis = "XYZ"[axis_index]
+    value_tol = max(_LINEAR_VALUE_ABS_TOL, abs(nominal) * _LINEAR_VALUE_REL_TOL)
+    if abs(primary - nominal) > value_tol:
+        return (
+            measurable,
+            axis,
+            (
+                f"linear reference-station span {primary:.6g} mm differs from nominal "
+                f"{nominal:.6g} mm",
+            ),
+        )
+    return measurable, axis, ()
+
+
+def _dimension_geometry_blockers(
+    kind: str,
+    reference_reasons: tuple[str, ...],
+    station_reasons: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Rendering blockers owned by incomplete source geometry, not later correlation.
+
+    A group station computed from the measurable subset is not proof that the authored
+    relationship is complete when another referenced shape was unavailable. Keep those XCAF
+    extraction failures in ``lowering_blockers`` for source accounting *and* in this distinct
+    render gate. Correlation blockers added later by model lowering never pass through here,
+    so #1116's standalone fallback remains drawable (#1209 re-review).
+    """
+    if kind not in ("linear", "thickness"):
+        return ()
+    return tuple(dict.fromkeys((*reference_reasons, *station_reasons)))
 
 
 def _make_label(
@@ -357,16 +439,18 @@ def _failure_reason(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _reference_geometry(label, shape_tool):
+def _reference_geometry_with_groups(label, shape_tool):
     """Measure the geometry relationships shared by dimensions and tolerances."""
     first_refs = TDF_LabelSequence()
     second_refs = TDF_LabelSequence()
     XCAFDoc_DimTolTool.GetRefShapeLabel_s(label, first_refs, second_refs)
     points: list[tuple[float, float, float]] = []
     boxes: list[tuple[float, float, float, float, float, float]] = []
+    group_stations: list[tuple[float, float, float] | None] = []
     partial_reasons: list[str] = []
     reference_count = first_refs.Length() + second_refs.Length()
     for refs in (first_refs, second_refs):
+        group_boxes: list[tuple[float, float, float, float, float, float]] = []
         for index in range(1, refs.Length() + 1):
             shape = shape_tool.GetShape_s(refs.Value(index))
             if shape is None or shape.IsNull():
@@ -375,11 +459,17 @@ def _reference_geometry(label, shape_tool):
             try:
                 bbox = _shape_bbox(shape)
                 boxes.append(bbox)
-                points.append(_bbox_centroid(bbox))
+                point = _bbox_centroid(bbox)
+                points.append(point)
+                group_boxes.append(bbox)
             except Exception as exc:
                 partial_reasons.append(
                     f"one referenced shape could not be measured ({_failure_reason(exc)})"
                 )
+        # One logical reference group may be split into any number of topology items. The
+        # merged-envelope centre is invariant to that segmentation; averaging item centres
+        # would move merely because one face was split into two (#1209).
+        group_stations.append(_bbox_centroid(_merge_bboxes(group_boxes)) if group_boxes else None)
     if reference_count == 0:
         partial_reasons.append("referenced geometry is unavailable")
 
@@ -390,7 +480,16 @@ def _reference_geometry(label, shape_tool):
         ref_bbox,
         dominant_axis,
         tuple(dict.fromkeys(partial_reasons)),
+        tuple(group_stations),
     )
+
+
+def _reference_geometry(label, shape_tool):
+    """Compatible flattened geometry projection shared by non-dimensional PMI."""
+    points, ref_bbox, dominant_axis, reasons, _groups = _reference_geometry_with_groups(
+        label, shape_tool
+    )
+    return points, ref_bbox, dominant_axis, reasons
 
 
 def _datum_geometry_from_shapes(shapes):
@@ -786,11 +885,24 @@ def _dimension_record(
         except Exception as exc:
             partial_reasons.append(f"upper range bound is unavailable ({_failure_reason(exc)})")
 
-    # The outer edges of the referenced geometry give the correct measurement span (e.g.
-    # the two far sides of a diameter) rather than the shorter centroid-to-centroid distance.
-    points, ref_bbox, dominant_axis, reference_reasons = _reference_geometry(label, shape_tool)
+    points, ref_bbox, dominant_axis, reference_reasons, group_stations = (
+        _reference_geometry_with_groups(label, shape_tool)
+    )
     partial_reasons.extend(reference_reasons)
     kind = _DIM_TYPE.get(type_code, f"type{type_code}")
+    rendering_blockers: tuple[str, ...] = ()
+    if kind in ("linear", "thickness"):
+        points, dominant_axis, station_reasons = _linear_reference_stations(group_stations, value)
+        if kind == "thickness":
+            station_reasons = tuple(
+                reason.replace("linear dimension", "thickness dimension").replace(
+                    "linear reference", "thickness reference"
+                )
+                for reason in station_reasons
+            )
+        rendering_blockers = _dimension_geometry_blockers(kind, reference_reasons, station_reasons)
+    lowering_blockers = tuple(dict.fromkeys(partial_reasons))
+    blockers = tuple(dict.fromkeys((*lowering_blockers, *rendering_blockers)))
     return (
         PmiRecord(
             kind=kind,
@@ -813,8 +925,10 @@ def _dimension_record(
             ),
             source_id=source_id,
             source_category="dimension",
+            lowering_blockers=lowering_blockers,
+            rendering_blockers=rendering_blockers,
         ),
-        tuple(dict.fromkeys(partial_reasons)),
+        blockers,
     )
 
 

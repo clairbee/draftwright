@@ -47,9 +47,9 @@ _DOVETAIL = ((0, -25, 0), (0, -9, 0), (0, -13.619, 8))
 #: the right renderer for them. That is a statement about the category, not a guarantee
 #: that today's renderer draws each correctly. `radius` did not — it drew a full-diameter
 #: line — and is fixed in this PR (#1208), which is what membership of this set earns
-#: rather than assumes. `linear` still does not on CTC-04, where two PMI records draw
-#: 260 mm for values of 20 and 25 (#1209): a rendering bug to fix, which is precisely why
-#: it is here and not in the refusal set.
+#: rather than assumes. AP242 `linear` now additionally needs two proven authored-group
+#: stations whose principal-axis separation agrees with the nominal (#1209); declarations
+#: carrying their own truthful endpoints remain in this category.
 _RENDERABLE = frozenset({"linear", "thickness", "diameter", "radius"})
 
 

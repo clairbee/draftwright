@@ -369,6 +369,8 @@ def _measured_dimension_line(f) -> str:
         kw.append(f"source_id={f.source_id!r}")
     if getattr(f, "lowering_blockers", ()):
         kw.append(f"lowering_blockers={f.lowering_blockers!r}")
+    if getattr(f, "rendering_blockers", ()):
+        kw.append(f"rendering_blockers={f.rendering_blockers!r}")
     # `measured_dimension` since #873 — a generated script must not emit the transitional
     # overload, or every regenerated AP242 script would arrive pre-deprecated.
     return "sheet.measured_dimension(" + ", ".join(kw) + ")"

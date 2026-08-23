@@ -80,6 +80,12 @@ _ALLOW: frozenset[tuple[str, str]] = frozenset(
         # Pure geometry/selection helpers with unit-level coverage.
         ("from_model", "_bore_span_offsets"),
         ("from_model", "_diameter_column_left"),
+        # _pmi_witness_from_bbox: #1209 requires a direct geometry assertion that the
+        # measured path comes from the two authored reference-group stations while the
+        # merged bbox contributes only transverse support.  A built drawing cannot expose
+        # those two inputs independently (and page projection/placement can mask the old
+        # outer-bbox-span bug), so this pure helper is mutation-relevant unit coverage.
+        ("from_model", "_pmi_witness_from_bbox"),
         # _diameter_step_anchor: the shared-⌀ leader anchor (#794). The non-coaxial
         # same-⌀ case can't be reached through the public build seam, so its unit
         # test reads the pure helper directly (like _bore_span_offsets above).
