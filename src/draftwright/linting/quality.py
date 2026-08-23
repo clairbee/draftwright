@@ -237,6 +237,10 @@ _FIDELITY_CODES = frozenset(
 _UNSCORED_CODES = frozenset(
     {
         "authored_dim_degenerate",
+        # A source relationship withheld because its geometry cannot prove a truthful
+        # witness. Like the adjacent degenerate/unsupported cases, this is an explicit
+        # omission rather than a false claim or a misplaced annotation (#1209).
+        "authored_dim_source_unresolved",
         "authored_omission",
         "axial_length_missing",
         "boss_height_missing",
