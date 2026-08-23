@@ -487,18 +487,23 @@ class KnurlRequirement:
 
     @property
     def callout_suffix(self) -> str:
-        """Terms following the canonical diameter at the head of its leader."""
+        """Compact drawing terms following the canonical diameter.
+
+        The authoritative source sentence remains in :attr:`text`; the leader uses standard
+        shop-floor abbreviations so it can share a solved annotation field without turning a
+        semantic requirement into an unplaceable paragraph.
+        """
         terms = []
         if self.maximum_diameter is not None:
-            terms.append("MAX AFTER KNURLING")
-        knurl = f"{self.pattern.upper()} KNURL, {self.pitch} PITCH"
+            terms.append("MAX AFTER KNURL")
+        knurl = f"{self.pattern.upper()} KNURL P{_fmt(self.pitch)}"
         if self.full_width:
             knurl += " FULL WIDTH"
             if self.edge_chamfer is not None:
-                knurl += f" BETWEEN C{_fmt(self.edge_chamfer)} CHAMFERS"
+                knurl += f" TO C{_fmt(self.edge_chamfer)} CHAMFERS"
         terms.append(knurl)
         if self.processes:
-            terms.append(" OR ".join(process.upper() for process in self.processes) + " PERMITTED")
+            terms.append("/".join(process.upper() for process in self.processes) + " PERMITTED")
         return "; ".join(terms)
 
 

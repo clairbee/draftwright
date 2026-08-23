@@ -1370,7 +1370,10 @@ def _manufacturing_suffix(thread, knurl=None) -> str | None:
     return "; ".join(terms) or None
 
 
-_DIAMETER_LEAD_DIRS = ((0, -1), (0, 1), (1, 0), (-1, 0))
+_DIAMETER_LEAD_DIRS = {
+    "x": ((0, -1), (0, 1)),
+    "z": ((-1, 0), (1, 0)),
+}
 
 
 def _diameter_source_bounds(dwg, view, feature, diameter) -> tuple[float, float, float, float]:
@@ -1429,7 +1432,7 @@ def _render_typed_diameter_leaders(dwg, a, buckets, *, prefix, start, ctx) -> in
             representative,
             reach,
             source_bounds=source_bounds,
-            directions=_DIAMETER_LEAD_DIRS,
+            directions=_DIAMETER_LEAD_DIRS[representative.frame.axis],
         )
         candidates = ((tip, elbow, owner) for tip, elbow, _provenance in raw_candidates)
         jobs.append(

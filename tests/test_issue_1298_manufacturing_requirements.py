@@ -312,8 +312,7 @@ def test_typed_internal_thread_and_knurl_render_manufacturing_complete_labels_on
         if "KNURL" in getattr(knurled.registry.named(name), "label", "")
     ]
     assert knurl_labels == [
-        "ø10 MAX AFTER KNURLING; STRAIGHT KNURL, 1.0 PITCH FULL WIDTH BETWEEN C0.3 "
-        "CHAMFERS; CUT OR FORMED PERMITTED"
+        "ø10 MAX AFTER KNURL; STRAIGHT KNURL P1 FULL WIDTH TO C0.3 CHAMFERS; CUT/FORMED PERMITTED"
     ]
     assert not [issue for issue in knurled.lint() if issue.code == "pmi_not_rendered"]
 
@@ -364,8 +363,8 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         "m_dia_x0": "ø4",
         "m_dia_x1": "ø6",
         "m_dia_x2": (
-            "ø10 MAX AFTER KNURLING; STRAIGHT KNURL, 1.0 PITCH FULL WIDTH BETWEEN C0.3 "
-            "CHAMFERS; CUT OR FORMED PERMITTED"
+            "ø10 MAX AFTER KNURL; STRAIGHT KNURL P1 FULL WIDTH TO C0.3 CHAMFERS; "
+            "CUT/FORMED PERMITTED"
         ),
         "m_dia_x3": "ø5",
         "m_dia_x4": "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
@@ -375,6 +374,16 @@ def test_typed_manufacturing_row_keeps_plain_sibling_diameters_in_the_shared_sol
         for issue in drawing.lint()
         if issue.code in {"diameter_dropped", "pmi_not_rendered", "annotation_overlap"}
     ]
+    axis_y = drawing.at("front", 0.0, 0.0, 0.0)[1]
+    for name, diameter in {
+        "m_dia_x0": 4.0,
+        "m_dia_x1": 6.0,
+        "m_dia_x2": 10.0,
+        "m_dia_x3": 5.0,
+        "m_dia_x4": 3.0,
+    }.items():
+        tip_y = drawing.get_annotation(name).tip[1]
+        assert abs(tip_y - axis_y) == pytest.approx(diameter / 2 * drawing.scale)
 
 
 def test_known_unsupported_manufacturing_intent_is_explicit_without_error_lint():
@@ -519,9 +528,9 @@ def test_minimal_typed_aspect_suffixes_omit_absent_optional_claims():
         maximum_diameter=None,
         processes=(),
     )
-    assert minimal_knurl.callout_suffix == "STRAIGHT KNURL, 1.0 PITCH"
+    assert minimal_knurl.callout_suffix == "STRAIGHT KNURL P1"
     full_width_without_chamfer = replace(minimal_knurl, full_width=True)
-    assert full_width_without_chamfer.callout_suffix == "STRAIGHT KNURL, 1.0 PITCH FULL WIDTH"
+    assert full_width_without_chamfer.callout_suffix == "STRAIGHT KNURL P1 FULL WIDTH"
 
 
 def test_lowering_fail_closed_paths_preserve_raw_source_and_conflict_reason():
