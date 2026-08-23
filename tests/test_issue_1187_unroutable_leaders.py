@@ -17,6 +17,7 @@ import math
 from pathlib import Path
 
 import pytest
+from build123d import Align, Axis, Box, Cylinder, Pos
 from build123d_drafting import Leader
 
 from draftwright import build_drawing
@@ -27,6 +28,43 @@ from draftwright.annotations.leaders import view_material
 
 _BRIDGE = 0.05
 _FLOOR = 0.25
+
+
+def _policy_b_flange():
+    """Small public geometry carrying #1187's retained-crossing policy."""
+    part = Cylinder(21, 4)
+    for x in (-18, 18):
+        for y in (-18, 18):
+            part += Pos(x, y, 2) * Box(
+                10,
+                10,
+                4,
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+    part += Pos(0, 0, 2) * Cylinder(15.5, 12)
+    part += Pos(0, 0, 10) * Cylinder(12.5, 12)
+    part -= Cylinder(8, 30)
+    for x in (-18, 18):
+        for y in (-18, 18):
+            part -= Pos(x, y, 0) * Cylinder(2, 10)
+    return part.rotate(Axis.X, 90)
+
+
+def test_policy_b_retention_is_a_fast_release_gate():
+    """#1187 closes as deliberate Policy B, with the exhaustive proof below kept."""
+    drawing = build_drawing(_policy_b_flange())
+
+    retained = [
+        issue
+        for issue in drawing.lint()
+        if issue.code == "leader_crosses_silhouette" and "4× ⌀4 THRU" in issue.message
+    ]
+    assert len(retained) == 1
+    assert any(
+        str(getattr(drawing.get_annotation(name), "label", "")).startswith("4× ⌀4 THRU")
+        for name in drawing.annotations()
+    )
+    assert not [issue for issue in drawing.lint() if issue.code == "callout_dropped"]
 
 
 def _clear_routes(dwg, name, *, directions=64, reaches=(0.6, 0.8, 1.0, 1.3, 1.7, 2.2)):

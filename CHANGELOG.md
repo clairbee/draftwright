@@ -8,6 +8,27 @@
   `pyproject.toml` and `uv.lock`. The separate release-evidence record, dependency-bump workflow,
   candidate-checkout harness, and release-time capability-version rewrites have been removed;
   ordinary compatibility tests validate the installed pinned package.
+- Automatic composition now measures the next larger preferred scale when a conservative
+  crowded-detail reservation leaves a sparse sheet. A candidate wins only on the same paper
+  size, without the recovery detail, structural errors, or required-placement loss. GRM-04 now
+  uses A4 at 5:1 instead of 2:1, re-homes its shared side-hole Y location into the plan-view
+  corridor, and retains both the Ø2.4 diameter and location requirements (#1155).
+- Closed the remaining dense-sheet leader cases as deliberate Policy-B behavior: exhaustive
+  route sweeps prove there is no route clear of both material and committed sheet ink, so the
+  required callout remains with an explicit crossing diagnostic instead of being dropped. A
+  fast synthetic release gate complements the retained exhaustive corpus characterization
+  (#1187).
+
+### Fixed
+
+- Notes and generic table cells now render U+2300 `⌀` with the established supported drafting
+  glyph instead of IBM Plex Mono's missing-glyph square. The substitution happens at the one
+  shared measurement/render seam, so source rows remain unchanged and table sizing stays exact
+  (#1275).
+- Automatic turned-part composition now gives true shoulder coverage priority over optional
+  pictorial content. GRM-03 replans to 5:1 and renders its 0.5, 2, 3, and 18 mm axial lengths;
+  `axial_length_missing` disappears because the dimensions are present, not because the
+  diagnostic was suppressed (#443).
 
 ## v0.4.10 — 2026-08-22
 

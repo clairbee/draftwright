@@ -390,6 +390,7 @@ def lint_location_coverage(
 
     marks: dict[str, list] = {}
     dim_verts: dict[str, list] = {}
+    structured_locations: list[tuple[float, float, float]] = []
     for name, ann in dwg.iter_annotations():
         view = dwg.view_of(name)
         if view is None:
@@ -399,6 +400,11 @@ def lint_location_coverage(
             marks.setdefault(view, []).append((c.X, c.Y))
         elif isinstance(ann, Dimension):
             dim_verts.setdefault(view, []).extend(_dim_vertices(ann))
+            for fact in getattr(ann, "covers_hole_locations", ()):
+                if len(fact) == 3:
+                    point = tuple(float(value) for value in fact[2])
+                    if len(point) == 3:
+                        structured_locations.append((point[0], point[1], point[2]))
 
     bb = part.bounding_box()
     centre = (bb.center().X, bb.center().Y, bb.center().Z)
@@ -418,6 +424,10 @@ def lint_location_coverage(
         if (
             HoleRef.of(h.location) not in patterned
             and not coaxial
+            and not any(
+                all(abs(actual - expected) <= tol for actual, expected in zip(point, (x, y, z)))
+                for point in structured_locations
+            )
             and not any(
                 abs(vx - px) <= tol or abs(vy - py) <= tol for vx, vy in dim_verts.get(view, ())
             )

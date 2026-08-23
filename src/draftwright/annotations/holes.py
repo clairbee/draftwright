@@ -816,6 +816,7 @@ def _locate_across(dwg, ctx, a: Analysis, off):
     _locate_off_axis_holes (#638)."""
     draft = dwg.draft
     SX, SZ = a.proj.side_x, a.proj.side_z
+    PX, PY = a.proj.plan_x, a.proj.plan_y
     dy, dz = a.bb.min.Y, a.bb.min.Z
     tier = draft.font_size + 2 * draft.pad_around_text
     yw = SZ(dz) - _WITNESS_LIFT_MM
@@ -825,6 +826,7 @@ def _locate_across(dwg, ctx, a: Analysis, off):
     loc_by_name: dict = {}  # dim name -> contributing hole locations (for provenance)
     mids_by_name: dict = {}
     coverage_by_name: dict = {}
+    plan_alternates: dict = {}
     for h in (h for h in off if h.axis == "x"):
         # The VALUE is the approved entry's; `dy` survives only as the witness anchor.
         entry = h.approved.get("y")
@@ -854,8 +856,54 @@ def _locate_across(dwg, ctx, a: Analysis, off):
                     ),
                 )
             )
+            # #1155: the same Y ordinate reads vertically in plan.  Keep the
+            # side-view location as the natural first choice, but retain this
+            # requirement-driven alternate for a full below-side corridor (GRM-04
+            # at 5:1 shares that short strip with the overall depth).  This is a
+            # view reassignment through the shared strip solver, not a raw position.
+            plan_edge = PX(a.bb.max.X)
+            plan_lo = (plan_edge, PY(dy), 0)
+            plan_hi = (plan_edge, PY(h.location[1]), 0)
+            alt_name = f"dim_loc_plan_y{round(yo * 100)}"
+            plan_alternates[name] = (
+                alt_name,
+                lambda pos, pl=plan_lo, ph=plan_hi, e=plan_edge, lb=entry.value_text, nm=name: (
+                    _with_hole_location_coverage(
+                        _dim(pl, ph, "right", pos - e, draft, label=lb),
+                        coverage_by_name[nm],
+                    )
+                ),
+            )
     feats = {nm: _off_axis_owner(ctx, locs) for nm, locs in loc_by_name.items()}
     measurements = {name: tuple(ids) for name, ids in mids_by_name.items()}
+
+    def _fallback(name):
+        # Every queued side candidate is created in the same block as its plan
+        # alternate above; a missing key is an internal invariant violation.
+        alt = plan_alternates[name]
+        alt_name = alt[0]
+        if not _off_axis_emit(
+            dwg,
+            tier,
+            a.pv_zones.right,
+            "plan",
+            "x",
+            [alt],
+            force=False,
+            features={alt_name: feats.get(name)},
+            measurements={alt_name: measurements.get(name, ())},
+            ctx=ctx,
+            trace=ctx.trace,
+        ):
+            return
+        _off_axis_drop(
+            dwg,
+            "y",
+            "side",
+            ctx=ctx,
+            measurement=measurements.get(name, ()),
+        )
+
     _off_axis_queue(
         dwg,
         ctx,
@@ -867,9 +915,7 @@ def _locate_across(dwg, ctx, a: Analysis, off):
         cands,
         features=feats,
         measurements=measurements,
-        on_drop=lambda nm: _off_axis_drop(
-            dwg, "y", "side", ctx=ctx, measurement=measurements.get(nm, ())
-        ),
+        on_drop=_fallback,
         order_key=lambda nm, _i: order_y.get(nm, _i),
     )
 

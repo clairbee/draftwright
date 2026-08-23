@@ -168,6 +168,19 @@ def _wrap_rows(header, data, ncols):
     return wide
 
 
+def _table_display_text(value) -> str:
+    """Return the font-safe spelling used to measure and draw a table cell.
+
+    IBM Plex Mono does not contain U+2300 DIAMETER SIGN, so FreeType substitutes
+    its missing-glyph box.  The drafting surface already uses U+00F8 LATIN SMALL
+    LETTER O WITH STROKE for diameter labels; use that established glyph at the
+    shared table seam as well.  Keeping the substitution here makes notes, BOMs,
+    revision tables, and hole tables measure exactly the text they render while
+    preserving the caller's semantic source rows on the annotation.
+    """
+    return str(value).replace("⌀", "ø")
+
+
 def _table_metrics(rows, font_size, pad_around_text, block_cols=None):
     """The sizing model of a data table: per-column left/right edges (page-mm,
     block gaps inserted), total width/height, row height and effective block
@@ -186,7 +199,11 @@ def _table_metrics(rows, font_size, pad_around_text, block_cols=None):
     bc = block_cols if (block_cols and ncol % block_cols == 0 and block_cols < ncol) else ncol
     block_gap = 3 * pad  # whitespace between side-by-side blocks
     col_w = [
-        max(max(_text_width(str(r[c]), fs) for r in rows) + 2 * pad, fs * 2.5) for c in range(ncol)
+        max(
+            max(_text_width(_table_display_text(r[c]), fs) for r in rows) + 2 * pad,
+            fs * 2.5,
+        )
+        for c in range(ncol)
     ]
     # Per-column left/right edges, inserting block_gap before each new block.
     lefts, rights, cursor = [], [], 0.0
@@ -232,11 +249,12 @@ def _build_table(rows, draft, block_cols=None):
     for ri, row in enumerate(rows):  # rows[0] (header) sits at the top
         cy = total_h - (ri + 0.5) * row_h
         for ci, cell in enumerate(row):
-            if not str(cell):
+            display = _table_display_text(cell)
+            if not display:
                 continue
             cx = (lefts[ci] + rights[ci]) / 2
             text = Text(
-                txt=str(cell),
+                txt=display,
                 font_size=fs,
                 font_path=PLEX_MONO,
                 align=(Align.CENTER, Align.CENTER),

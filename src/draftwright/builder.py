@@ -27,6 +27,7 @@ from build123d_drafting.helpers import (
     draft_preset,
     format_drawing_scale,
 )
+from OCP.Standard import Standard_Failure
 
 from draftwright._core import (
     _FONT_SIZE,
@@ -66,6 +67,7 @@ from draftwright.compose import (
 from draftwright.drawing import Drawing, feature_key
 from draftwright.fonts import PLEX_MONO
 from draftwright.linting import LintIssue
+from draftwright.linting.coverage import lint_axial_coverage
 from draftwright.model import (
     Datum,
     Feature,
@@ -1449,6 +1451,45 @@ def _blocks_all_smaller_scales(blockers) -> bool:
     )
 
 
+def _occupied_rectangle_ratio(drawing: Drawing) -> float:
+    """Union of settled view/annotation rectangles as a fraction of the page.
+
+    This is intentionally a cheap composition trigger, not a drawing-quality
+    metric: #1155 needs to distinguish a genuinely sparse micro-part sheet from
+    a large detail sheet whose conservative reservation is already justified.
+    """
+    rectangles = []
+    for visible, hidden in drawing.views.values():
+        for shape in (visible, hidden):
+            if shape is not None:
+                box = shape.bounding_box()
+                rectangles.append((box.min.X, box.min.Y, box.max.X, box.max.Y))
+    for name in drawing.annotations():
+        try:
+            box = drawing.get_annotation(name).bounding_box()
+        except Exception:  # pragma: no cover - OCC/platform-specific unboxable annotation
+            continue
+        rectangles.append((box.min.X, box.min.Y, box.max.X, box.max.Y))
+    xs = sorted({x for x0, _y0, x1, _y1 in rectangles for x in (x0, x1)})
+    area = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        spans = sorted((y0, y1) for rx0, y0, rx1, y1 in rectangles if rx0 < x1 and x0 < rx1)
+        covered = 0.0
+        lo = hi = None
+        for y0, y1 in spans:
+            if lo is None:
+                lo, hi = y0, y1
+            elif y0 <= hi:
+                hi = max(hi, y1)
+            else:
+                covered += hi - lo
+                lo, hi = y0, y1
+        if lo is not None:
+            covered += hi - lo
+        area += (x1 - x0) * covered
+    return float(area / (drawing.page_w * drawing.page_h))
+
+
 def build_drawing(
     step_file: str | Path | Shape,
     out: str | None = None,
@@ -1528,6 +1569,7 @@ def build_drawing(
         _view_constraints=_view_constraints,
     )
     analysis_base = None
+    latest_analysis = None
     critique_recognition = None
 
     built_arrangement = ARRANGEMENTS[0]
@@ -1536,6 +1578,8 @@ def build_drawing(
         candidate_scale: float | None,
         arrangements: tuple[str, ...] | None = None,
         views: tuple[str, ...] | None = None,
+        include_iso: bool | None = None,
+        page_override: str | tuple | None = None,
     ) -> Drawing:
         nonlocal analysis_base
 
@@ -1561,19 +1605,21 @@ def build_drawing(
             # `built_arrangement` tracks the LATEST, because the arrangement gate asks what
             # the attempt just built under. Read here rather than off the returned drawing:
             # engine modules must not touch `dwg._*` (ADR 0005 §2).
-            nonlocal analysis_base, built_arrangement
+            nonlocal analysis_base, built_arrangement, latest_analysis
             built_arrangement = value.arrangement
+            latest_analysis = value
             if analysis_base is None:
                 analysis_base = value
 
         built = one_pass(
             scale=candidate_scale,
+            page=page if page_override is None else page_override,
             _analysis_base=analysis_base,
             _analysis_sink=retain_analysis,
             _critique_recognition=critique_recognition,
             _arrangements=arrangements,
             _views=views,
-            _include_iso=_include_iso,
+            _include_iso=_include_iso if include_iso is None else include_iso,
             _view_constraints=_view_constraints,
         )
         _validate_authored_view_layout(built, _view_constraints)
@@ -1589,6 +1635,9 @@ def build_drawing(
     if scale is None:
         if scale_policy != "fallback":
             raise ValueError("scale_policy applies only when an explicit scale is supplied")
+        views_are_automatic = _view_constraints is None or (
+            isinstance(_view_constraints, ViewConstraints) and _view_constraints.is_empty
+        )
         drawing = _build(None, views=_views)
         if built_arrangement != ARRANGEMENTS[0]:
             # The RECOGNITION-FREE critique, not `scale_blockers_for`: the gate must reach the
@@ -1603,6 +1652,89 @@ def build_drawing(
                 _build,
                 lambda built: _scale_blockers(built, physical=False),
             )
+        original_scale = drawing.scale
+        original_page = (drawing.page_w, drawing.page_h)
+        replanned = False
+        replan_reason = None
+
+        # #1155: the compose-time estimate conservatively reserves an enlarged
+        # detail for a crowded run.  Some larger preferred scales make that run
+        # readable inline, so the detail reservation disappears and the same A4
+        # becomes feasible — GRM-04 is 2:1 under the estimate but complete at 5:1
+        # after its Y location re-homes from side-below to plan-right.  Measure
+        # those larger candidates only when the settled result actually contains
+        # an automatic recovery detail.  A candidate may win only on the same
+        # sheet, with no recovery detail and no required placement loss.
+        if (
+            auto_dims
+            and views_are_automatic
+            and any(name.startswith("detail_") for name in drawing.views)
+            and original_page == (297.0, 210.0)
+            and _occupied_rectangle_ratio(drawing) < 0.15
+        ):
+            for candidate_scale in sorted(item for item in _SCALES if item > original_scale):
+                try:
+                    candidate_drawing = _build(
+                        candidate_scale,
+                        views=_views,
+                        page_override=original_page,
+                    )
+                except Standard_Failure as exc:  # pragma: no cover - OCC/platform-specific
+                    _log.info(
+                        "measured upscale %s:1 rejected (geometry transform failed: %s)",
+                        candidate_scale,
+                        exc,
+                    )
+                    continue
+                same_page = (
+                    candidate_drawing.page_w,
+                    candidate_drawing.page_h,
+                ) == original_page
+                has_detail = any(name.startswith("detail_") for name in candidate_drawing.views)
+                structural_error = any(
+                    issue.severity == "error" for issue in candidate_drawing.lint(physical=False)
+                )
+                if (
+                    same_page
+                    and not has_detail
+                    and not structural_error
+                    and not _automatic_blockers(candidate_drawing)
+                ):
+                    drawing = candidate_drawing
+                    replanned = True
+                    replan_reason = "measured_upscale"
+                    break
+
+        # #443: a pictorial view is useful context, but it cannot outrank the
+        # dimensions needed to manufacture a turned profile.  GRM-03 selected 2:1
+        # with ISO, collapsed its 0.5 + 2 mm head steps into an unowned 2.5 mm
+        # block, then had no room for the recovery detail.  Re-plan once without
+        # the optional ISO; scale selection reaches 5:1 and the two truthful step
+        # dimensions fit inline.  This is deliberately a coverage comparison, not
+        # suppression of ``axial_length_missing``: the candidate wins only after
+        # the same read-back check confirms every shoulder is located.
+        original_has_axial_gap = bool(
+            latest_analysis is not None
+            and lint_axial_coverage(
+                latest_analysis.part,
+                drawing,
+                prof=latest_analysis.prof,
+            )
+        )
+        if original_has_axial_gap and _include_iso and views_are_automatic:
+            without_iso = _build(None, views=_views, include_iso=False)
+            candidate_has_axial_gap = bool(
+                latest_analysis is not None
+                and lint_axial_coverage(
+                    latest_analysis.part,
+                    without_iso,
+                    prof=latest_analysis.prof,
+                )
+            )
+            if not candidate_has_axial_gap and not _automatic_blockers(without_iso):
+                drawing = without_iso
+                replanned = True
+                replan_reason = "axial_coverage"
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.
@@ -1612,7 +1744,21 @@ def build_drawing(
             policy="automatic",
             requested=None,
             effective=drawing.scale,
-            status="automatic",
+            status="automatic_replanned" if replanned else "automatic",
+            attempted=(original_scale, drawing.scale) if replanned else (),
+            attempts=(
+                (
+                    _scale_attempt(
+                        original_scale,
+                        "detail_reservation_conservative"
+                        if replan_reason == "measured_upscale"
+                        else "axial_coverage_incomplete",
+                    ),
+                    _scale_attempt(drawing.scale, "complete"),
+                )
+                if replanned
+                else ()
+            ),
         )
         return _complete_automatic_plan(drawing)
 

@@ -42,41 +42,9 @@ _NON_MEASURING_ANNOTATIONS = ("detail_caption",)
 _UNCONFIRMED_CLAIMS: set[tuple[str, str, str]] = set()
 
 #: Annotations that render a real measured value carrying no compiled identity to thread — the
-#: `ctx.place` seam cannot fix these because there is no id to pass. ONE entry now: the two
-#: `dim_height` entries were deleted when #1230 gave the overall-height rung an identity minted
-#: from the bounding box, so a part with no `EnvelopeFeature` has something true to claim.
-#:
-#: What remains is `m_steplen0` on grm03 — the synthetic step head-block, drawing the SUM of two
-#: steps (0.5 + 2.0 = 2.5). It resists a fix in BOTH directions, which is why it stays:
-#:
-#:   * Claiming the two members would be a FALSE claim — the annotation draws neither 0.5 nor 2.0.
-#:   * The compiler cannot authorise the aggregate, because WHICH steps form a head block is a
-#:     placement decision rather than a property of the part: the renderer groups steps whose
-#:     projected length falls below `2 * draft.arrow_length`, so the grouping moves with page
-#:     scale and font size. ADR 0016 cannot be satisfied by emitting it from the planner.
-#:   * Not drawing it fails `test_subfloor_head_gets_detail_view`, at the line that finds the
-#:     block by name — its PRESENCE is what is pinned, not its value: drawing it with an empty
-#:     label passes that test. Presence is the whole of the constraint.
-#:
-#:     Two earlier versions of this bullet were wrong, in opposite directions. The first paired
-#:     the test with `axial_length_missing` as independent reasons; the second kept
-#:     `axial_length_missing` as "the load-bearing constraint" and dropped the test. Measured,
-#:     grm03 reports `axial_length_missing` IDENTICALLY with and without the block — the block
-#:     carries no claim, so it never counted toward axial coverage and there is no trade at all
-#:     (#1233 review round 2).
-#:
-#: Be honest about the second bullet too: "the compiler cannot authorise it" overstates. The
-#: compiler could approve one candidate per contiguous step run — `hhi - hlo` IS a property of
-#: the part — and let the renderer select the one matching the grouping it chose, which is
-#: ADR 0014's collect-then-solve shape used everywhere else in this engine. What is true is
-#: that the SELECTION is placement-dependent, not that the aggregate is unapprovable. Whether
-#: that is worth building is a maintainer's call, which is why #1230 stays open for it.
-#:
-#: Registered with the reason rather than fixed badly. Pinned exactly, per part and name, so a
-#: second occurrence fails rather than being absorbed.
-_UNPLANNED_VALUES = {
-    ("grm03_thumbwheel_drive_screw.step", "m_steplen0"),
-}
+# #443 removed the last entry: GRM-03 now replans until the true 0.5 and 2 mm
+# dimensions render, so its synthetic, unclaimed 2.5 mm head block is absent.
+_UNPLANNED_VALUES = set()
 
 
 def _slot_part():
