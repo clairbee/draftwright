@@ -44,6 +44,7 @@ from draftwright._core import (
     _build_table,
     _dim,
     _fmt,
+    _font_safe_text,
     _log,
     _tag_sequence,
     _tol_suffix,
@@ -2799,7 +2800,7 @@ class Drawing:
         from build123d_drafting import Note
 
         n = Note(
-            text,
+            _font_safe_text(text),
             at,
             self.draft,
             rotation=rotation,

@@ -46,6 +46,34 @@ def test_note_on_planar_face_derives_edge_on_view():
     assert nt.origin is None  # a bare face has no source feature
 
 
+def test_declared_note_diameter_sign_is_font_safe_without_rewriting_ir():
+    drawings = []
+    source_sheet = None
+    for text in ("⌀4 x 3.2", "ø4 x 3.2"):
+        part = _part()
+        sheet = Sheet(part).auto_dimensions()
+        sheet.note(text, _top_face(part))
+        drawings.append(sheet.build())
+        source_sheet = source_sheet or sheet
+
+    assert next(f for f in source_sheet.features if f.kind == "note").text == "⌀4 x 3.2"
+    assert drawings[0].get_annotation("m_gdt0").bounding_box().size == pytest.approx(
+        drawings[1].get_annotation("m_gdt0").bounding_box().size
+    )
+
+
+def test_title_block_diameter_sign_uses_the_supported_drafting_glyph():
+    from draftwright import build_drawing
+
+    source = build_drawing(Box(20, 12, 4), title="⌀4 x 3.2", page="A4", auto_dims=False)
+    control = build_drawing(Box(20, 12, 4), title="ø4 x 3.2", page="A4", auto_dims=False)
+    source_title = source.get_annotation("title_block")
+    control_title = control.get_annotation("title_block")
+
+    assert source_title.label == "ø4 x 3.2"
+    assert source_title.bounding_box().size == pytest.approx(control_title.bounding_box().size)
+
+
 def test_dim_handle_note():
     part = _part()
     s = Sheet(part).auto_dimensions()

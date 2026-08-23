@@ -13,6 +13,11 @@ def test_grm03_replans_optional_iso_for_truthful_step_lengths():
     assert "iso" not in drawing.views
     assert drawing.scale == 5.0
     assert drawing.scale_decision["status"] == "automatic_replanned"
+    assert drawing.scale_decision["attempted_scales"] == (2.0, 5.0)
+    assert [item["views"] for item in drawing.scale_decision["attempts"]] == [
+        ("front", "plan", "side", "iso"),
+        ("front", "plan", "side"),
+    ]
     step_lengths = {
         drawing.get_annotation(name).label
         for name in drawing.annotations()
@@ -20,3 +25,10 @@ def test_grm03_replans_optional_iso_for_truthful_step_lengths():
     }
     assert {"0.5", "2", "3", "18"} <= step_lengths
     assert not [issue for issue in drawing.lint() if issue.code == "axial_length_missing"]
+
+
+def test_axial_replan_is_disabled_without_automatic_dimensions():
+    drawing = build_drawing(_FIXTURE, title="PART", auto_dims=False)
+
+    assert "iso" in drawing.views
+    assert drawing.scale_decision["attempts"] == ()

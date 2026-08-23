@@ -1,6 +1,6 @@
 # ADR 0018 — Requirement-driven view planning and editable sheet layout
 
-- **Status:** **Accepted** (2026-08-16), **partially implemented** — see Amendments 1 and 2.
+- **Status:** **Accepted** (2026-08-16), **partially implemented** — see Amendments 1–3.
   Delivery is phased through #1130. What exists: `ViewSpec`, `ViewConstraints`,
   `ResolvedViewPlan` and `ViewCoverage` (`view_plan.py`); the public `Sheet` authored/augmenting
   principal, section and detail verbs; relational whole-view constraints and principal
@@ -9,15 +9,36 @@
   compile; and a view-set-aware dimension plan that re-homes eligible requirements or raises
   `ViewPlanIncomplete` before projection. A chosen authored view set is buildable, refusable and
   reclaims the paper it frees.
-  What does not: automatic view SELECTION (nothing drops a view on its own — the case study
-  reaches its A2 target and costs six annotations, so a gate weighing it refuses), or resolved
-  view-plan script emission. `_views` remains an engine seam, not a public option.
+  One narrow automatic selection exists: Amendment 3 permits removal of the optional
+  orientation isometric when a same-page, same-arrangement candidate closes otherwise-missing
+  axial manufacturing coverage. What does not: automatic selection among principal views (the
+  case study reaches its A2 target and costs six annotations, so a gate weighing it refuses),
+  or resolved view-plan script emission. `_views` remains an engine seam, not a public option.
   The "Required evidence before acceptance" list below is retained verbatim as the
   **delivery gate** each slice is measured against — accepting the direction does not
   waive it, and automatic semantic view selection lands only once those invariants are
   guarded.
 - **Date:** 2026-08-11 (proposed), 2026-08-16 (accepted)
 - **Deciders:** Paul Fremantle (pzfreo)
+
+## Amendment 3 — an optional isometric may yield to required axial coverage (2026-08-23)
+
+The orientation isometric is useful context, but it is not a manufacturing requirement. After
+the ordinary automatic plan has been fully built, the engine may make one corrective trial
+without that optional view when, and only when, all of these conditions hold:
+
+1. both views and dimensions are automatic, the settled drawing actually contains the
+   isometric, and physical read-back reports missing turned-profile axial coverage;
+2. the candidate uses the already-settled arrangement and must retain the same page;
+3. the candidate introduces no recovery detail, structural error, or required placement drop;
+4. physical read-back on the candidate closes the axial gap; and
+5. both view sets, scales, pages, reasons, failures, and the selected result are retained in
+   `scale_decision`, while the candidate's resolved view plan carries the view set it built.
+
+This is a bounded semantic correction, not a general view optimiser. It never removes a
+principal view, never runs for authored view constraints or with automatic dimensions disabled,
+and a failed build or failed gate leaves the original plan untouched. Principal-view selection
+remains subject to the full evidence gates below.
 
 ## Amendment 2 — typed `ViewConstraints` and the `Sheet` view verbs ship (2026-08-22)
 

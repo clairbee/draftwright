@@ -168,15 +168,15 @@ def _wrap_rows(header, data, ncols):
     return wide
 
 
-def _table_display_text(value) -> str:
-    """Return the font-safe spelling used to measure and draw a table cell.
+def _font_safe_text(value) -> str:
+    """Return the font-safe spelling used to measure and draw user text.
 
     IBM Plex Mono does not contain U+2300 DIAMETER SIGN, so FreeType substitutes
     its missing-glyph box.  The drafting surface already uses U+00F8 LATIN SMALL
     LETTER O WITH STROKE for diameter labels; use that established glyph at the
-    shared table seam as well.  Keeping the substitution here makes notes, BOMs,
-    revision tables, and hole tables measure exactly the text they render while
-    preserving the caller's semantic source rows on the annotation.
+    shared render seams as well.  Keeping the substitution here makes free notes,
+    declared notes, title blocks, BOMs, revision tables, and hole tables measure
+    exactly the text they render while preserving the caller's semantic source data.
     """
     return str(value).replace("⌀", "ø")
 
@@ -200,7 +200,7 @@ def _table_metrics(rows, font_size, pad_around_text, block_cols=None):
     block_gap = 3 * pad  # whitespace between side-by-side blocks
     col_w = [
         max(
-            max(_text_width(_table_display_text(r[c]), fs) for r in rows) + 2 * pad,
+            max(_text_width(_font_safe_text(r[c]), fs) for r in rows) + 2 * pad,
             fs * 2.5,
         )
         for c in range(ncol)
@@ -249,7 +249,7 @@ def _build_table(rows, draft, block_cols=None):
     for ri, row in enumerate(rows):  # rows[0] (header) sits at the top
         cy = total_h - (ri + 0.5) * row_h
         for ci, cell in enumerate(row):
-            display = _table_display_text(cell)
+            display = _font_safe_text(cell)
             if not display:
                 continue
             cx = (lefts[ci] + rights[ci]) / 2
@@ -1176,15 +1176,15 @@ def _make_title_block(dwg, a: Analysis):
     it, last) and :func:`_title_block_box` (which measures its footprint for GD&T avoidance, #481)
     so the two never drift."""
     tb = TitleBlock(
-        a.title,
-        a.number,
+        _font_safe_text(a.title),
+        _font_safe_text(a.number),
         scale=format_drawing_scale(a.SCALE),
-        general_tolerance=a.tolerance,
-        designed_by=_attribution_author(a.drawn_by),
-        material=a.material,
-        date=a.date,
-        revision=a.revision,
-        legal_owner=a.company,
+        general_tolerance=_font_safe_text(a.tolerance),
+        designed_by=_font_safe_text(_attribution_author(a.drawn_by)),
+        material=_font_safe_text(a.material),
+        date=_font_safe_text(a.date),
+        revision=_font_safe_text(a.revision),
+        legal_owner=_font_safe_text(a.company),
         width=a.TB_W,
         # Title block renders in condensed sans (the tight ISO 7200 cells), a
         # different face from the monospace dimensions — so it carries its own

@@ -4392,6 +4392,30 @@ class TestLintLocationCoverage:
         dwg = build_drawing(part, number="X", auto_dims=False)
         assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
 
+    @pytest.mark.timeout(60)
+    def test_structured_location_is_owned_by_the_exact_hole_and_axis(self):
+        from types import SimpleNamespace
+
+        from build123d_drafting import Dimension
+
+        from draftwright.linting import lint_location_coverage
+
+        part = Box(100, 60, 12) - Pos(30, 0, 0) * Cylinder(4, 30)
+        dwg = build_drawing(part, number="X", auto_dims=False)
+        feature = next(item for item in dwg.model().features if item.kind == "hole")
+        point = feature.frame.origin
+        dim = Dimension((-1000, -1000, 0), (-990, -1000, 0), "above", 8, dwg.draft)
+        dim.covers_hole_locations = ((feature, "location.location.y", point),)
+        dwg._add(dim, "wrong_axis", view="plan", feature=feature)
+
+        assert any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
+        # The legacy two-tuple carries the same ownership through its measurement object.
+        dim.covers_hole_locations = (
+            (SimpleNamespace(feature=feature, parameter="location.location.x"), point),
+        )
+        assert not any(i.code == "feature_not_located" for i in lint_location_coverage(part, dwg))
+
 
 class TestAutoHoleAnnotations:
     """Auto hole callouts (#91), count grouping (#92), centre marks (#95)."""

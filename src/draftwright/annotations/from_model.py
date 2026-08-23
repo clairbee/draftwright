@@ -52,6 +52,7 @@ from draftwright._core import (
     _dim,
     _first_free_index,
     _fmt,
+    _font_safe_text,
     _greedy_strip_ys,
     _iso_bbox,
     _legible_locations,
@@ -5685,7 +5686,7 @@ def _gdt_glyph(item, draft):
     if item.kind == "datum_ref":
         return DatumFeature(item.letter, draft=draft)
     if item.kind == "note":  # free-text manufacturing note (#488) — a single-line text glyph
-        return TextBlock([item.text], position=(0.0, 0.0), draft=draft)
+        return TextBlock([_font_safe_text(item.text)], position=(0.0, 0.0), draft=draft)
     return SurfaceFinish(item.ra, position=(0.0, 0.0), draft=draft)
 
 

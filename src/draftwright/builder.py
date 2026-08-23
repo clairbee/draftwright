@@ -1212,14 +1212,10 @@ def _is_required_scale_drop(issue) -> bool:
     return True
 
 
-def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, ...]:
-    """Required placement failures on a finished drawing, as stable plain data.
-
-    ``physical=False`` restricts the critique to the recognition-free components, so a caller
-    that must not materialise the ADR 0017 aggregate can still read what failed to place.
-    """
+def _scale_blockers_from_issues(issues) -> tuple[dict, ...]:
+    """Required placement failures from one already-materialised lint pass."""
     blockers = []
-    for issue in drawing.lint(physical=physical):
+    for issue in issues:
         if not _is_required_scale_drop(issue):
             continue
         blockers.append(
@@ -1238,6 +1234,15 @@ def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, .
             }
         )
     return tuple(blockers)
+
+
+def _scale_blockers(drawing: Drawing, *, physical: bool = True) -> tuple[dict, ...]:
+    """Required placement failures on a finished drawing, as stable plain data.
+
+    ``physical=False`` restricts the critique to the recognition-free components, so a caller
+    that must not materialise the ADR 0017 aggregate can still read what failed to place.
+    """
+    return _scale_blockers_from_issues(drawing.lint(physical=physical))
 
 
 def _blocker_identity(blocker) -> str:
@@ -1430,11 +1435,26 @@ def _scale_decision(
     }
 
 
-def _scale_attempt(scale: float, status: str, blockers=(), *, error: str | None = None) -> dict:
+def _scale_attempt(
+    scale: float,
+    status: str,
+    blockers=(),
+    *,
+    error: str | None = None,
+    reason: str | None = None,
+    views: Sequence[str] | None = None,
+    page: tuple[float, float] | None = None,
+) -> dict:
     """One plain-data trial in an explicit-scale decision."""
     attempt = {"scale": scale, "status": status, "blockers": tuple(blockers)}
     if error is not None:
         attempt["error"] = error
+    if reason is not None:
+        attempt["reason"] = reason
+    if views is not None:
+        attempt["views"] = tuple(views)
+    if page is not None:
+        attempt["page"] = tuple(page)
     return attempt
 
 
@@ -1449,45 +1469,6 @@ def _blocks_all_smaller_scales(blockers) -> bool:
         item["code"] == "step_dim_dropped" and "too closely spaced" in item["message"]
         for item in blockers
     )
-
-
-def _occupied_rectangle_ratio(drawing: Drawing) -> float:
-    """Union of settled view/annotation rectangles as a fraction of the page.
-
-    This is intentionally a cheap composition trigger, not a drawing-quality
-    metric: #1155 needs to distinguish a genuinely sparse micro-part sheet from
-    a large detail sheet whose conservative reservation is already justified.
-    """
-    rectangles = []
-    for visible, hidden in drawing.views.values():
-        for shape in (visible, hidden):
-            if shape is not None:
-                box = shape.bounding_box()
-                rectangles.append((box.min.X, box.min.Y, box.max.X, box.max.Y))
-    for name in drawing.annotations():
-        try:
-            box = drawing.get_annotation(name).bounding_box()
-        except Exception:  # pragma: no cover - OCC/platform-specific unboxable annotation
-            continue
-        rectangles.append((box.min.X, box.min.Y, box.max.X, box.max.Y))
-    xs = sorted({x for x0, _y0, x1, _y1 in rectangles for x in (x0, x1)})
-    area = 0.0
-    for x0, x1 in zip(xs, xs[1:]):
-        spans = sorted((y0, y1) for rx0, y0, rx1, y1 in rectangles if rx0 < x1 and x0 < rx1)
-        covered = 0.0
-        lo = hi = None
-        for y0, y1 in spans:
-            if lo is None:
-                lo, hi = y0, y1
-            elif y0 <= hi:
-                hi = max(hi, y1)
-            else:
-                covered += hi - lo
-                lo, hi = y0, y1
-        if lo is not None:
-            covered += hi - lo
-        area += (x1 - x0) * covered
-    return float(area / (drawing.page_w * drawing.page_h))
 
 
 def build_drawing(
@@ -1655,55 +1636,126 @@ def build_drawing(
         original_scale = drawing.scale
         original_page = (drawing.page_w, drawing.page_h)
         replanned = False
-        replan_reason = None
+        replan_attempts = []
+        arrangement_decision = getattr(drawing, "arrangement_decision", None)
+        settled_arrangement = (
+            arrangement_decision["chosen"] if arrangement_decision is not None else built_arrangement
+        )
+
+        def _retain_arrangement(candidate):
+            # The corrective builds are confined to the settled arrangement.  Preserve
+            # the original decision record as well: it explains why that arrangement won,
+            # whereas a fresh one-attempt record would erase the rejected alternatives.
+            if arrangement_decision is not None:
+                candidate.arrangement_decision = arrangement_decision
+            return candidate
+
+        def _automatic_assessment(candidate):
+            # One lint pass feeds both structural and requirement gates.  Re-running lint
+            # here used to duplicate the most expensive post-build critique for every trial.
+            issues = tuple(candidate.lint(physical=False))
+            return issues, _scale_blockers_from_issues(issues)
 
         # #1155: the compose-time estimate conservatively reserves an enlarged
         # detail for a crowded run.  Some larger preferred scales make that run
-        # readable inline, so the detail reservation disappears and the same A4
+        # readable inline, so the detail reservation disappears and the same page
         # becomes feasible — GRM-04 is 2:1 under the estimate but complete at 5:1
         # after its Y location re-homes from side-below to plan-right.  Measure
         # those larger candidates only when the settled result actually contains
-        # an automatic recovery detail.  A candidate may win only on the same
-        # sheet, with no recovery detail and no required placement loss.
+        # that semantic recovery artifact: post-build occupied rectangles are not
+        # a scale-selection input.  A candidate may win only on the same sheet and
+        # settled arrangement, with no recovery detail or required placement loss.
         if (
             auto_dims
             and views_are_automatic
             and any(name.startswith("detail_") for name in drawing.views)
-            and original_page == (297.0, 210.0)
-            and _occupied_rectangle_ratio(drawing) < 0.15
         ):
+            replan_attempts.append(
+                _scale_attempt(
+                    drawing.scale,
+                    "detail_reservation_conservative",
+                    reason="measured_upscale",
+                    views=drawing.views,
+                    page=original_page,
+                )
+            )
             for candidate_scale in sorted(item for item in _SCALES if item > original_scale):
                 try:
                     candidate_drawing = _build(
                         candidate_scale,
-                        views=_views,
+                        arrangements=(settled_arrangement,),
                         page_override=original_page,
                     )
+                except ValueError as exc:
+                    # A fixed-page fit failure is monotone as scale increases: a still
+                    # larger requested projection cannot fit that same page either.
+                    _log.info(
+                        "measured upscale %s:1 rejected (fixed-page fit failed: %s)",
+                        candidate_scale,
+                        exc,
+                    )
+                    replan_attempts.append(
+                        _scale_attempt(
+                            candidate_scale,
+                            "error",
+                            error=str(exc),
+                            reason="measured_upscale",
+                            views=drawing.views,
+                            page=original_page,
+                        )
+                    )
+                    break
                 except Standard_Failure as exc:  # pragma: no cover - OCC/platform-specific
                     _log.info(
                         "measured upscale %s:1 rejected (geometry transform failed: %s)",
                         candidate_scale,
                         exc,
                     )
+                    replan_attempts.append(
+                        _scale_attempt(
+                            candidate_scale,
+                            "error",
+                            error=str(exc),
+                            reason="measured_upscale",
+                            views=drawing.views,
+                            page=original_page,
+                        )
+                    )
                     continue
-                same_page = (
-                    candidate_drawing.page_w,
-                    candidate_drawing.page_h,
-                ) == original_page
+                candidate_drawing = _retain_arrangement(candidate_drawing)
+                assert (candidate_drawing.page_w, candidate_drawing.page_h) == original_page
                 has_detail = any(name.startswith("detail_") for name in candidate_drawing.views)
-                structural_error = any(
-                    issue.severity == "error" for issue in candidate_drawing.lint(physical=False)
-                )
-                if (
-                    same_page
-                    and not has_detail
-                    and not structural_error
-                    and not _automatic_blockers(candidate_drawing)
-                ):
+                issues, blockers = _automatic_assessment(candidate_drawing)
+                structural_error = any(issue.severity == "error" for issue in issues)
+                if not has_detail and not structural_error and not blockers:
+                    replan_attempts.append(
+                        _scale_attempt(
+                            candidate_scale,
+                            "complete",
+                            reason="measured_upscale",
+                            views=candidate_drawing.views,
+                            page=original_page,
+                        )
+                    )
                     drawing = candidate_drawing
                     replanned = True
-                    replan_reason = "measured_upscale"
                     break
+                replan_attempts.append(
+                    _scale_attempt(
+                        candidate_scale,
+                        "rejected",
+                        blockers,
+                        reason=(
+                            "recovery_detail_retained"
+                            if has_detail
+                            else "structural_error"
+                            if structural_error
+                            else "required_outcome_dropped"
+                        ),
+                        views=candidate_drawing.views,
+                        page=original_page,
+                    )
+                )
 
         # #443: a pictorial view is useful context, but it cannot outrank the
         # dimensions needed to manufacture a turned profile.  GRM-03 selected 2:1
@@ -1713,28 +1765,97 @@ def build_drawing(
         # dimensions fit inline.  This is deliberately a coverage comparison, not
         # suppression of ``axial_length_missing``: the candidate wins only after
         # the same read-back check confirms every shoulder is located.
-        original_has_axial_gap = bool(
-            latest_analysis is not None
-            and lint_axial_coverage(
-                latest_analysis.part,
-                drawing,
-                prof=latest_analysis.prof,
-            )
-        )
-        if original_has_axial_gap and _include_iso and views_are_automatic:
-            without_iso = _build(None, views=_views, include_iso=False)
-            candidate_has_axial_gap = bool(
-                latest_analysis is not None
-                and lint_axial_coverage(
+        if auto_dims and _include_iso and views_are_automatic and "iso" in drawing.views:
+            assert latest_analysis is not None
+            original_has_axial_gap = bool(
+                lint_axial_coverage(
                     latest_analysis.part,
-                    without_iso,
+                    drawing,
                     prof=latest_analysis.prof,
                 )
             )
-            if not candidate_has_axial_gap and not _automatic_blockers(without_iso):
-                drawing = without_iso
-                replanned = True
-                replan_reason = "axial_coverage"
+            if original_has_axial_gap:
+                replan_attempts.append(
+                    _scale_attempt(
+                        drawing.scale,
+                        "axial_coverage_incomplete",
+                        reason="remove_optional_iso",
+                        views=drawing.views,
+                        page=original_page,
+                    )
+                )
+                try:
+                    without_iso = _build(
+                        None,
+                        arrangements=(settled_arrangement,),
+                        include_iso=False,
+                    )
+                except (ValueError, Standard_Failure) as exc:
+                    _log.info("optional-ISO replan rejected (build failed: %s)", exc)
+                    replan_attempts.append(
+                        _scale_attempt(
+                            drawing.scale,
+                            "error",
+                            error=str(exc),
+                            reason="remove_optional_iso",
+                            views=tuple(name for name in drawing.views if name != "iso"),
+                            page=original_page,
+                        )
+                    )
+                else:
+                    without_iso = _retain_arrangement(without_iso)
+                    same_page = (without_iso.page_w, without_iso.page_h) == original_page
+                    issues, blockers = _automatic_assessment(without_iso)
+                    structural_error = any(issue.severity == "error" for issue in issues)
+                    candidate_has_detail = any(
+                        name.startswith("detail_") for name in without_iso.views
+                    )
+                    candidate_has_axial_gap = bool(
+                        lint_axial_coverage(
+                            latest_analysis.part,
+                            without_iso,
+                            prof=latest_analysis.prof,
+                        )
+                    )
+                    if (
+                        not candidate_has_axial_gap
+                        and same_page
+                        and not candidate_has_detail
+                        and not structural_error
+                        and not blockers
+                    ):
+                        replan_attempts.append(
+                            _scale_attempt(
+                                without_iso.scale,
+                                "complete",
+                                reason="remove_optional_iso",
+                                views=without_iso.views,
+                                page=original_page,
+                            )
+                        )
+                        drawing = without_iso
+                        replanned = True
+                    else:
+                        replan_attempts.append(
+                            _scale_attempt(
+                                without_iso.scale,
+                                "rejected",
+                                blockers,
+                                reason=(
+                                    "axial_coverage_incomplete"
+                                    if candidate_has_axial_gap
+                                    else "page_changed"
+                                    if not same_page
+                                    else "recovery_detail_introduced"
+                                    if candidate_has_detail
+                                    else "structural_error"
+                                    if structural_error
+                                    else "required_outcome_dropped"
+                                ),
+                                views=without_iso.views,
+                                page=original_page,
+                            )
+                        )
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.
@@ -1745,20 +1866,8 @@ def build_drawing(
             requested=None,
             effective=drawing.scale,
             status="automatic_replanned" if replanned else "automatic",
-            attempted=(original_scale, drawing.scale) if replanned else (),
-            attempts=(
-                (
-                    _scale_attempt(
-                        original_scale,
-                        "detail_reservation_conservative"
-                        if replan_reason == "measured_upscale"
-                        else "axial_coverage_incomplete",
-                    ),
-                    _scale_attempt(drawing.scale, "complete"),
-                )
-                if replanned
-                else ()
-            ),
+            attempted=tuple(item["scale"] for item in replan_attempts),
+            attempts=replan_attempts,
         )
         return _complete_automatic_plan(drawing)
 

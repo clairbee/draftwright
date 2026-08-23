@@ -43,6 +43,18 @@ def test_note_tagged_to_a_view_is_owned_by_it():
     assert dwg.view_of(name) == "plan"
 
 
+def test_note_diameter_sign_uses_the_supported_drafting_glyph():
+    source = _dwg()
+    control = _dwg()
+    source_name = source.note("⌀4 x 3.2", (20, 20))
+    control_name = control.note("ø4 x 3.2", (20, 20))
+
+    source_note = source.get_annotation(source_name)
+    control_note = control.get_annotation(control_name)
+    assert source_note.label == "ø4 x 3.2"
+    assert source_note.bounding_box().size == pytest.approx(control_note.bounding_box().size)
+
+
 def test_note_exports(tmp_path):
     dwg = _dwg()
     dwg.note("SEE NOTE 1", (150, 100))
