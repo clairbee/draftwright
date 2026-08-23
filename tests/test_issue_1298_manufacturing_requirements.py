@@ -12,6 +12,7 @@ from draftwright.analysis import _import_step
 from draftwright.linting.pmi_coverage import lint_pmi_lowering
 from draftwright.model.detect import build_part_model
 from draftwright.model.ir import (
+    AuthoredDimension,
     BossFeature,
     CylindricalReference,
     Frame,
@@ -39,6 +40,38 @@ KNURL_TEXT = (
     "Straight knurl, 1.0 mm pitch, full width between C0.3 chamfers, DIA 10 mm "
     "maximum after knurling; cut or formed process permitted"
 )
+
+
+def _manufacturing_signature(model):
+    """Typed requirements plus stable canonical-owner facts for emit/rebuild parity."""
+    signature = []
+    for feature in model.features:
+        for aspect_name, requirement_type in (
+            ("thread", ThreadRequirement),
+            ("knurl", KnurlRequirement),
+        ):
+            requirement = getattr(feature, aspect_name, None)
+            if not isinstance(requirement, requirement_type):
+                continue
+            signature.append(
+                (
+                    feature.kind,
+                    round(float(getattr(feature, "diameter", 0.0)), 3),
+                    round(
+                        float(
+                            getattr(
+                                feature,
+                                "length",
+                                getattr(feature, "depth", 0.0) or 0.0,
+                            )
+                        ),
+                        3,
+                    ),
+                    aspect_name,
+                    requirement,
+                )
+            )
+    return tuple(sorted(signature, key=repr))
 
 
 def _reference(*, diameter, interval, sense, axis_origin=(0.0, 0.0, 0.0)):
@@ -784,3 +817,97 @@ def test_exact_grm03_lowers_all_three_supported_manufacturing_requirements():
         if isinstance(feature, PmiFeature)
         and feature.pmi_kind in {"external_thread", "internal_thread", "knurl"}
     ]
+
+
+@pytest.mark.skipif(not GRM03.exists(), reason="local exact GRM-03 AP242 file absent")
+def test_exact_grm03_renders_complete_source_owned_manufacturing_drawing_once():
+    assert hashlib.sha256(GRM03.read_bytes()).hexdigest() == GRM03_SHA256
+    drawing = build_drawing(GRM03, pmi="annotate", page="A1")
+
+    expected_manufacturing = {
+        "manufacturing_requirement:#2000": (
+            "m_dia_x4",
+            "ø3 M3 x 0.5-6g RH, FULL AVAILABLE LENGTH",
+        ),
+        "manufacturing_requirement:#2004": (
+            "hc_side0",
+            "⌀1.6 ↧ 8 M2 x 0.4-6H RH; 6 MIN FULL THREAD; 118° CONVENTIONAL DRILL POINT",
+        ),
+        "manufacturing_requirement:#2008": (
+            "m_dia_x2",
+            "ø10 MAX AFTER KNURL; STRAIGHT KNURL P1 FULL WIDTH TO C0.3 CHAMFERS; "
+            "CUT/FORMED PERMITTED",
+        ),
+    }
+    typed_owners = {}
+    for feature in drawing.model().features:
+        for requirement in (getattr(feature, "thread", None), getattr(feature, "knurl", None)):
+            if isinstance(requirement, (ThreadRequirement, KnurlRequirement)):
+                for source_id in requirement.source_ids:
+                    typed_owners[source_id] = feature
+    assert set(typed_owners) == set(expected_manufacturing)
+    for source_id, (expected_name, expected_label) in expected_manufacturing.items():
+        owner = typed_owners[source_id]
+        matches = [
+            name
+            for name, annotation in drawing.annotations_of(owner).items()
+            if getattr(annotation, "label", "") == expected_label
+        ]
+        assert matches == [expected_name]
+        assert drawing.registry.feature_of(expected_name) == owner
+
+    expected_axial = {
+        "dimension:0:1:4:6": ("pmi_x_0", "3.2"),
+        "dimension:0:1:4:7": ("pmi_x_1", "0.5"),
+        "dimension:0:1:4:8": ("pmi_x_2", "2"),
+        "dimension:0:1:4:9": ("pmi_x_3", "3"),
+        "dimension:0:1:4:10": ("pmi_x_4", "20"),
+    }
+    axial_owners = {
+        feature.source_id: feature
+        for feature in drawing.model().features
+        if isinstance(feature, AuthoredDimension) and feature.source_id in expected_axial
+    }
+    assert set(axial_owners) == set(expected_axial)
+    for source_id, (expected_name, expected_label) in expected_axial.items():
+        owner = axial_owners[source_id]
+        matches = [
+            name
+            for name, annotation in drawing.annotations_of(owner).items()
+            if getattr(annotation, "label", "") == expected_label
+        ]
+        assert matches == [expected_name]
+        assert drawing.registry.feature_of(expected_name) == owner
+
+    issues = drawing.lint()
+    forbidden = {
+        "label_vs_measured",
+        "pmi_not_rendered",
+        "axial_length_missing",
+        "annotation_overlap",
+        "annotation_out_of_bounds",
+        "view_overlap",
+        "feature_leader_crossing",
+    }
+    assert not [
+        issue
+        for issue in issues
+        if issue.severity == "error" or issue.code in forbidden or issue.code.endswith("_dropped")
+    ]
+    unsupported = [issue for issue in issues if issue.code == "pmi_not_lowered"]
+    assert {issue.source_ids[0]: issue.severity for issue in unsupported} == {
+        "manufacturing_requirement:#2012": "warning",
+        "manufacturing_requirement:#2016": "warning",
+        "manufacturing_requirement:#2020": "warning",
+        "manufacturing_requirement:#2024": "warning",
+        "manufacturing_requirement:#2028": "warning",
+    }
+
+    model = drawing.model()
+    source = emit_sheet_script(model, "part", "grm03-pmi", title="GRM-03", number="GRM-03")
+    namespace = {"part": _import_step(str(GRM03))}
+    exec(  # noqa: S102
+        compile(source[: source.index("drawing = sheet.build()")], "<grm03-pmi-emit>", "exec"),
+        namespace,
+    )
+    assert _manufacturing_signature(namespace["sheet"].model()) == _manufacturing_signature(model)
