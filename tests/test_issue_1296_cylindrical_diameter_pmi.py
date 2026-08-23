@@ -11,6 +11,7 @@ from build123d import Box, Cylinder, import_step
 
 from draftwright import Sheet, build_drawing
 from draftwright.model import plan_dimensions
+from draftwright.model.declare import measured_dimension
 from draftwright.model.ir import (
     AuthoredDimension,
     BossFeature,
@@ -24,8 +25,15 @@ from draftwright.model.ir import (
     StepFeature,
     ToleranceDecoration,
 )
-from draftwright.model.pmi_lowering import lower_ap242_dimensions, lower_ap242_nominal_diameters
-from draftwright.pmi import extract_pmi_report
+from draftwright.model.pmi_lowering import (
+    _external_owner_matches,
+    _internal_member_matches,
+    _standalone_cylinder_blocker,
+    lower_ap242_dimensions,
+    lower_ap242_nominal_diameters,
+)
+from draftwright.pmi import _diameter_reference_blockers, extract_pmi_report
+from draftwright.sheet import _requirement_parameter
 from draftwright.sheet_emit import emit_sheet_script
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ap242_single_cylinder_diameter.step"
@@ -538,6 +546,257 @@ def test_requirement_api_rejects_parameters_the_emitter_cannot_preserve():
             source="ap242_pmi",
             source_ids=("dimension:unsupported",),
         )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"axis_origin": None}, "finite 3-vector"),
+        ({"axis_origin": (0, 0)}, "finite 3-vector"),
+        ({"axis_direction": (2, 0, 0)}, "unit length"),
+        ({"axis_direction": (-1, 0, 0)}, "positive dominant"),
+        ({"axis_origin": (1, 0, 0)}, "perpendicular"),
+        ({"axial_interval": None}, "two finite values"),
+        ({"axial_interval": (1, 0)}, "finite and increasing"),
+        ({"radius": True}, "finite and positive"),
+        ({"radius": 0}, "finite and positive"),
+        ({"sense": "unknown"}, "sense must be"),
+    ],
+)
+def test_cylindrical_reference_rejects_invalid_provenance(changes, message):
+    values = {
+        "axis_origin": (0, 0, 0),
+        "axis_direction": (1, 0, 0),
+        "radius": 2,
+        "axial_interval": (0, 1),
+        "sense": "external",
+    }
+    values.update(changes)
+    with pytest.raises(ValueError, match=message):
+        CylindricalReference(**values)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"axis_direction": (0, 0, 0)}, "non-zero"),
+        ({"local_interval": None}, "two finite values"),
+        ({"local_interval": (2, 1)}, "finite and increasing"),
+    ],
+)
+def test_cylindrical_reference_canonical_rejects_invalid_kernel_values(changes, message):
+    values = {
+        "axis_point": (0, 0, 0),
+        "axis_direction": (1, 0, 0),
+        "radius": 2,
+        "local_interval": (0, 1),
+        "sense": "external",
+    }
+    values.update(changes)
+    with pytest.raises(ValueError, match=message):
+        CylindricalReference.canonical(**values)
+
+
+@pytest.mark.parametrize(
+    ("value", "source", "source_ids", "message"),
+    [
+        (True, "ap242_pmi", ("dimension:1",), "finite and positive"),
+        (0, "ap242_pmi", ("dimension:1",), "finite and positive"),
+        (4, " ", ("dimension:1",), "non-empty string"),
+        (4, "ap242_pmi", ("", " "), "at least one source id"),
+    ],
+)
+def test_nominal_requirement_rejects_invalid_provenance(value, source, source_ids, message):
+    with pytest.raises(ValueError, match=message):
+        NominalRequirement(value, source, source_ids)
+
+
+def test_measured_dimension_validates_and_derives_typed_cylinder_inputs():
+    reference = _cylinder(interval=(2, 6))
+    required = {"label": "ø4", "ref_pts": ()}
+    direct = measured_dimension(
+        kind="diameter",
+        value=4,
+        dominant_axis="X",
+        cylindrical_refs=(reference,),
+        **required,
+    )
+    assert direct.cylindrical_refs == (reference,)
+    assert direct.frame.origin == reference.midpoint
+
+    mapping = {
+        "axis_origin": (0, 0, 0),
+        "axis_direction": (1, 0, 0),
+        "radius": 2,
+        "axial_interval": (2, 6),
+        "sense": "external",
+    }
+    assert measured_dimension(
+        kind="diameter",
+        value=4,
+        dominant_axis="X",
+        cylindrical_refs=(mapping,),
+        **required,
+    ).cylindrical_refs == (reference,)
+
+    with pytest.raises(ValueError, match="items must be mappings"):
+        measured_dimension(
+            kind="diameter",
+            value=4,
+            dominant_axis="X",
+            cylindrical_refs=(object(),),
+            **required,
+        )
+    with pytest.raises(ValueError, match="missing 'sense'"):
+        measured_dimension(
+            kind="diameter",
+            value=4,
+            dominant_axis="X",
+            cylindrical_refs=({k: v for k, v in mapping.items() if k != "sense"},),
+            **required,
+        )
+
+    oblique = CylindricalReference(
+        axis_origin=(0, 0, 0),
+        axis_direction=(2**-0.5, 2**-0.5, 0),
+        radius=2,
+        axial_interval=(0, 1),
+        sense="external",
+    )
+    with pytest.raises(ValueError, match="one principal-axis direction"):
+        measured_dimension(
+            kind="diameter",
+            value=4,
+            dominant_axis="X",
+            cylindrical_refs=(oblique,),
+            **required,
+        )
+    blocked = measured_dimension(
+        kind="diameter",
+        value=4,
+        dominant_axis="?",
+        source_id="dimension:blocked",
+        rendering_blockers=("unusable topology",),
+        cylindrical_refs=(oblique,),
+        **required,
+    )
+    assert blocked.cylindrical_refs == (oblique,)
+    with pytest.raises(ValueError, match="dominant_axis disagrees"):
+        measured_dimension(
+            kind="diameter",
+            value=4,
+            dominant_axis="Z",
+            cylindrical_refs=(reference,),
+            **required,
+        )
+
+
+def test_owner_match_helpers_fail_closed_for_every_topology_component():
+    bbox = Box(20, 20, 20).bounding_box()
+    step = StepFeature(Frame((5, 0, 0), "x"), 10, 4, span=((0, 0, 0), (10, 0, 0)))
+    assert not _external_owner_matches(_cylinder(interval=(0, 10), sense="internal"), step)
+    assert not _external_owner_matches(_cylinder(interval=(0, 10), diameter=6), step)
+    assert not _external_owner_matches(_cylinder(interval=(0, 10)), replace(step, span=None))
+
+    through = HoleFeature(Frame((0, 0, 0), "x"), 4, None, True)
+    assert not _internal_member_matches(
+        _cylinder(interval=(0, 10), sense="external"), through, (0, 0, 0), bbox
+    )
+    assert not _internal_member_matches(
+        _cylinder(interval=(0, 10), diameter=6, sense="internal"),
+        through,
+        (0, 0, 0),
+        bbox,
+    )
+    assert not _internal_member_matches(
+        _cylinder(interval=(0, 10), axis_origin=(0, 2, 0), sense="internal"),
+        through,
+        (0, 0, 0),
+        bbox,
+    )
+    assert not _internal_member_matches(
+        _cylinder(interval=(-11, 1), sense="internal"), through, (0, 0, 0), bbox
+    )
+    assert not _internal_member_matches(
+        _cylinder(interval=(0, 0.005), sense="internal"), through, (0, 0, 0), bbox
+    )
+    blind_without_depth = HoleFeature(Frame((0, 0, 0), "x"), 4, None, False)
+    assert not _internal_member_matches(
+        _cylinder(interval=(0, 5), sense="internal"),
+        blind_without_depth,
+        (0, 0, 0),
+        bbox,
+    )
+    blind = replace(blind_without_depth, depth=5)
+    assert _internal_member_matches(
+        _cylinder(interval=(0, 5), sense="internal"), blind, (0, 0, 0), bbox
+    )
+    assert (
+        _standalone_cylinder_blocker((_cylinder(interval=(0, 1)), _cylinder(interval=(1, 2))))
+        == ""
+    )
+
+
+def test_nominal_lowering_reports_skips_ambiguity_merges_and_conflicts():
+    bbox = Box(20, 20, 20).bounding_box()
+    step = StepFeature(Frame((5, 0, 0), "x"), 10, 4, span=((0, 0, 0), (10, 0, 0)))
+    dimension = _dimension(_cylinder(interval=(0, 10)), "dimension:new")
+
+    skipped = lower_ap242_nominal_diameters(
+        PartModel(bbox, "x", [step, replace(dimension, lowering_blockers=("blocked",))])
+    )
+    assert skipped.features[-1].lowering_blockers == ("blocked",)
+
+    ambiguous = lower_ap242_nominal_diameters(PartModel(bbox, "x", [step, step, dimension]))
+    ambiguous_dimension = next(
+        feature for feature in ambiguous.features if isinstance(feature, AuthoredDimension)
+    )
+    assert ambiguous_dimension.lowering_blockers == (
+        "ambiguous diameter ownership: source cylinder topology matches 2 canonical features",
+    )
+
+    key = (step, "nominal_requirement", "step.diameter")
+    merged = lower_ap242_nominal_diameters(
+        PartModel(
+            bbox,
+            "x",
+            [step, dimension],
+            decorations={key: NominalRequirement(4, "ap242_pmi", ("dimension:old",))},
+        )
+    )
+    assert merged.decorations[key].source_ids == ("dimension:old", "dimension:new")
+    assert merged.features == [step]
+
+    conflict = lower_ap242_nominal_diameters(
+        PartModel(
+            bbox,
+            "x",
+            [step, dimension],
+            decorations={key: ToleranceDecoration(0.1, "ap242_pmi", ("dimension:old",))},
+        )
+    )
+    conflict_dimension = next(
+        feature for feature in conflict.features if isinstance(feature, AuthoredDimension)
+    )
+    assert "already has an authored aspect" in conflict_dimension.lowering_blockers[0]
+
+
+def test_diameter_blockers_and_standalone_target_reject_inconsistent_groups():
+    assert _diameter_reference_blockers((), 4, ()) == (
+        "diameter dimension needs a measurable cylindrical-face reference",
+    )
+    mixed_axes = (_cylinder(), replace(_cylinder(), axis_direction=(0, 1, 0)))
+    assert "diameter references do not share one cylinder axis direction" in (
+        _diameter_reference_blockers(mixed_axes, 4, ())
+    )
+    mixed_senses = (_cylinder(), _cylinder(sense="internal"))
+    assert "diameter references mix internal and external cylindrical faces" in (
+        _diameter_reference_blockers(mixed_senses, 4, ())
+    )
+
+    rotational = RotationalFeature(Frame((0, 0, 0), "z"), 10, bores=(4, 6))
+    with pytest.raises(ValueError, match="does not name exactly one parameter"):
+        _requirement_parameter(rotational, "diameter")
 
 
 @pytest.mark.skipif(not GRM03.exists(), reason="local exact GRM-03 AP242 acceptance file absent")
