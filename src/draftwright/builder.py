@@ -1439,12 +1439,13 @@ def _scale_decision(
 
 
 def _scale_attempt(
-    scale: float,
+    scale: float | None,
     status: str,
     blockers=(),
     *,
     error: str | None = None,
     reason: str | None = None,
+    rejection: str | None = None,
     views: Iterable[str] | None = None,
     page: tuple[float, float] | None = None,
 ) -> dict:
@@ -1454,6 +1455,8 @@ def _scale_attempt(
         attempt["error"] = error
     if reason is not None:
         attempt["reason"] = reason
+    if rejection is not None:
+        attempt["rejection"] = rejection
     if views is not None:
         attempt["views"] = tuple(views)
     if page is not None:
@@ -1688,6 +1691,7 @@ def build_drawing(
             views=None,
             page=None,
             error=None,
+            rejection=None,
         ):
             if candidate is not None:
                 views = candidate.views
@@ -1698,6 +1702,7 @@ def build_drawing(
                     status,
                     blockers,
                     reason=reason,
+                    rejection=rejection,
                     views=views,
                     page=page,
                     error=error,
@@ -1784,7 +1789,8 @@ def build_drawing(
                     candidate_scale,
                     "rejected",
                     blockers,
-                    reason=rejection,
+                    reason="measured_upscale",
+                    rejection=rejection,
                     candidate=candidate_drawing,
                 )
 
@@ -1849,7 +1855,7 @@ def build_drawing(
                         )
                         try:
                             without_iso = _build(
-                                without_iso_proposal.scale,
+                                None,
                                 arrangements=(settled_arrangement,),
                                 include_iso=False,
                                 page_override=original_page,
@@ -1862,9 +1868,9 @@ def build_drawing(
                                 exc,
                             )
                             _record_attempt(
-                                without_iso_proposal.scale,
+                                None,
                                 "error",
-                                reason="remove_optional_iso_fixed_page",
+                                reason="remove_optional_iso",
                                 views=without_iso_proposal.views,
                                 page=original_page,
                                 error=str(exc),
@@ -1895,9 +1901,83 @@ def build_drawing(
                                 without_iso.scale,
                                 "rejected",
                                 blockers,
-                                reason=rejection,
+                                reason="remove_optional_iso",
+                                rejection=rejection,
                                 candidate=without_iso,
                             )
+                            # #1299: page preference is subordinate to manufacturing
+                            # completeness. Once the settled no-ISO arrangement has failed
+                            # on the automatically selected sheet, try only the bounded
+                            # sequence of larger standard pages. Each page chooses its scale
+                            # through the established fixed-page policy and must pass the
+                            # same axial, structural, and required-outcome gates above.
+                            if page is None:
+                                standard_pages = tuple(_PAGE_SIZES.items())
+                                original_index = next(
+                                    (
+                                        index
+                                        for index, (_name, dimensions) in enumerate(standard_pages)
+                                        if tuple(dimensions) == original_page
+                                    ),
+                                    None,
+                                )
+                                larger_pages = (
+                                    standard_pages[original_index + 1 :]
+                                    if original_index is not None
+                                    else ()
+                                )
+                                for page_name, page_dimensions in larger_pages:
+                                    try:
+                                        larger = _build(
+                                            None,
+                                            arrangements=(settled_arrangement,),
+                                            include_iso=False,
+                                            page_override=page_name,
+                                        )
+                                    except (ValueError, Standard_Failure) as exc:
+                                        if not _is_expected_candidate_build_failure(exc):
+                                            raise
+                                        _log.info(
+                                            "optional-ISO page escalation to %s rejected "
+                                            "(candidate build failed: %s)",
+                                            page_name,
+                                            exc,
+                                        )
+                                        _record_attempt(
+                                            None,
+                                            "error",
+                                            reason="page_escalation_after_optional_iso",
+                                            views=tuple(
+                                                name for name in drawing.views if name != "iso"
+                                            ),
+                                            page=page_dimensions,
+                                            error=str(exc),
+                                        )
+                                        continue
+                                    larger = _retain_arrangement(larger)
+                                    issues, blockers, page_rejection = _qualify_candidate(
+                                        larger,
+                                        require_axial_coverage=True,
+                                    )
+                                    if page_rejection is None:
+                                        _record_attempt(
+                                            larger.scale,
+                                            "complete",
+                                            reason="page_escalation_after_optional_iso",
+                                            candidate=larger,
+                                        )
+                                        drawing = larger
+                                        settled_issues = issues
+                                        replanned = True
+                                        break
+                                    _record_attempt(
+                                        larger.scale,
+                                        "rejected",
+                                        blockers,
+                                        reason="page_escalation_after_optional_iso",
+                                        rejection=page_rejection,
+                                        candidate=larger,
+                                    )
         # The default record, set BEFORE the completeness pass so that pass can replace it.
         # It used to be assigned afterwards and silently overwrote whatever the pass had
         # decided, so an incomplete plan reported itself as an ordinary automatic one.
@@ -1908,7 +1988,9 @@ def build_drawing(
             requested=None,
             effective=drawing.scale,
             status="automatic_replanned" if replanned else "automatic",
-            attempted=tuple(item["scale"] for item in replan_attempts),
+            attempted=tuple(
+                item["scale"] for item in replan_attempts if item["scale"] is not None
+            ),
             attempts=replan_attempts,
         )
         if replan_attempts and drawing.solve_trace is not None:
