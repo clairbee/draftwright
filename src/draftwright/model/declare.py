@@ -43,6 +43,7 @@ from draftwright.model.ir import (
     ChamferFeature,
     ChannelFeature,
     ControlFrame,
+    CylindricalReference,
     DatumRef,
     EnvelopeFeature,
     ExternalSpurGearFeature,
@@ -2073,6 +2074,7 @@ def measured_dimension(
     source_id: str = "",
     lowering_blockers: tuple[str, ...] = (),
     rendering_blockers: tuple[str, ...] = (),
+    cylindrical_refs=(),
 ) -> AuthoredDimension:
     """A pre-authored drafting dimension from explicit measured values — the IR constructor
     behind :meth:`Sheet.measured_dimension` (#704: extracted so ``build_drawing(model=…)``
@@ -2090,8 +2092,30 @@ def measured_dimension(
         allowed = ", ".join(sorted(AUTHORED_DIMENSION_KINDS))
         raise ValueError(f"measured_dimension() kind must be one of: {allowed}")
     pts = tuple(_point3("ref_pts item", p) for p in ref_pts)
+    cylinders: list[CylindricalReference] = []
+    for raw in cylindrical_refs:
+        if isinstance(raw, CylindricalReference):
+            cylinders.append(raw)
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError("measured_dimension() cylindrical_refs items must be mappings")
+        try:
+            cylinders.append(
+                CylindricalReference(
+                    axis_origin=raw["axis_origin"],
+                    axis_direction=raw["axis_direction"],
+                    radius=raw["radius"],
+                    axial_interval=raw["axial_interval"],
+                    sense=raw["sense"],
+                )
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f"measured_dimension() cylindrical reference is missing {exc.args[0]!r}"
+            ) from exc
     imported_blocked = bool(source_id and rendering_blockers)
-    if len(pts) < 2 and not imported_blocked:
+    cylindrical_diameter = dim_kind == "diameter" and bool(cylinders)
+    if len(pts) < 2 and not imported_blocked and not cylindrical_diameter:
         raise ValueError("measured_dimension() needs at least two ref_pts")
     bbox = None if ref_bbox is None else tuple(float(c) for c in ref_bbox)
     if bbox is not None and len(bbox) != 6:
@@ -2102,6 +2126,16 @@ def measured_dimension(
         unresolved_bore = dom == "?" and dim_kind in ("diameter", "radius") and bbox is not None
         if not (unresolved_import or unresolved_bore):
             raise ValueError("measured_dimension() dominant_axis must be X, Y, or Z")
+    cylinder_axes = {reference.principal_axis for reference in cylinders}
+    if cylinders and (len(cylinder_axes) != 1 or "?" in cylinder_axes):
+        if not imported_blocked:
+            raise ValueError(
+                "measured_dimension() cylindrical_refs need one principal-axis direction"
+            )
+    elif cylinders and dom != next(iter(cylinder_axes)):
+        raise ValueError(
+            "measured_dimension() dominant_axis disagrees with cylindrical_refs topology"
+        )
     if (lower_bound is None) != (upper_bound is None):
         raise ValueError("measured_dimension() needs both lower_bound and upper_bound")
     lower = None if lower_bound is None else float(lower_bound)
@@ -2119,6 +2153,11 @@ def measured_dimension(
         if bbox is not None:
             x0, y0, z0, x1, y1, z1 = bbox
             at = ((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
+        elif cylinders:
+            at = tuple(
+                sum(reference.midpoint[index] for reference in cylinders) / len(cylinders)
+                for index in range(3)
+            )
         else:
             n = len(pts)
             at = tuple(sum(p[i] for p in pts) / n for i in range(3))
@@ -2141,4 +2180,5 @@ def measured_dimension(
         source_id=str(source_id),
         lowering_blockers=tuple(str(reason) for reason in lowering_blockers),
         rendering_blockers=tuple(str(reason) for reason in rendering_blockers),
+        cylindrical_refs=tuple(cylinders),
     )

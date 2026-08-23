@@ -99,7 +99,7 @@ from draftwright.model.declare import (
 )
 from draftwright.model.declare import read_bore_step as _read_bore_step
 from draftwright.model.declare import read_countersink as _read_countersink
-from draftwright.model.ir import RequestedDimension, ToleranceDecoration
+from draftwright.model.ir import NominalRequirement, RequestedDimension, ToleranceDecoration
 from draftwright.model.planner import LOCATION_ROLE as _LOCATION_ROLE
 from draftwright.model.planner import location_role as _location_role
 from draftwright.view_plan import (
@@ -166,6 +166,38 @@ def _tolerance_decoration(lo, hi, *, source, source_ids):
     if not source:
         raise ValueError("tolerance() source must be a non-empty string")
     return ToleranceDecoration(value=value, source=source, source_ids=ids)
+
+
+def _nominal_requirement(value, *, source, source_ids):
+    """Build the provenance-only aspect used by generated imported-PMI scripts."""
+    return NominalRequirement(value=value, source=source, source_ids=source_ids)
+
+
+_NOMINAL_DIAMETER_PARAMETER = {
+    "step": "step.diameter",
+    "boss": "boss.diameter",
+    "hole": "bore.diameter",
+    "pattern": "bore.diameter",
+    "rotational": "od.diameter",
+}
+
+
+def _requirement_parameter(feature, target: str):
+    """Resolve an imported nominal owner whose exact key the emitter preserves."""
+    parameters = [
+        parameter
+        for parameter in feature.parameters()
+        if parameter.kind == target or parameter.parameter_id == target or parameter.role == target
+    ]
+    if len(parameters) != 1:
+        raise ValueError(f"requirement(): {target!r} does not name exactly one parameter")
+    parameter = parameters[0]
+    if parameter.parameter_id != _NOMINAL_DIAMETER_PARAMETER.get(feature.kind):
+        raise ValueError(
+            "requirement() supports only the canonical imported diameter owner of a "
+            "step, boss, hole, pattern, or rotational feature"
+        )
+    return parameter
 
 
 class _FeatureView(MutableSequence):
@@ -364,6 +396,17 @@ class _Hole(_Nameable):
         )
         return self
 
+    def requirement(self, value: float, *, source: str, source_ids: tuple[str, ...]) -> _Hole:
+        """Claim this existing bore diameter for external semantic source identities.
+
+        This changes no label: the canonical hole callout already prints the nominal value.
+        Generated AP242 scripts use it to retain ownership without adding a duplicate dim.
+        """
+        self._sheet._tolerances[(self._token, "nominal_requirement", "bore.diameter")] = (
+            _nominal_requirement(value, source=source, source_ids=source_ids)
+        )
+        return self
+
     def cbore(
         self, obj=None, *, diameter: float | None = None, depth: float | None = None
     ) -> _Hole:
@@ -475,6 +518,22 @@ class _Dim(_Nameable):
         for the nominal ⌀. Raises for a class/size outside the built-in table (#29)."""
         self._sheet._tolerances[(self._token, "diameter")] = fit_class(
             code, self._sheet._features[self._i].diameter, show
+        )
+        return self
+
+    def requirement(
+        self,
+        value: float,
+        *,
+        on: str | None = None,
+        source: str,
+        source_ids: tuple[str, ...],
+    ) -> _Dim:
+        """Claim a canonical diameter for external semantic source identities."""
+        target = on or self._kind
+        parameter = _requirement_parameter(self._sheet._features[self._i], target)
+        self._sheet._tolerances[(self._token, "nominal_requirement", parameter.parameter_id)] = (
+            _nominal_requirement(value, source=source, source_ids=source_ids)
         )
         return self
 
@@ -620,7 +679,11 @@ class _Params(_Nameable):
             # A whole-feature tolerance supersedes any earlier per-role override on this
             # feature — bare means "all alike", so it is order-independent (#807 review):
             # drop this feature's role-keyed (3-tuple) entries, then set the kind keys.
-            for key in [k for k in self._sheet._tolerances if len(k) == 3 and k[0] == self._token]:
+            for key in [
+                k
+                for k in self._sheet._tolerances
+                if len(k) == 3 and k[0] == self._token and k[1] != "nominal_requirement"
+            ]:
                 del self._sheet._tolerances[key]
             for kind in set(roles.values()):
                 self._sheet._tolerances[(self._token, kind)] = val
@@ -633,6 +696,21 @@ class _Params(_Nameable):
             )
         role = cands[0]
         self._sheet._tolerances[(self._token, roles[role], role)] = val
+        return self
+
+    def requirement(
+        self,
+        value: float,
+        *,
+        on: str,
+        source: str,
+        source_ids: tuple[str, ...],
+    ) -> _Params:
+        """Claim the feature's canonical diameter for external semantic source identities."""
+        parameter = _requirement_parameter(self._sheet._features[self._i], on)
+        self._sheet._tolerances[(self._token, "nominal_requirement", parameter.parameter_id)] = (
+            _nominal_requirement(value, source=source, source_ids=source_ids)
+        )
         return self
 
     def note(self, text, ref=None, *, view: str | None = None, side: str | None = None) -> _Params:
@@ -1120,6 +1198,7 @@ class Sheet:
         source_id: str = "",
         lowering_blockers: tuple[str, ...] = (),
         rendering_blockers: tuple[str, ...] = (),
+        cylindrical_refs=(),
     ) -> _Params:
         """Declare a drafting dimension from explicit **measured** values.
 
@@ -1161,6 +1240,7 @@ class Sheet:
                 source_id=source_id,
                 lowering_blockers=lowering_blockers,
                 rendering_blockers=rendering_blockers,
+                cylindrical_refs=cylindrical_refs,
             )
         )
         # A handle like every other declaration verb (#922). A measured dimension carries its

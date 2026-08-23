@@ -5087,7 +5087,10 @@ def _authored_with_usable_references(record) -> bool:
     return (
         record.kind == "authored_dimension"
         and record.value > 0
-        and len(record.ref_pts) >= 2
+        and (
+            len(record.ref_pts) >= 2
+            or (record.pmi_kind == "diameter" and bool(getattr(record, "cylindrical_refs", ())))
+        )
         and not getattr(record, "rendering_blockers", ())
     )
 
@@ -5182,6 +5185,31 @@ def _bore_info(rec):
     The diameter/radius is then placed perpendicular to the bore axis in the
     view where the bore appears as a circle.  Returns None if ref_bbox absent.
     """
+    cylinders = tuple(getattr(rec, "cylindrical_refs", ()))
+    if cylinders:
+        axes = {reference.principal_axis for reference in cylinders}
+        if len(axes) != 1 or "?" in axes:
+            return None
+        first_origin = cylinders[0].axis_origin
+        if any(
+            any(
+                abs(left - right) > 0.01
+                for left, right in zip(first_origin, ref.axis_origin, strict=True)
+            )
+            for ref in cylinders[1:]
+        ):
+            # Distinct parallel cylinders may belong to a canonical pattern, but once that
+            # correlation fails their centroid is not a referenced surface. Never invent a
+            # leader target between them (#1296 independent review).
+            return None
+        centres = tuple(reference.midpoint for reference in cylinders)
+        return (
+            next(iter(axes)),
+            sum(point[0] for point in centres) / len(centres),
+            sum(point[1] for point in centres) / len(centres),
+            sum(point[2] for point in centres) / len(centres),
+        )
+
     bb = rec.ref_bbox
     if bb is None:
         return None

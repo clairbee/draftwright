@@ -20,6 +20,7 @@ GeomTolerance, Datum).
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -33,6 +34,7 @@ from draftwright._pmi_part21 import (
     read_geometric_tolerances,
     read_manufacturing_requirements,
 )
+from draftwright.model.ir import CylindricalReference
 
 _log = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ try:
     from OCP.TCollection import TCollection_AsciiString, TCollection_ExtendedString
     from OCP.TDF import TDF_LabelSequence, TDF_Tool
     from OCP.TDocStd import TDocStd_Document
-    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
     from OCP.TopExp import TopExp
     from OCP.TopoDS import TopoDS
     from OCP.TopTools import TopTools_IndexedMapOfShape
@@ -199,6 +201,8 @@ class PmiRecord:
         reference_axis: Axis normal to a proven datum reference plane.
         semantic_name: Stable source name for a semantic manufacturing requirement.
         shape_aspect_ids: Part21 shape aspects associating a semantic requirement to geometry.
+        cylindrical_refs: Canonical finite-cylinder topology referenced by a Size_Diameter
+                        requirement. Empty for other dimension families or unresolved geometry.
     """
 
     kind: str
@@ -232,6 +236,7 @@ class PmiRecord:
     # Kept separate from ``lowering_blockers``: an imported requirement may fail to enrich a
     # canonical owner yet remain a truthful standalone dimension (#1116/#1209).
     rendering_blockers: tuple[str, ...] = ()
+    cylindrical_refs: tuple[CylindricalReference, ...] = ()
 
 
 PmiExtractionOutcome = Literal[
@@ -490,6 +495,113 @@ def _reference_geometry(label, shape_tool):
         label, shape_tool
     )
     return points, ref_bbox, dominant_axis, reasons
+
+
+def _cylindrical_references(label, shape_tool):
+    """Return canonical finite cylinders for a Size_Diameter relationship.
+
+    A diameter may truthfully reference one lateral cylindrical face.  XCAF commonly
+    repeats that same face in a logical group, so geometrically identical values coalesce;
+    distinct cylinders (for example pattern members) remain distinct.  No bbox participates
+    in the axis, radius, line, span, or internal/external decision (#1296).
+    """
+    first_refs = TDF_LabelSequence()
+    second_refs = TDF_LabelSequence()
+    XCAFDoc_DimTolTool.GetRefShapeLabel_s(label, first_refs, second_refs)
+    references: list[CylindricalReference] = []
+    reasons: list[str] = []
+    source_count = first_refs.Length() + second_refs.Length()
+    for refs in (first_refs, second_refs):
+        for index in range(1, refs.Length() + 1):
+            shape = shape_tool.GetShape_s(refs.Value(index))
+            if shape is None or shape.IsNull():
+                reasons.append("one diameter reference shape is unavailable")
+                continue
+            try:
+                if shape.ShapeType() != TopAbs_FACE:
+                    reasons.append("one diameter reference is not a face")
+                    continue
+                surface = BRepAdaptor_Surface(TopoDS.Face_s(shape))
+                if surface.GetType() != GeomAbs_Cylinder:
+                    reasons.append("one diameter reference face is not cylindrical")
+                    continue
+                orientation = shape.Orientation()
+                sense: Literal["external", "internal"]
+                if orientation == TopAbs_FORWARD:
+                    sense = "external"
+                elif orientation == TopAbs_REVERSED:
+                    sense = "internal"
+                else:
+                    reasons.append("one cylindrical reference has unsupported face orientation")
+                    continue
+                cylinder = surface.Cylinder()
+                axis = cylinder.Axis()
+                point = axis.Location()
+                direction = axis.Direction()
+                references.append(
+                    CylindricalReference.canonical(
+                        axis_point=(point.X(), point.Y(), point.Z()),
+                        axis_direction=(direction.X(), direction.Y(), direction.Z()),
+                        radius=float(cylinder.Radius()),
+                        local_interval=(
+                            float(surface.FirstVParameter()),
+                            float(surface.LastVParameter()),
+                        ),
+                        sense=sense,
+                    )
+                )
+            except Exception as exc:
+                reasons.append(
+                    f"one cylindrical reference could not be measured ({_failure_reason(exc)})"
+                )
+    if source_count == 0:
+        reasons.append("diameter reference geometry is unavailable")
+
+    # XCAF emits repeated labels for one logical cylindrical face in several benchmark
+    # files. Use a precision finer than generated-Sheet output to collapse only values that
+    # are genuinely the same topology, never nearby equal-diameter members.
+    unique: dict[tuple, CylindricalReference] = {}
+    for reference in references:
+        signature = (
+            *(round(value, 9) for value in reference.axis_origin),
+            *(round(value, 9) for value in reference.axis_direction),
+            round(reference.radius, 9),
+            *(round(value, 9) for value in reference.axial_interval),
+            reference.sense,
+        )
+        unique.setdefault(signature, reference)
+    return tuple(unique.values()), tuple(dict.fromkeys(reasons))
+
+
+def _diameter_reference_blockers(
+    references: tuple[CylindricalReference, ...], nominal: float, reasons: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Facts that make a Size_Diameter relationship unsafe to draw or correlate."""
+    blockers = list(reasons)
+    if not references:
+        if not blockers:
+            blockers.append("diameter dimension needs a measurable cylindrical-face reference")
+        return tuple(dict.fromkeys(blockers))
+    axes = {reference.principal_axis for reference in references}
+    if "?" in axes:
+        blockers.append("diameter cylindrical-reference axis is not principal-axis aligned")
+    elif len(axes) != 1:
+        blockers.append("diameter references do not share one cylinder axis direction")
+    senses = {reference.sense for reference in references}
+    if len(senses) != 1:
+        blockers.append("diameter references mix internal and external cylindrical faces")
+    value_tol = max(0.01, abs(nominal) * 5e-4)
+    mismatches = [
+        reference.diameter
+        for reference in references
+        if not math.isclose(reference.diameter, nominal, rel_tol=0.0, abs_tol=value_tol)
+    ]
+    if mismatches:
+        values = ", ".join(f"{value:.6g}" for value in mismatches)
+        blockers.append(
+            f"cylindrical reference diameter(s) {values} mm differ from nominal {nominal:.6g} mm"
+        )
+    return tuple(dict.fromkeys(blockers))
 
 
 def _datum_geometry_from_shapes(shapes):
@@ -891,6 +1003,7 @@ def _dimension_record(
     partial_reasons.extend(reference_reasons)
     kind = _DIM_TYPE.get(type_code, f"type{type_code}")
     rendering_blockers: tuple[str, ...] = ()
+    cylindrical_refs: tuple[CylindricalReference, ...] = ()
     if kind in ("linear", "thickness"):
         points, dominant_axis, station_reasons = _linear_reference_stations(group_stations, value)
         if kind == "thickness":
@@ -901,6 +1014,25 @@ def _dimension_record(
                 for reason in station_reasons
             )
         rendering_blockers = _dimension_geometry_blockers(kind, reference_reasons, station_reasons)
+    elif type_code == 15:  # XCAFDimTolObjects_DimensionType_Size_Diameter
+        cylindrical_refs, cylinder_reasons = _cylindrical_references(label, shape_tool)
+        # The generic XCAF relationship already owns missing-reference failures.  Do not
+        # restate the same absent shape as a diameter-specific extraction failure; that
+        # would turn one partial outcome into several aliases.  Once a cylinder was
+        # recovered, its topology is self-sufficient and bbox measurement failures are
+        # irrelevant to rendering/correlation.
+        effective_reasons = cylinder_reasons
+        if not cylindrical_refs and reference_reasons:
+            effective_reasons = reference_reasons
+        else:
+            partial_reasons.extend(cylinder_reasons)
+        rendering_blockers = _diameter_reference_blockers(
+            cylindrical_refs, value, effective_reasons
+        )
+        if cylindrical_refs:
+            points = tuple(reference.midpoint for reference in cylindrical_refs)
+            axes = {reference.principal_axis for reference in cylindrical_refs}
+            dominant_axis = next(iter(axes)) if len(axes) == 1 and "?" not in axes else "?"
     lowering_blockers = tuple(dict.fromkeys(partial_reasons))
     blockers = tuple(dict.fromkeys((*lowering_blockers, *rendering_blockers)))
     return (
@@ -927,6 +1059,7 @@ def _dimension_record(
             source_category="dimension",
             lowering_blockers=lowering_blockers,
             rendering_blockers=rendering_blockers,
+            cylindrical_refs=cylindrical_refs,
         ),
         blockers,
     )

@@ -35,6 +35,133 @@ if TYPE_CHECKING:
     from draftwright.fits import FitClass
 
 Point = tuple[float, float, float]
+CylinderSense = Literal["external", "internal"]
+
+
+def _finite_point3(name: str, value) -> Point:
+    try:
+        result = tuple(float(component) for component in value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite 3-vector") from exc
+    if len(result) != 3 or not all(isfinite(component) for component in result):
+        raise ValueError(f"{name} must be a finite 3-vector")
+    return (result[0], result[1], result[2])
+
+
+@dataclass(frozen=True)
+class CylindricalReference:
+    """Kernel-free evidence for one authored reference to a finite cylindrical face.
+
+    ``axis_origin`` is the perpendicular foot from world origin to the cylinder axis.
+    ``axis_direction`` is a canonical unit vector whose largest absolute component is
+    positive, and ``axial_interval`` is measured from that origin along the direction.
+    Those choices remove the arbitrary axis-location and direction signs a geometry kernel
+    may report, so equivalent faces retain stable value identity across STEP round-trips.
+    """
+
+    axis_origin: Point
+    axis_direction: Point
+    radius: float
+    axial_interval: tuple[float, float]
+    sense: CylinderSense
+
+    def __post_init__(self) -> None:
+        origin = _finite_point3("axis_origin", self.axis_origin)
+        direction = _finite_point3("axis_direction", self.axis_direction)
+        norm = hypot(*direction)
+        if abs(norm - 1.0) > 2e-6:
+            raise ValueError("axis_direction must be unit length")
+        dominant = max(range(3), key=lambda index: abs(direction[index]))
+        if direction[dominant] <= 0:
+            raise ValueError("axis_direction must have a positive dominant component")
+        if abs(sum(a * b for a, b in zip(origin, direction, strict=True))) > 2e-6:
+            raise ValueError("axis_origin must be perpendicular to axis_direction")
+        try:
+            lo, hi = (float(value) for value in self.axial_interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("axial_interval must contain two finite values") from exc
+        if not (isfinite(lo) and isfinite(hi) and hi > lo):
+            raise ValueError("axial_interval must be finite and increasing")
+        if isinstance(self.radius, bool):
+            raise ValueError("radius must be finite and positive")
+        radius = float(self.radius)
+        if not isfinite(radius) or radius <= 0:
+            raise ValueError("radius must be finite and positive")
+        if self.sense not in ("external", "internal"):
+            raise ValueError("sense must be 'external' or 'internal'")
+        object.__setattr__(self, "axis_origin", origin)
+        object.__setattr__(self, "axis_direction", direction)
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "axial_interval", (lo, hi))
+
+    @classmethod
+    def canonical(
+        cls,
+        *,
+        axis_point,
+        axis_direction,
+        radius: float,
+        local_interval,
+        sense: CylinderSense,
+    ) -> CylindricalReference:
+        """Canonicalise a kernel axis point/direction and its local finite interval."""
+        point = _finite_point3("axis_point", axis_point)
+        raw = _finite_point3("axis_direction", axis_direction)
+        norm = hypot(*raw)
+        if norm <= 1e-12:
+            raise ValueError("axis_direction must be non-zero")
+        unit = tuple(component / norm for component in raw)
+        dominant = max(range(3), key=lambda index: abs(unit[index]))
+        sign = -1.0 if unit[dominant] < 0 else 1.0
+        direction = tuple(sign * component for component in unit)
+        along = sum(a * b for a, b in zip(point, direction, strict=True))
+        origin = tuple(
+            coordinate - along * component
+            for coordinate, component in zip(point, direction, strict=True)
+        )
+        try:
+            first, last = (float(value) for value in local_interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("local_interval must contain two finite values") from exc
+        if not (isfinite(first) and isfinite(last) and last > first):
+            raise ValueError("local_interval must be finite and increasing")
+        # A local parameter endpoint is ``point + v * raw_unit``. Project both world
+        # endpoints onto the canonical axis so a negative kernel direction is harmless.
+        stations = tuple(along + sign * value for value in (first, last))
+        interval = (min(stations), max(stations))
+        clean_origin = tuple(0.0 if abs(value) < 1e-12 else value for value in origin)
+        clean_direction = tuple(0.0 if abs(value) < 1e-12 else value for value in direction)
+        return cls(
+            axis_origin=clean_origin,  # type: ignore[arg-type]
+            axis_direction=clean_direction,  # type: ignore[arg-type]
+            radius=radius,
+            axial_interval=interval,
+            sense=sense,
+        )
+
+    @property
+    def diameter(self) -> float:
+        return 2.0 * self.radius
+
+    @property
+    def principal_axis(self) -> str:
+        """``'X'``/``'Y'``/``'Z'`` when the topology axis is orthographic, else ``'?'``."""
+        dominant = max(range(3), key=lambda index: abs(self.axis_direction[index]))
+        if abs(self.axis_direction[dominant] - 1.0) > 1e-6 or any(
+            abs(self.axis_direction[index]) > 1e-6 for index in range(3) if index != dominant
+        ):
+            return "?"
+        return "XYZ"[dominant]
+
+    @property
+    def midpoint(self) -> Point:
+        station = sum(self.axial_interval) / 2.0
+        return tuple(
+            origin + station * direction
+            for origin, direction in zip(self.axis_origin, self.axis_direction, strict=True)
+        )  # type: ignore[return-value]
+
+
 ParamKind = Literal["diameter", "length", "depth", "radius", "angle", "location", "thread"]
 AUTHORED_DIMENSION_KINDS = frozenset(
     {
@@ -200,6 +327,39 @@ class ToleranceDecoration:
     value: float | tuple[float, float] | FitClass
     source: str
     source_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NominalRequirement:
+    """External ownership of an already-canonical nominal dimension.
+
+    Unlike :class:`ToleranceDecoration`, this adds no printed suffix: the feature's normal
+    planned diameter is already the truthful visual annotation.  The wrapper records which
+    imported semantic sources own that existing annotation, so provenance survives lowering,
+    lint reconciliation, and generated-Sheet round trips without creating a duplicate.
+    """
+
+    value: float
+    source: str
+    source_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, bool):
+            raise ValueError("nominal requirement value must be finite and positive")
+        value = float(self.value)
+        if not isfinite(value) or value <= 0:
+            raise ValueError("nominal requirement value must be finite and positive")
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError("nominal requirement source must be a non-empty string")
+        ids = tuple(
+            dict.fromkeys(str(item).strip() for item in self.source_ids if str(item).strip())
+        )
+        if not ids:
+            raise ValueError("nominal requirement needs at least one source id")
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "source_ids", ids)
 
 
 def display(p: DimParameter) -> str:
@@ -1361,6 +1521,10 @@ class AuthoredDimension:
     # ``lowering_blockers``: failure to correlate to a canonical owner still permits the
     # standalone authored-dimension fallback promised by #1116 (#1209 review).
     rendering_blockers: tuple[str, ...] = ()
+    # Finite-cylinder topology proven by the STEP extractor for Size_Diameter. A single
+    # value is enough to render or correlate a diameter; generic linear dimensions still
+    # require two reference stations.
+    cylindrical_refs: tuple[CylindricalReference, ...] = ()
     kind: ClassVar[str] = "authored_dimension"
 
     @property
