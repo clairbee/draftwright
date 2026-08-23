@@ -4979,7 +4979,7 @@ def _record_pmi_drop(ctx, dwg, ax, label, rec):
 
 def _record_pmi_unrenderable(dwg, label, rec, *, ctx):
     """Record an authored dimension whose reference geometry can't form a witness (fewer
-    than two distinct reference points, or a sub-legible span). Distinct from
+    than two distinct reference points, or a zero span). Distinct from
     ``pmi_dropped`` (a *placement* failure): this is a *validation* failure, so a caller
     sees a specific reason instead of a misleading "no room" — an authored dim is only
     ``pmi_dropped`` after a real candidate reaches the corridor solver and cannot fit (#562)."""
@@ -4994,7 +4994,7 @@ def _record_pmi_unrenderable(dwg, label, rec, *, ctx):
         "error" if source_id else "warning",
         "authored_dim_degenerate",
         f"authored dimension {label!r} has degenerate reference geometry (needs two "
-        "distinct reference points spanning a legible distance)",
+        "distinct reference points spanning a nonzero distance)",
         source=source_id,
     )
 
@@ -5084,7 +5084,36 @@ def _authored_with_usable_references(record) -> bool:
     Shared by the renderable and refused filters so they cannot drift: a predicate added to
     one only would make a record silently NEITHER drawn nor reported.
     """
-    return record.kind == "authored_dimension" and record.value > 0 and len(record.ref_pts) >= 2
+    return (
+        record.kind == "authored_dimension"
+        and record.value > 0
+        and len(record.ref_pts) >= 2
+        and not getattr(record, "lowering_blockers", ())
+    )
+
+
+def _blocked_authored_dimension_records(records):
+    """Source dimensions retained in typed IR but unsafe to draw from incomplete evidence."""
+    return [
+        record
+        for record in records
+        if record.kind == "authored_dimension"
+        and record.value > 0
+        and getattr(record, "lowering_blockers", ())
+    ]
+
+
+def _record_blocked_authored_dimension(ctx, rec):
+    source_id = getattr(rec, "source_id", "")
+    reasons = "; ".join(rec.lowering_blockers)
+    ctx.record_issue(
+        "error" if source_id else "warning",
+        "authored_dim_source_unresolved",
+        f"authored dimension {getattr(rec, 'label', '')!r} is not drawn because its source "
+        f"intent is unresolved: {reasons}",
+        source=source_id,
+        outcome_stage="validation",
+    )
 
 
 def _record_unsupported_dimension_kind(ctx, rec):
@@ -5172,11 +5201,13 @@ def _bore_info(rec):
 
 
 def _pmi_witness_from_bbox(rec, view: str, a):
-    """Witness points from the outer edges of the combined reference bbox.
+    """Witness points at authored reference stations, supported by their combined bbox.
 
-    Gives the correct span for linear dims where both ref faces are flush
-    (e.g. two parallel faces of a slot or step).  Not suitable for bore
-    diameters — use _bore_info instead.
+    A bbox describes the size of the referenced faces, not the relationship between them.
+    Its largest extent sent GRM-03's short axial dimensions across the circular end faces.
+    ``ref_pts`` carries the proven linear stations; the bbox remains useful only for the
+    transverse witness-support coordinate. Not suitable for bore diameters — use
+    :func:`_bore_info` instead (#1209).
 
     When the record carries no ``ref_bbox`` (an authored ``Sheet.measured_dimension()`` with
     only ``ref_pts``, #562), the span is derived from the ref points — so a ref_pts-only
@@ -5199,29 +5230,39 @@ def _pmi_witness_from_bbox(rec, view: str, a):
         bb = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
     xmin, ymin, zmin, xmax, ymax, zmax = bb
     ax = rec.dominant_axis
+    pts = rec.ref_pts
+    if len(pts) < 2:
+        return None
 
     if view == "front" and ax == "X":
-        p1 = (FX(xmin), FZ((zmin + zmax) / 2), 0)
-        p2 = (FX(xmax), FZ((zmin + zmax) / 2), 0)
+        lo, hi = min(point[0] for point in pts), max(point[0] for point in pts)
+        p1 = (FX(lo), FZ((zmin + zmax) / 2), 0)
+        p2 = (FX(hi), FZ((zmin + zmax) / 2), 0)
         avg_t = FZ((zmin + zmax) / 2)
     elif view == "front" and ax == "Z":
-        p1 = (FX((xmin + xmax) / 2), FZ(zmin), 0)
-        p2 = (FX((xmin + xmax) / 2), FZ(zmax), 0)
+        lo, hi = min(point[2] for point in pts), max(point[2] for point in pts)
+        p1 = (FX((xmin + xmax) / 2), FZ(lo), 0)
+        p2 = (FX((xmin + xmax) / 2), FZ(hi), 0)
         avg_t = FX((xmin + xmax) / 2)
     elif view == "side" and ax == "Y":
-        p1 = (SX(ymin), SZ((zmin + zmax) / 2), 0)
-        p2 = (SX(ymax), SZ((zmin + zmax) / 2), 0)
+        lo, hi = min(point[1] for point in pts), max(point[1] for point in pts)
+        p1 = (SX(lo), SZ((zmin + zmax) / 2), 0)
+        p2 = (SX(hi), SZ((zmin + zmax) / 2), 0)
         avg_t = SZ((zmin + zmax) / 2)
     elif view == "plan" and ax == "Y":
         avg_x = (xmin + xmax) / 2
-        p1 = (PX(avg_x), PY(ymin), 0)
-        p2 = (PX(avg_x), PY(ymax), 0)
+        lo, hi = min(point[1] for point in pts), max(point[1] for point in pts)
+        p1 = (PX(avg_x), PY(lo), 0)
+        p2 = (PX(avg_x), PY(hi), 0)
         avg_t = PX(avg_x)
     else:
         return None
 
     span = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    if span < 3:
+    # The helper draws short dimensions with external arrows/text. Refusing them at an
+    # arbitrary 3 page-mm threshold lost GRM-03's valid 0.5 mm axial station even though
+    # the shared strip solve can place it without changing the measured path (#1209).
+    if span <= 1e-6:
         return None
     return p1, p2, avg_t
 
@@ -5566,8 +5607,8 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
     Replaces the engine's ``_annotate_pmi``.
 
     Called from ``_auto_annotate`` before ``drain_corridors`` so authored PMI
-    co-solves with automatic strip candidates. Skips records whose page
-    projection is degenerate (< 3 mm span).
+    co-solves with automatic strip candidates. Skips only records whose page
+    projection has no measurable span; short dimensions use the helper's external layout.
 
     View assignment:
     - dominant X → front view, fv_zones.above / fv_zones.below
@@ -5579,6 +5620,8 @@ def render_pmi(dwg, model, a, *, ctx) -> int:
     draft = dwg.draft
     pmi = [f for f in model.features if f.kind in ("authored_dimension", "pmi")]
     usable = _renderable_pmi_records(pmi)
+    for blocked in _blocked_authored_dimension_records(pmi):
+        _record_blocked_authored_dimension(ctx, blocked)
     for refused in _unsupported_kind_records(pmi):
         _record_unsupported_dimension_kind(ctx, refused)
     n_gtol = sum(1 for r in pmi if r.pmi_kind not in AUTHORED_DIMENSION_KINDS and r.value > 0)

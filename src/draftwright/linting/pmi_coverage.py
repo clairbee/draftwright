@@ -220,6 +220,7 @@ _EXPLAINED_OMISSION_CODES = frozenset(
         # the same source. Fixing that only for the code #1177 introduced would have left
         # the defect in place next door.
         "authored_dim_degenerate",
+        "authored_dim_source_unresolved",
     }
 )
 
