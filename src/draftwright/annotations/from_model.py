@@ -1445,7 +1445,7 @@ def _render_typed_diameter_leaders(dwg, a, indexed_buckets, *, prefix, start, ct
                 dx, dy = float(elbow[0]) - float(tip[0]), float(elbow[1]) - float(tip[1])
                 length = math.hypot(dx, dy) or 1.0
                 px, py = -dy / length, dx / length
-                for lane in (0, 4, -4, 8, -8):
+                for lane in (0, 8, -8):
                     yield (
                         tip,
                         (
