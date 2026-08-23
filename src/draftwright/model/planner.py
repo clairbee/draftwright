@@ -480,14 +480,21 @@ def _decorated(model: PartModel, feature: Feature, param: DimParameter) -> DimPa
     undecorated one made a toleranced boss height look interchangeable with a plain overall
     thickness (#1154 review).
     """
+    from draftwright.model.ir import NominalRequirement, ToleranceDecoration
+
+    nominal = model.decorations.get((feature, "nominal_requirement", param.parameter_id))
+    if isinstance(nominal, NominalRequirement) and abs(float(param.value) - nominal.value) > 1e-6:
+        raise ValueError(
+            f"{nominal.source} nominal requirement {nominal.value:g} disagrees with "
+            f"{param.parameter_id}={param.value:g}"
+        )
+
     tol = model.decorations.get((feature, param.kind, param.role))
     if tol is None:
         tol = model.decorations.get((feature, param.kind))
     # Imported AP242 provenance belongs to the authored aspect, not to geometry and not to
     # the renderer's tolerance algebra.  Unwrap it at the planner waist so every downstream
     # label/render path continues to see the established float/tuple/FitClass contract.
-    from draftwright.model.ir import ToleranceDecoration
-
     if isinstance(tol, ToleranceDecoration):
         tol = tol.value
     return param if tol is None else replace(param, tolerance=tol)

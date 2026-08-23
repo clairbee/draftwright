@@ -14,10 +14,15 @@ from decimal import Decimal
 
 from draftwright.model.ir import (
     AuthoredDimension,
+    BossFeature,
+    CylindricalReference,
     Feature,
     HoleFeature,
+    NominalRequirement,
     PartModel,
     PatternFeature,
+    RotationalFeature,
+    StepFeature,
     ToleranceDecoration,
 )
 
@@ -274,3 +279,276 @@ def lower_ap242_hole_tolerances(model: PartModel) -> PartModel:
 
 def _diameter_text(value: float) -> str:
     return f"diameter {value:g}"
+
+
+def _same_number(left: float, right: float, *, abs_tol: float = 1e-6) -> bool:
+    return abs(float(left) - float(right)) <= max(abs_tol, abs(float(right)) * 1e-6)
+
+
+def _same_axis_line(reference: CylindricalReference, point, axis: str) -> bool:
+    axis_index = "xyz".index(axis)
+    return all(
+        abs(reference.axis_origin[index] - float(point[index])) <= 0.01
+        for index in range(3)
+        if index != axis_index
+    )
+
+
+def _external_owner_matches(
+    reference: CylindricalReference, feature: StepFeature | BossFeature
+) -> bool:
+    if reference.sense != "external" or reference.principal_axis != feature.frame.axis.upper():
+        return False
+    if not _same_number(reference.diameter, feature.diameter, abs_tol=0.01):
+        return False
+    if not _same_axis_line(reference, feature.frame.origin, feature.frame.axis):
+        return False
+    span = feature.span
+    if span is None:
+        return False
+    axis_index = "xyz".index(feature.frame.axis)
+    owner_lo, owner_hi = sorted((float(span[0][axis_index]), float(span[1][axis_index])))
+    source_lo, source_hi = reference.axial_interval
+    # A cylindrical source face may be a truthful subset of a recognised turned segment
+    # (GRM-03's knurled head divides the face topology). It may not cross the segment ends.
+    return owner_lo - 0.01 <= source_lo < source_hi <= owner_hi + 0.01
+
+
+def _internal_member_matches(
+    reference: CylindricalReference, feature: HoleFeature, member, bbox
+) -> bool:
+    if reference.sense != "internal" or reference.principal_axis != feature.frame.axis.upper():
+        return False
+    if not _same_number(reference.diameter, feature.diameter, abs_tol=0.01):
+        return False
+    if not _same_axis_line(reference, member, feature.frame.axis):
+        return False
+    axis_index = "xyz".index(feature.frame.axis)
+    lo, hi = reference.axial_interval
+    station = float(member[axis_index])
+    if feature.through:
+        box_lo = (bbox.min.X, bbox.min.Y, bbox.min.Z)[axis_index]
+        box_hi = (bbox.max.X, bbox.max.Y, bbox.max.Z)[axis_index]
+        if not (lo - 0.01 <= station <= hi + 0.01):
+            return False
+        if lo < box_lo - 0.01 or hi > box_hi + 0.01:
+            return False
+        if min(hi, box_hi) - max(lo, box_lo) <= 0.01:
+            return False
+        return feature.depth is None or _same_number(hi - lo, feature.depth, abs_tol=0.01)
+    if feature.depth is None:
+        return False
+    return (
+        _same_number(hi - lo, feature.depth, abs_tol=0.01)
+        and min(abs(lo - station), abs(hi - station)) <= 0.01
+    )
+
+
+def _nominal_owner_key(feature) -> tuple:
+    parameter = {
+        "step": "step.diameter",
+        "boss": "boss.diameter",
+        "hole": "bore",
+        "pattern": "bore",
+        "rotational": "od",
+    }[feature.kind]
+    if "." not in parameter:
+        parameter = f"{parameter}.diameter"
+    return (feature, "nominal_requirement", parameter)
+
+
+def _standalone_cylinder_blocker(references: tuple[CylindricalReference, ...]) -> str:
+    """Why a cylinder group cannot truthfully anchor one standalone diameter mark."""
+    if len(references) < 2:
+        return ""
+    first = references[0]
+    if any(
+        any(
+            abs(left - right) > 0.01
+            for left, right in zip(first.axis_origin, ref.axis_origin, strict=True)
+        )
+        for ref in references[1:]
+    ):
+        return (
+            "standalone diameter fallback references multiple distinct cylinder axis lines; "
+            "no single truthful leader target exists"
+        )
+    return ""
+
+
+def _apply_standalone_cylinder_blockers(model: PartModel) -> PartModel:
+    """Keep the no-invented-centroid decision on every diameter fallback."""
+    rebuilt: list[Feature] = []
+    changed = False
+    for feature in model.features:
+        if isinstance(feature, AuthoredDimension) and feature.dimension_kind == "diameter":
+            blocker = _standalone_cylinder_blocker(feature.cylindrical_refs)
+            if blocker and blocker not in feature.rendering_blockers:
+                feature = replace(
+                    feature,
+                    rendering_blockers=(*feature.rendering_blockers, blocker),
+                )
+                changed = True
+        rebuilt.append(feature)
+    return replace(model, features=rebuilt) if changed else model
+
+
+def _nominal_owner_matches(
+    dimension: AuthoredDimension,
+    feature: StepFeature | BossFeature | HoleFeature | PatternFeature | RotationalFeature,
+    bbox,
+) -> bool:
+    references = dimension.cylindrical_refs
+    if isinstance(feature, (StepFeature, BossFeature)):
+        return all(_external_owner_matches(reference, feature) for reference in references)
+    if isinstance(feature, RotationalFeature):
+        axis = feature.frame.axis
+        axis_index = "xyz".index(axis)
+        box_lo = (bbox.min.X, bbox.min.Y, bbox.min.Z)[axis_index]
+        box_hi = (bbox.max.X, bbox.max.Y, bbox.max.Z)[axis_index]
+        return all(
+            reference.sense == "external"
+            and reference.principal_axis == axis.upper()
+            and _same_number(reference.diameter, feature.od, abs_tol=0.01)
+            and _same_axis_line(reference, feature.frame.origin, axis)
+            and box_lo - 0.01
+            <= reference.axial_interval[0]
+            < reference.axial_interval[1]
+            <= box_hi + 0.01
+            for reference in references
+        )
+
+    hole = feature.member if isinstance(feature, PatternFeature) else feature
+    members = tuple(feature.members) or (feature.frame.origin,)
+    covered: set[int] = set()
+    for reference in references:
+        matches = [
+            index
+            for index, member in enumerate(members)
+            if _internal_member_matches(reference, hole, member, bbox)
+        ]
+        if len(matches) != 1:
+            return False
+        covered.add(matches[0])
+    # A grouped canonical callout states the requirement for the whole group. Do not attach
+    # one member's source ownership to its untargeted siblings; leave that record as the
+    # standalone typed-cylinder fallback instead.
+    return len(covered) == len(members)
+
+
+def lower_ap242_nominal_diameters(model: PartModel) -> PartModel:
+    """Give untoleranced Size_Diameter PMI to an existing canonical diameter owner.
+
+    Correlation uses the referenced cylinder's topology axis, line, finite span, polarity,
+    and radius. Nominal value is a consistency check, never the correspondence key. A source
+    that cannot prove one owner remains an :class:`AuthoredDimension`; its typed cylinder is
+    still sufficient for the shared standalone placement path (#1296).
+    """
+    targets: list[
+        tuple[
+            int,
+            StepFeature | BossFeature | HoleFeature | PatternFeature | RotationalFeature,
+        ]
+    ] = [
+        (index, feature)
+        for index, feature in enumerate(model.features)
+        if isinstance(
+            feature,
+            (StepFeature, BossFeature, HoleFeature, PatternFeature, RotationalFeature),
+        )
+    ]
+    dimensions = {
+        index: feature
+        for index, feature in enumerate(model.features)
+        if isinstance(feature, AuthoredDimension)
+        and feature.dimension_kind == "diameter"
+        and feature.source == "ap242_pmi"
+        and feature.cylindrical_refs
+        and not any(
+            value is not None
+            for value in (
+                feature.lower_tol,
+                feature.upper_tol,
+                feature.lower_bound,
+                feature.upper_bound,
+            )
+        )
+    }
+    if not dimensions:
+        return _apply_standalone_cylinder_blockers(model)
+
+    proposals: dict[
+        int,
+        tuple[
+            StepFeature | BossFeature | HoleFeature | PatternFeature | RotationalFeature,
+            tuple,
+        ],
+    ] = {}
+    blocked: dict[int, str] = {}
+    for dimension_index, dimension in dimensions.items():
+        if dimension.lowering_blockers or dimension.rendering_blockers:
+            continue
+        matches = [
+            feature
+            for _feature_index, feature in targets
+            if _nominal_owner_matches(dimension, feature, model.bbox)
+        ]
+        if any(isinstance(feature, StepFeature) for feature in matches):
+            matches = [feature for feature in matches if isinstance(feature, StepFeature)]
+        elif any(isinstance(feature, RotationalFeature) for feature in matches):
+            matches = [feature for feature in matches if isinstance(feature, RotationalFeature)]
+        if not matches:
+            blocked[dimension_index] = (
+                "unmatched diameter ownership: no canonical feature matches the source "
+                "cylinder topology"
+            )
+            continue
+        if len(matches) != 1:
+            blocked[dimension_index] = (
+                f"ambiguous diameter ownership: source cylinder topology matches "
+                f"{len(matches)} canonical features"
+            )
+            continue
+        owner = matches[0]
+        proposals[dimension_index] = (owner, _nominal_owner_key(owner))
+
+    decorations = dict(model.decorations)
+    consumed: set[int] = set()
+    for dimension_index, (owner, key) in proposals.items():
+        dimension = dimensions[dimension_index]
+        incoming_ids = _source_ids(dimension)
+        existing = decorations.get(key)
+        if existing is None:
+            decorations[key] = NominalRequirement(
+                value=dimension.value, source="ap242_pmi", source_ids=incoming_ids
+            )
+            consumed.add(dimension_index)
+            continue
+        if isinstance(existing, NominalRequirement) and _same_number(
+            existing.value, dimension.value
+        ):
+            decorations[key] = replace(
+                existing,
+                source_ids=tuple(dict.fromkeys((*existing.source_ids, *incoming_ids))),
+            )
+            consumed.add(dimension_index)
+            continue
+        blocked[dimension_index] = (
+            f"ambiguous diameter ownership: {owner.kind} diameter already has an authored aspect"
+        )
+
+    rebuilt: list[Feature] = []
+    for index, feature in enumerate(model.features):
+        if index in consumed:
+            continue
+        if index in blocked and isinstance(feature, AuthoredDimension):
+            feature = _block(feature, blocked[index])
+        rebuilt.append(feature)
+    return _apply_standalone_cylinder_blockers(
+        replace(model, features=rebuilt, decorations=decorations)
+    )
+
+
+def lower_ap242_dimensions(model: PartModel) -> PartModel:
+    """Run every geometry-correlated AP242 dimensional lowering at the IR waist."""
+    return lower_ap242_nominal_diameters(lower_ap242_hole_tolerances(model))

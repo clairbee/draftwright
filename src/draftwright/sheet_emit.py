@@ -38,7 +38,7 @@ from typing import Literal
 from build123d import Shape
 
 from draftwright.builder import build_drawing, detect_part_model
-from draftwright.model.ir import ToleranceDecoration
+from draftwright.model.ir import NominalRequirement, ToleranceDecoration
 
 
 @dataclass(frozen=True)
@@ -180,6 +180,11 @@ def _authored_n(value) -> str:
     return str(int(value)) if value.is_integer() else repr(value)
 
 
+def _parameter_n(value, parameter_id: str, exact_parameter: str | None):
+    """Spell an imported nominal owner's geometry losslessly; keep normal scripts tidy."""
+    return _authored_n(value) if parameter_id == exact_parameter else _n(value)
+
+
 def _authored_pt(point) -> str:
     return "(" + ", ".join(_authored_n(value) for value in point) + ")"
 
@@ -198,6 +203,21 @@ def _bbox_arg(bbox) -> str:
     return "None" if bbox is None else _pt(bbox)
 
 
+def _cylindrical_refs_arg(references) -> str:
+    values = []
+    for reference in references:
+        values.append(
+            "{"
+            f"'axis_origin': {_authored_pt(reference.axis_origin)}, "
+            f"'axis_direction': {_authored_pt(reference.axis_direction)}, "
+            f"'radius': {_authored_n(reference.radius)}, "
+            f"'axial_interval': {_authored_pt(reference.axial_interval)}, "
+            f"'sense': {reference.sense!r}"
+            "}"
+        )
+    return "(" + ", ".join(values) + ("," if len(values) == 1 else "") + ")"
+
+
 def _tuple_arg(values) -> str:
     vals = [str(_n(v)) for v in values]
     if len(vals) == 1:
@@ -205,10 +225,10 @@ def _tuple_arg(values) -> str:
     return "(" + ", ".join(vals) + ")"
 
 
-def _hole_line(f, object_ref: str | None = None) -> str:
+def _hole_line(f, object_ref: str | None = None, *, exact_parameter: str | None = None) -> str:
     if getattr(f, "profile", None) == "double_d":
         kw = [
-            f"major_diameter={_n(f.diameter)}",
+            f"major_diameter={_parameter_n(f.diameter, 'bore.diameter', exact_parameter)}",
             f"across_flats={_n(f.across_flats)}",
             f"at={_pt(f.frame.origin)}",
             f'axis="{f.frame.axis}"',
@@ -223,7 +243,7 @@ def _hole_line(f, object_ref: str | None = None) -> str:
         [object_ref]
         if object_ref is not None
         else [
-            f"diameter={_n(f.diameter)}",
+            f"diameter={_parameter_n(f.diameter, 'bore.diameter', exact_parameter)}",
             f"at={_pt(f.frame.origin)}",
             f'axis="{f.frame.axis}"',
         ]
@@ -264,14 +284,14 @@ def _hole_line(f, object_ref: str | None = None) -> str:
     return line
 
 
-def _member_hole_str(m) -> str:
+def _member_hole_str(m, *, exact_parameter: str | None = None) -> str:
     """The ``hole(...)`` template for a pattern member — carries its ⌀ AND its
     counterbore / spotface / countersink / blind-depth so a counterbored or countersunk
     bolt circle keeps those callouts on re-run (declare.hole takes depth=/through=/cbore=/
     spotface=/csink= kwargs)."""
     if getattr(m, "profile", None) == "double_d":
         kw = [
-            f"major_diameter={_n(m.diameter)}",
+            f"major_diameter={_parameter_n(m.diameter, 'bore.diameter', exact_parameter)}",
             f"across_flats={_n(m.across_flats)}",
             f"at={_pt(m.frame.origin)}",
             f'axis="{m.frame.axis}"',
@@ -282,7 +302,11 @@ def _member_hole_str(m) -> str:
         if m.profile_direction is not None:
             kw.append(f"profile_direction={_direction(m.profile_direction)}")
         return f"double_d_bore({', '.join(kw)})"
-    kw = [f"diameter={_n(m.diameter)}", f"at={_pt(m.frame.origin)}", f'axis="{m.frame.axis}"']
+    kw = [
+        f"diameter={_parameter_n(m.diameter, 'bore.diameter', exact_parameter)}",
+        f"at={_pt(m.frame.origin)}",
+        f'axis="{m.frame.axis}"',
+    ]
     if m.cbore:
         kw.append(f"cbore=({_n(m.cbore[0])}, {_n(m.cbore[1])})")
     if m.spotface:
@@ -371,6 +395,8 @@ def _measured_dimension_line(f) -> str:
         kw.append(f"lowering_blockers={f.lowering_blockers!r}")
     if getattr(f, "rendering_blockers", ()):
         kw.append(f"rendering_blockers={f.rendering_blockers!r}")
+    if getattr(f, "cylindrical_refs", ()):
+        kw.append(f"cylindrical_refs={_cylindrical_refs_arg(f.cylindrical_refs)}")
     # `measured_dimension` since #873 — a generated script must not emit the transitional
     # overload, or every regenerated AP242 script would arrive pre-deprecated.
     return "sheet.measured_dimension(" + ", ".join(kw) + ")"
@@ -485,6 +511,7 @@ def _feature_line(
     *,
     origin_ref: str | None = None,
     object_ref: str | None = None,
+    exact_parameter: str | None = None,
 ) -> str:
     """The declaration for one feature.
 
@@ -545,11 +572,13 @@ def _feature_line(
     if k == "rotational":
         bores = f", bores=({', '.join(str(_n(b)) for b in f.bores)},)" if f.bores else ""
         return (
-            f"sheet.rotational(od={_n(f.od)}{bores}, at={_pt(f.frame.origin)}, "
+            "sheet.rotational("
+            f"od={_parameter_n(f.od, 'od.diameter', exact_parameter)}{bores}, "
+            f"at={_pt(f.frame.origin)}, "
             f'axis="{f.frame.axis}")'
         )
     if k == "hole":
-        return _hole_line(f, object_ref)
+        return _hole_line(f, object_ref, exact_parameter=exact_parameter)
     if k == "boss":
         thr = (
             f", thread={f.thread!r}" if getattr(f, "thread", None) else ""
@@ -576,7 +605,9 @@ def _feature_line(
         if object_ref is not None:
             return f"sheet.diameter({object_ref}{thr})"
         return (
-            f"sheet.diameter(diameter={_n(f.diameter)}{height}{span}, "
+            "sheet.diameter("
+            f"diameter={_parameter_n(f.diameter, 'boss.diameter', exact_parameter)}"
+            f"{height}{span}, "
             f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
         )
     if k == "polygonal_boss":
@@ -620,7 +651,9 @@ def _feature_line(
         if object_ref is not None:
             return f"sheet.step({object_ref}{thr})"
         return (
-            f"sheet.step(diameter={_n(f.diameter)}, length={_n(f.length)}, "
+            "sheet.step("
+            f"diameter={_parameter_n(f.diameter, 'step.diameter', exact_parameter)}, "
+            f"length={_n(f.length)}, "
             f'at={_pt(f.frame.origin)}, axis="{f.frame.axis}"{thr})'
         )
     if k == "slot":
@@ -690,7 +723,11 @@ def _feature_line(
                 parts.append(f"angle={_n(f.angle)}")
         if f.members:
             parts.append("members=[" + ", ".join(_pt(p) for p in f.members) + "]")
-        return f"sheet.pattern({_member_hole_str(f.member)}, " + ", ".join(parts) + ")"
+        return (
+            f"sheet.pattern({_member_hole_str(f.member, exact_parameter=exact_parameter)}, "
+            + ", ".join(parts)
+            + ")"
+        )
     if k == "pocket_pattern":
         # declare.pocket_pattern() REJECTS members= (it recomputes the layout from
         # count + pitch/grid), so emit the array CENTRE as at= and the arrangement params —
@@ -1276,28 +1313,82 @@ def _feature_block(
                     f"emit_sheet_script(): cannot preserve a {f.kind} whose origin has "
                     "no emitted binding"
                 )
-            object_ref = (object_refs or {}).get(id(f))
+            nominal_parameter = {
+                "step": "step.diameter",
+                "boss": "boss.diameter",
+                "hole": "bore.diameter",
+                "pattern": "bore.diameter",
+                "rotational": "od.diameter",
+            }.get(f.kind)
+            nominal = (
+                (decorations or {}).get((f, "nominal_requirement", nominal_parameter))
+                if nominal_parameter is not None
+                else None
+            )
+            exact_parameter = (
+                nominal_parameter if isinstance(nominal, NominalRequirement) else None
+            )
+            # An imported nominal owner must rebuild the same exact geometry that its typed
+            # requirement validates. Object-reference matching intentionally admits the
+            # generated-script rounding quantum, so a close source cylinder can be a valid
+            # ordinary convenience reference yet disagree with the lossless imported value.
+            # Keep the numeric declaration for exact-owned parameters (#1296 review).
+            object_ref = None if exact_parameter is not None else (object_refs or {}).get(id(f))
             if gdt_with_origin:
-                line = _feature_line(f, part_envelope, origin_ref=origin_ref)
+                if exact_parameter is None:
+                    line = _feature_line(f, part_envelope, origin_ref=origin_ref)
+                else:
+                    line = _feature_line(
+                        f,
+                        part_envelope,
+                        origin_ref=origin_ref,
+                        exact_parameter=exact_parameter,
+                    )
             elif object_ref is not None:
-                line = _feature_line(f, part_envelope, object_ref=object_ref)
+                if exact_parameter is None:
+                    line = _feature_line(f, part_envelope, object_ref=object_ref)
+                else:
+                    line = _feature_line(
+                        f,
+                        part_envelope,
+                        object_ref=object_ref,
+                        exact_parameter=exact_parameter,
+                    )
+            elif exact_parameter is not None:
+                line = _feature_line(f, part_envelope, exact_parameter=exact_parameter)
             else:
                 line = _feature_line(f, part_envelope)
-            requirement = (decorations or {}).get((f, "diameter", "bore"))
-            if requirement is None:
-                requirement = (decorations or {}).get((f, "diameter"))
-            if isinstance(requirement, ToleranceDecoration):
-                value = requirement.value
+            diameter_role = {
+                "hole": "bore",
+                "pattern": "bore",
+                "rotational": "od",
+            }.get(f.kind)
+            tolerance = (
+                (decorations or {}).get((f, "diameter", diameter_role))
+                if diameter_role is not None
+                else None
+            )
+            if tolerance is None:
+                tolerance = (decorations or {}).get((f, "diameter"))
+            if isinstance(tolerance, ToleranceDecoration):
+                value = tolerance.value
                 args = (
                     f"{_authored_n(value[0])}, {_authored_n(value[1])}"
                     if isinstance(value, tuple)
                     else _authored_n(value)
                 )
-                provenance = f", source={requirement.source!r}"
-                if requirement.source_ids:
-                    provenance += f", source_ids={requirement.source_ids!r}"
-                on = ', on="bore"' if f.kind == "pattern" else ""
+                provenance = f", source={tolerance.source!r}"
+                if tolerance.source_ids:
+                    provenance += f", source_ids={tolerance.source_ids!r}"
+                on_target = "diameter" if f.kind == "step" else diameter_role
+                on = f", on={on_target!r}" if f.kind in ("step", "pattern", "rotational") else ""
                 line += f".tolerance({args}{on}{provenance})"
+
+            if isinstance(nominal, NominalRequirement):
+                provenance = f"source={nominal.source!r}, source_ids={nominal.source_ids!r}"
+                on_target = nominal_parameter
+                on = f", on={on_target!r}" if f.kind in ("step", "pattern", "rotational") else ""
+                line += f".requirement({_authored_n(nominal.value)}{on}, {provenance})"
             name = _binding(f, line, counts)
             if name is not None:
                 names[id(f)] = name

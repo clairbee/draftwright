@@ -289,7 +289,14 @@ _FACTS: dict[str, tuple[str, ...]] = {
     # is rendered verbatim rather than planned or suppressible. It is intentionally the
     # sole printed value in this structural allowlist (ADR 0016, "Scope").
     "pmi": ("frame", "pmi_kind", "dominant_axis", "ref_bbox", "ref_pts", "label"),
-    "authored_dimension": ("frame", "dimension_kind", "dominant_axis", "ref_pts", "ref_bbox"),
+    "authored_dimension": (
+        "frame",
+        "dimension_kind",
+        "dominant_axis",
+        "ref_pts",
+        "ref_bbox",
+        "cylindrical_refs",
+    ),
     # The gear-data renderer consumes the complete correlated IR record directly and never
     # receives a FeatureFacts projection. Classifying it empty keeps a future dimensional
     # renderer from acquiring normative values through the compiled-plan side door.

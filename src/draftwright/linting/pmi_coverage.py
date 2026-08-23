@@ -14,6 +14,49 @@ def _registry_subject(feature):
     return getattr(feature, "origin", None) or feature
 
 
+def _registry_names_for_feature(registry, feature) -> list:
+    """Names owned directly by an IR feature or by its opaque compiled provenance ref."""
+    subject = _registry_subject(feature)
+    direct = registry.names_for_feature(subject)
+    if direct:
+        return list(direct)
+    if not all(hasattr(registry, method) for method in ("names", "feature_of", "measurement_of")):
+        return []
+    return [
+        name
+        for name in registry.names()
+        if any(
+            getattr(measurement, "feature", None) == subject
+            for measurement in registry.measurement_of(name)
+        )
+    ]
+
+
+def _registry_names_for_decoration(registry, key: tuple) -> list:
+    """Canonical annotations that draw the exact decorated parameter."""
+    feature = key[0]
+    if len(key) >= 3 and key[1] == "nominal_requirement":
+        parameter = str(key[2])
+        kind = parameter.rsplit(".", 1)[-1]
+    else:
+        kind = str(key[1]) if len(key) > 1 else ""
+        role = str(key[2]) if len(key) > 2 else ""
+        parameter = f"{role}.{kind}" if role else ""
+    return [
+        name
+        for name in registry.names()
+        if any(
+            getattr(measurement, "feature", None) == feature
+            and (
+                getattr(measurement, "parameter", "") == parameter
+                if parameter
+                else getattr(measurement, "parameter", "").endswith(f".{kind}")
+            )
+            for measurement in registry.measurement_of(name)
+        )
+    ]
+
+
 def _source_ids(item) -> tuple[str, ...]:
     """Return every external source represented by one record or IR feature."""
     plural = tuple(getattr(item, "source_ids", ()))
@@ -25,7 +68,7 @@ def _source_category_counts(report: PmiExtractionReport) -> dict[str, int]:
     return dict(sorted(Counter(source.category for source in report.sources).items()))
 
 
-def _decorated_source_features(decorations) -> list[tuple[object, tuple[str, ...]]]:
+def _decorated_source_features(decorations) -> list[tuple[tuple, tuple[str, ...]]]:
     """Imported requirement provenance carried by canonical feature decorations (#1116)."""
     out = []
     for key, value in (decorations or {}).items():
@@ -33,7 +76,7 @@ def _decorated_source_features(decorations) -> list[tuple[object, tuple[str, ...
             continue
         source_ids = _source_ids(value)
         if source_ids:
-            out.append((key[0], source_ids))
+            out.append((key, source_ids))
     return out
 
 
@@ -92,13 +135,11 @@ def pmi_stage_summary(
         if set(_source_ids(feature)) & extracted and getattr(feature, "kind", None) != "pmi"
     ]
     decorated = _decorated_source_features(decorations)
-    lowered_features.extend(
-        feature for feature, source_ids in decorated if set(source_ids) & extracted
-    )
+    lowered_features.extend(key[0] for key, source_ids in decorated if set(source_ids) & extracted)
     lowered = {source_id for feature in lowered_features for source_id in _source_ids(feature)}
     lowered.update(
         source_id
-        for _feature, source_ids in decorated
+        for _key, source_ids in decorated
         for source_id in source_ids
         if source_id in extracted
     )
@@ -106,12 +147,12 @@ def pmi_stage_summary(
         source_id
         for feature in lowered_features
         for source_id in _source_ids(feature)
-        if registry.names_for_feature(_registry_subject(feature))
+        if _registry_names_for_feature(registry, feature)
     }
     rendered.update(
         source_id
-        for feature, source_ids in decorated
-        if registry.names_for_feature(_registry_subject(feature))
+        for key, source_ids in decorated
+        if _registry_names_for_decoration(registry, key)
         for source_id in source_ids
         if source_id in extracted
     )
@@ -181,9 +222,9 @@ def lint_pmi_lowering(
     for feature in features:
         for source_id in _source_ids(feature):
             by_source.setdefault(source_id, []).append(feature)
-    for feature, source_ids in _decorated_source_features(decorations):
+    for key, source_ids in _decorated_source_features(decorations):
         for source_id in source_ids:
-            by_source.setdefault(source_id, []).append(feature)
+            by_source.setdefault(source_id, []).append(key[0])
 
     issues = []
     for record in report.records:
@@ -240,9 +281,9 @@ def lint_pmi_rendering(features, registry, mode: str, *, decorations=None) -> li
         if getattr(feature, "kind", None) != "pmi":
             for source_id in _source_ids(feature):
                 by_source.setdefault(source_id, []).append(feature)
-    for feature, source_ids in _decorated_source_features(decorations):
+    for key, source_ids in _decorated_source_features(decorations):
         for source_id in source_ids:
-            by_source.setdefault(source_id, []).append(feature)
+            by_source.setdefault(source_id, []).append(key)
 
     dropped = {
         source_id
@@ -266,6 +307,9 @@ def lint_pmi_rendering(features, registry, mode: str, *, decorations=None) -> li
         for source_id, source_features in by_source.items()
         if source_id not in dropped | already_reported
         and not any(
-            registry.names_for_feature(_registry_subject(feature)) for feature in source_features
+            _registry_names_for_decoration(registry, feature)
+            if isinstance(feature, tuple)
+            else _registry_names_for_feature(registry, feature)
+            for feature in source_features
         )
     ]

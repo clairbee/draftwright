@@ -255,6 +255,7 @@ def build_pmi_features(
                     source_id=r.source_id,
                     lowering_blockers=r.lowering_blockers,
                     rendering_blockers=r.rendering_blockers,
+                    cylindrical_refs=r.cylindrical_refs,
                 )
             )
             continue
@@ -1121,9 +1122,9 @@ def build_part_model(
     # Correlation runs after the complete geometry + PMI inventories exist, at the shared IR
     # waist.  Direct drawings and emitted scripts therefore consume the same lowered model
     # instead of the emitter inventing a second ownership decision (#1116).
-    from draftwright.model.pmi_lowering import lower_ap242_hole_tolerances
+    from draftwright.model.pmi_lowering import lower_ap242_dimensions
 
-    return lower_ap242_hole_tolerances(model) if lower_pmi else model
+    return lower_ap242_dimensions(model) if lower_pmi else model
 
 
 def _is_round(bbox, bosses, tol: float = 0.5) -> bool:

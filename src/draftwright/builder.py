@@ -521,9 +521,9 @@ def _assemble(
         ):
             pmi_feats = build_pmi_features(a.pmi, a.part.bounding_box())
             if pmi_feats:
-                from draftwright.model.pmi_lowering import lower_ap242_hole_tolerances
+                from draftwright.model.pmi_lowering import lower_ap242_dimensions
 
-                pm = lower_ap242_hole_tolerances(replace(pm, features=[*pm.features, *pmi_feats]))
+                pm = lower_ap242_dimensions(replace(pm, features=[*pm.features, *pmi_feats]))
     # ADR 0005 §2 (#639): the ONE build-context attachment — analysis + finished model
     # in a single typed BuildState; the compat properties on Drawing read through it.
     dwg._build.analysis = a
