@@ -139,11 +139,15 @@ checks. Target is 100% passing. Tiers (#153):
 - **`uv run pytest -m smoke`** (~30 s) — curated build-light subset for a quick
   local "did I break something obvious" check.
 - **`uv run pytest`** — full fast tier (`-m 'not slow'`; nearly every test does a
-  real OCC build). Prefer **targeted** selections (`-k`, node ids) locally; a full
-  local run with **`-n auto --dist loadscope`** (pytest-xdist) measured ~17 min for
-  4260 tests on 4 cores (2026-08, #656 — the tier grows with every trust fix; a
-  critique-style test should share a module-scoped built drawing, not mint a new
-  dense fixture).
+  real OCC build). Prefer **targeted** selections (`-k`, node ids) locally;
+  `scripts/pr-check --full` uses **`-n auto --dist worksteal`** to balance the long
+  tail on many-core developer machines. At 4734 collected tests this measured
+  159–172 s across three green 18-core runs, versus 266 s with `loadscope`
+  (2026-08, #1311). The advantage does not carry to CI-shaped machines: at four
+  cores the same comparison was 358 s versus 348 s, so CI deliberately retains
+  `loadscope` and its module-order/fixture guarantees. The tier grows with every
+  trust fix; a critique-style test should share a module-scoped built drawing,
+  not mint a new dense fixture.
 - **`-m slow`** (CTC fixture builds) — CI-only.
 
 Coverage is kept out of the default addopts (it adds ~13% locally); the CI

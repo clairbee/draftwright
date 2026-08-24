@@ -42,7 +42,7 @@ case "$mode" in
         fi
 
         static_checks
-        uv run pytest tests/ -n auto --dist loadscope \
+        uv run pytest tests/ -n auto --dist worksteal \
             --cov=src/draftwright \
             --cov-report=term-missing \
             --cov-report=xml
