@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -90,16 +91,16 @@ def pytest_configure(config) -> None:
     worker_id = worker_input.get("workerid", "worker") if worker_input else "main"
     _STATE = _ProfileState(Path(output).resolve(), worker_id)
 
-    import draftwright
     import draftwright.builder as builder
     import draftwright.sheet as sheet
 
+    draftwright = sys.modules["draftwright"]
     builder_public = _timed("builder.build_drawing", builder.build_drawing)
     builder.build_drawing = builder_public
     # The public lazy package attribute and Sheet's import-time binding otherwise bypass a
     # patch installed only on builder.py. That omission made the first #1307 census a lower
     # bound, so all three bindings are explicit here.
-    draftwright.build_drawing = builder_public
+    setattr(draftwright, "build_drawing", builder_public)
     sheet.build_drawing = _timed("sheet.build_drawing", sheet.build_drawing)
     builder._build_drawing_once = _timed(
         "builder._build_drawing_once", builder._build_drawing_once

@@ -54,6 +54,7 @@ Compact map, bottom to top:
 - **Facades / top layer** — `make_drawing.py` + `annotate.py` (thin compat),
   `sheet.py` (the fluent `Sheet` facade, ADR 0011), `sheet_emit.py` (the `--script`
   emitter), `cli.py` (Typer; engine imported lazily inside command bodies, #313),
+  `_build_profile.py` (developer-only pytest/runner profiling support),
   `evaluation/` (the versioned STEP-analysis benchmark — production code must never
   depend on benchmark expectations or scores), `recogniser_contract.py` (the
   fail-closed cross-repository capability join).
