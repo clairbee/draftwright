@@ -101,6 +101,9 @@ _LAYERS: dict[str, int] = {
     "make_drawing": 7,
     "sheet": 7,
     "sheet_emit": 7,
+    # Developer-only pytest/runner support. It patches the user-facing builder bindings at
+    # runtime and is therefore a top-layer consumer, never an engine dependency.
+    "_build_profile": 7,
     # Cross-repository CI contract: dynamically resolves declared implementations at every
     # lower layer, so it deliberately sits above the whole engine beside the user surfaces.
     "recogniser_contract": 7,

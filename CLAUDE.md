@@ -54,6 +54,7 @@ Compact map, bottom to top:
 - **Facades / top layer** — `make_drawing.py` + `annotate.py` (thin compat),
   `sheet.py` (the fluent `Sheet` facade, ADR 0011), `sheet_emit.py` (the `--script`
   emitter), `cli.py` (Typer; engine imported lazily inside command bodies, #313),
+  `_build_profile.py` (developer-only pytest/runner profiling support),
   `evaluation/` (the versioned STEP-analysis benchmark — production code must never
   depend on benchmark expectations or scores), `recogniser_contract.py` (the
   fail-closed cross-repository capability join).
@@ -150,6 +151,20 @@ checks. Target is 100% passing. Tiers (#153):
   trust fix; a critique-style test should share a module-scoped built drawing,
   not mint a new dense fixture.
 - **`-m slow`** (CTC fixture builds) — CI-only.
+
+For reproducible build-cost profiling, use a fresh output directory and state the expected
+collection census explicitly:
+
+```bash
+scripts/profile-builds --output /tmp/draftwright-profile \
+  --expect-collected 4740 -- tests/ -n auto --dist loadscope
+```
+
+The runner passes every module/option as a literal argv entry, writes one JSON file per xdist
+worker, and refuses to report success when any worker's collected count differs. It times the
+public builder binding, `Sheet`'s import-time builder binding, and `_build_drawing_once`, and
+records pytest phases of at least 5 ms for attribution. Do not reuse an output directory that
+already contains worker profiles.
 
 Coverage is kept out of the default addopts (it adds ~13% locally); the CI
 workflow passes the `--cov` flags. CI runs the full fast tier (3×3 OS/Python

@@ -17,7 +17,9 @@ top: leaf modules (`layout.py`, `registry.py`, `fonts.py`, `_geometry.py`,
 user-facing surfaces: the `make_drawing.py` / `annotate.py` compat facades, the
 fluent `Sheet` facade (`sheet.py`), the Sheet-script emitter
 (`sheet_emit.py`), the recognition-evaluation package (`evaluation/`), and the
-`cli.py` entry point. No lower module imports an
+`cli.py` entry point. Developer-only `_build_profile.py` sits at the same top layer: it
+patches the public builder and Sheet bindings lazily for pytest measurement, and no engine
+module depends on it. No lower module imports an
 upper one. (All surfaces are front doors onto the one engine,
 `build_drawing` → `_auto_annotate` — there is no second engine.)
 
