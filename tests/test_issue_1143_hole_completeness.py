@@ -109,8 +109,17 @@ def _linear_pattern():
     return part
 
 
+def _blind_linear_pattern():
+    plate = Box(100, 60, 20, align=_XYZ_MIN)
+    tools = tuple(Pos(x, 10, 12) * Cylinder(3, 8, align=_XYZ_MIN) for x in (-25, 0, 25))
+    part = plate
+    for tool in tools:
+        part -= tool
+    return part, tools
+
+
 def _declared_model(part, feature):
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     retained = [
         candidate
         for candidate in detected.features
@@ -201,6 +210,7 @@ def _stepped_x_shaft_with_coaxial_and_offset_bores():
 
 _MODEL_ONLY_PARTS = {
     "blind_hole": _blind_hole,
+    "blind_linear_pattern": lambda: _blind_linear_pattern()[0],
     "grid_pattern": _grid_pattern,
     "linear_pattern": _linear_pattern,
     "opposed_blind_holes": _opposed_blind_holes,
@@ -1217,11 +1227,7 @@ def test_default_linear_direction_matches_recogniser_accepted_step_noise(locatio
 
 
 def test_declared_blind_pattern_tool_centres_correspond_to_recognised_openings():
-    plate = Box(100, 60, 20, align=_XYZ_MIN)
-    tools = [Pos(x, 10, 12) * Cylinder(3, 8, align=_XYZ_MIN) for x in (-25, 0, 25)]
-    part = plate
-    for tool in tools:
-        part -= tool
+    part, tools = _blind_linear_pattern()
     member = declare_hole(tools[1], through=False, depth=8)
     feature = declare_pattern(
         member,

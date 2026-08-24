@@ -10,6 +10,7 @@ from build123d import chamfer as b3d_chamfer
 from build123d import fillet as b3d_fillet
 
 from draftwright import build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.model import boss, chamfer, fillet, finish, groove, note
 from draftwright.sheet import Sheet
 
@@ -34,6 +35,12 @@ def _chamfered_shaft():
     shaft = Cylinder(10, 40)
     circular_edges = [edge for edge in shaft.edges() if edge.geom_type == GeomType.CIRCLE]
     return b3d_chamfer(circular_edges, 1)
+
+
+def test_direct_detection_matches_built_model_features_for_chamfered_shaft():
+    built = tuple(build_drawing(_chamfered_shaft(), number="REF").model().features)
+    detected = tuple(detect_part_model(_chamfered_shaft()).features)
+    assert detected == built
 
 
 def test_grm03_chamfers_read_in_profile_and_land_on_distinct_edge_sites():
@@ -122,8 +129,8 @@ def test_detected_parallel_shafts_rotate_about_their_own_axes_not_the_part_bbox(
 
 def test_turned_site_ignores_radially_matching_cylinder_at_a_remote_axial_station():
     primary = _chamfered_shaft()
-    reference = build_drawing(primary, number="REF")
-    feature = next(item for item in reference.model().features if item.kind == "chamfer")
+    model = detect_part_model(primary)
+    feature = next(item for item in model.features if item.kind == "chamfer")
     x, y, _z = feature.frame.origin
 
     # Its radius makes the remote cylinder an exact radial match for the chamfer site.  The
@@ -141,8 +148,8 @@ def test_turned_site_ignores_radially_matching_cylinder_at_a_remote_axial_statio
 
 def test_turned_site_ignores_partial_cylindrical_blend_that_is_not_a_shaft():
     primary = _chamfered_shaft()
-    reference = build_drawing(primary, number="REF")
-    feature = next(item for item in reference.model().features if item.kind == "chamfer")
+    model = detect_part_model(primary)
+    feature = next(item for item in model.features if item.kind == "chamfer")
 
     block = Box(4, 4, 2)
     vertical = next(edge for edge in block.edges() if edge.bounding_box().size.Z > 1.9)

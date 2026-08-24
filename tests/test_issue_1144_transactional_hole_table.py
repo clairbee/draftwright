@@ -11,6 +11,7 @@ import pytest
 from build123d import Align, Box, Cylinder, Pos
 
 from draftwright import build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.fits import fit_class
 from draftwright.linting.hole_coverage import hole_requirement_outcomes
 from draftwright.model.compiled import compile_dimensions
@@ -967,6 +968,9 @@ def test_automatic_table_fails_closed_against_a_retained_public_balloon(
     component_metadata, monkeypatch
 ):
     drawing = build_drawing(_dense_perimeter_plate(), page="A3", auto_dims=False)
+    if component_metadata == "valid":
+        detected = detect_part_model(_dense_perimeter_plate())
+        assert tuple(detected.features) == tuple(drawing.model().features)
     tag = "RETAINED_PUBLIC_BALLOON_WITH_A_VERY_LONG_TAG"
     retained_name = f"balloon_plan_{tag}_0"
     drawing.add_balloons("plan", [(tag, 0, drawing.recognition().holes[0])])
@@ -1150,7 +1154,7 @@ def test_real_constrained_a4_failure_keeps_valid_fallback_coverage():
     from draftwright.model.ir import RequestedDimension
 
     part = _dense_perimeter_plate()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     holes = [feature for feature in detected.features if feature.kind == "hole"]
     # Keep the A4 assertion about the transaction rather than asking an already
     # crowded sheet to render 32 location ordinates. Authored omission remains
@@ -1202,7 +1206,7 @@ def test_automatic_partial_balloon_result_rolls_back_the_shared_table(monkeypatc
 
 def test_scattered_table_reports_a_balloon_landed_on_the_wrong_semantic_owner():
     part = _dense_perimeter_plate()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     victim = max(
         (feature for feature in detected.features if feature.kind == "hole"),
         key=lambda feature: feature.diameter,
@@ -1265,6 +1269,8 @@ def test_grouped_pattern_marker_cannot_certify_an_undefined_hole_tag():
 
     part = _bolt_circle_plate()
     drawing = build_drawing(part, page="A4")
+    detected = detect_part_model(_bolt_circle_plate())
+    assert tuple(detected.features) == tuple(drawing.model().features)
     analysis = _analyse(
         part,
         title="",
@@ -1402,14 +1408,13 @@ def test_long_grouped_pattern_marker_fails_closed_when_its_shaft_crosses_its_tex
     from draftwright.linting.issues import LintIssue
 
     part = _bolt_circle_plate()
-    detected = build_drawing(part, page="A4")
-    pattern = next(feature for feature in detected.model().features if feature.kind == "pattern")
+    detected = detect_part_model(part)
+    pattern = next(feature for feature in detected.features if feature.kind == "pattern")
     long_pattern = replace(pattern, count=1000)
     model = replace(
-        detected.model(),
+        detected,
         features=[
-            long_pattern if feature is pattern else feature
-            for feature in detected.model().features
+            long_pattern if feature is pattern else feature for feature in detected.features
         ],
     )
     drawing = build_drawing(part, model=model, page="A4")
@@ -1464,6 +1469,8 @@ def test_fitted_callout_can_remain_while_table_resolves_its_location_drop(monkey
     with monkeypatch.context() as disabled:
         disabled.setattr(orchestrator, "_maybe_tabulate_holes", lambda *_args, **_kwargs: None)
         baseline = build_drawing(part, page="A2")
+    detected = detect_part_model(_dense_plate_with_close_x_ordinates())
+    assert tuple(detected.features) == tuple(baseline.model().features)
     placed_callout_features = set(_plan_bore_callouts(baseline))
     location_issue = next(
         issue
@@ -1769,7 +1776,7 @@ def test_retained_fit_leader_crossing_rolls_the_automatic_table_back():
     from draftwright.model.ir import RequestedDimension
 
     part = _dense_plate_with_close_x_ordinates()
-    detected = build_drawing(part, page="A3", auto_dims=False).model()
+    detected = detect_part_model(part)
     fitted = next(
         feature
         for feature in detected.features

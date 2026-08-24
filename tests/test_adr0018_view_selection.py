@@ -24,15 +24,31 @@ import pytest
 from build123d import Box, Cylinder, Pos, Rot
 
 from draftwright import ViewPlanIncomplete, build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.compose import _layout_geometry
 from draftwright.view_plan import VIEW_AXES, VIEWS_SHOWING, views_showing
 
 ALL_THREE = ("front", "plan", "side")
 
 
+def _plain_box():
+    return Box(90, 60, 25)
+
+
 def _z_hole():
     """A part whose only feature reads face-on in PLAN — so plan is necessary."""
     return Box(90, 60, 25) - Pos(20, 15, 0) * Cylinder(4, 30)
+
+
+@pytest.mark.parametrize(
+    "part_fn",
+    (_plain_box, _z_hole),
+    ids=("plain-box", "z-hole"),
+)
+def test_direct_detection_matches_built_model_features_for_view_planning_parts(part_fn):
+    built = tuple(build_drawing(part_fn()).model().features)
+    detected = tuple(detect_part_model(part_fn()).features)
+    assert detected == built
 
 
 def _x_hole():
@@ -213,7 +229,7 @@ class TestTheAsymmetricCounterexample:
         from draftwright.model.ir import RequestedDimension
 
         part = _z_hole()
-        detected = build_drawing(part).model()
+        detected = detect_part_model(part)
         assert detected is not None
         envelope = next(feature for feature in detected.features if feature.kind == "envelope")
         hole = next(feature for feature in detected.features if feature.kind == "hole")
@@ -287,7 +303,7 @@ class TestAnExtentMovesOrIsReported:
     def test_the_planner_record_itself_re_homes_instead_of_only_the_renderer(self):
         from draftwright.model.planner import plan_dimensions
 
-        model = build_drawing(Box(90, 60, 25)).model()
+        model = detect_part_model(_plain_box())
         assert model is not None
         envelope = next(
             group
@@ -299,7 +315,7 @@ class TestAnExtentMovesOrIsReported:
     def test_the_compiler_cannot_silently_replan_against_the_fixed_topology(self):
         from draftwright.model.compiled import compile_dimensions
 
-        model = build_drawing(_z_hole()).model()
+        model = detect_part_model(_z_hole())
         assert model is not None
         with pytest.raises(ViewPlanIncomplete) as caught:
             compile_dimensions(model, planned_views=("front", "side"))
@@ -352,7 +368,7 @@ class TestAnExtentMovesOrIsReported:
     def test_a_width_diagnostic_lists_both_semantically_eligible_views(self):
         from draftwright.model.planner import plan_dimensions
 
-        model = build_drawing(Box(90, 60, 25)).model()
+        model = detect_part_model(_plain_box())
         assert model is not None
         with pytest.raises(ViewPlanIncomplete) as caught:
             plan_dimensions(model, planned_views=("side",))

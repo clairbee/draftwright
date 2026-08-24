@@ -48,6 +48,7 @@ from conftest import counting_calls
 from draftwright import Sheet, build_drawing
 from draftwright.annotations.from_model import callout_from_spec
 from draftwright.annotations.holes import _record_callout_drop
+from draftwright.builder import detect_part_model
 from draftwright.linting.coverage import CoverageState, lint_principal_profile_coverage
 from draftwright.linting.profiled_bore_coverage import (
     lint_profiled_bore_coverage,
@@ -564,8 +565,10 @@ def test_real_wheel_no_longer_gets_a_confident_envelope_only_result(wheel_drawin
 
 
 def test_synthetic_double_d_profile_is_recognised_without_lint_rescans():
+    detected = detect_part_model(_double_d_bore())
     with counting_calls({"orchestration": build_recognition_result}) as calls:
         drawing = build_drawing(_double_d_bore())
+        assert tuple(detected.features) == tuple(drawing.model().features)
         assert calls == {"orchestration": 1}
         for _ in range(2):
             issues = drawing.lint()
@@ -877,7 +880,7 @@ def test_a_double_d_declaration_does_not_reconcile_against_a_plain_cylinder():
 
 
 def test_profile_round_trips_through_the_sheet_emitter_line():
-    source = next(f for f in build_drawing(_double_d_bore()).model().features if f.kind == "hole")
+    source = next(f for f in detect_part_model(_double_d_bore()).features if f.kind == "hole")
     line = _hole_line(source)
     assert "sheet.double_d_bore(" in line
     assert "major_diameter=10" in line and "across_flats=7.2" in line
