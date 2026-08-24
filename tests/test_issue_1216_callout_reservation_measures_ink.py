@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 from build123d import Box, Cone, Cylinder, Pos
 
-from draftwright.builder import build_drawing
+from draftwright.builder import build_drawing, detect_part_model
 from draftwright.compose import _est_planned_bore_callout_width
 from draftwright.model.callout import hole_callout_spec
 from draftwright.model.planner import plan_dimensions
@@ -44,6 +44,18 @@ def _blind_plate():
     for x in (-20, 20):
         part -= Pos(x, 0, 5) * Cylinder(5, 4)
     return part
+
+
+@pytest.mark.parametrize(
+    "part_fn",
+    [_recessed_plate, _blind_plate],
+    ids=["recessed", "blind"],
+)
+def test_direct_detection_matches_built_model_features(part_fn):
+    """The model-only fast path must preserve both geometries used by this module."""
+    built = tuple(build_drawing(part_fn(), title="T", number="N").model().features)
+    detected = tuple(detect_part_model(part_fn()).features)
+    assert detected == built
 
 
 def _widest_drawn_callout(drawing) -> float:
@@ -81,8 +93,7 @@ def _decorations(model, *, kinds):
     ],
 )
 def test_the_reservation_is_never_narrower_than_the_ink(name, part_fn, kinds):
-    base = build_drawing(part_fn(), title="T", number="N")
-    model = base.model()
+    model = detect_part_model(part_fn())
     decorations = _decorations(model, kinds=kinds)
     assert decorations, f"{name}: precondition — this part has no parameter of {kinds}"
 
@@ -123,8 +134,7 @@ def test_a_recess_tolerance_alone_widens_the_reservation():
     Toleranced here through the ROLE key, on the counterbore's diameter alone, so the bore is
     bare and any movement must come from `_term`.
     """
-    base = build_drawing(_recessed_plate(), title="T", number="N")
-    model = base.model()
+    model = detect_part_model(_recessed_plate())
     recess = {
         (feature, param.kind, param.role): _TOL
         for feature in model.features
