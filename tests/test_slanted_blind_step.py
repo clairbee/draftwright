@@ -32,11 +32,11 @@ from build123d import (
 )
 
 from draftwright import build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.model.declare import envelope
 
 
-@pytest.fixture(scope="module")
-def slanted_blind_step():
+def _slanted_blind_step():
     align_min = (Align.MIN, Align.MIN, Align.MIN)
     with BuildPart() as part:
         with BuildSketch(Plane.XZ):
@@ -59,6 +59,11 @@ def slanted_blind_step():
 
 
 @pytest.fixture(scope="module")
+def slanted_blind_step():
+    return _slanted_blind_step()
+
+
+@pytest.fixture(scope="module")
 def bounded_slanted_recess():
     """A partial-width ramp whose ends are defining profile transitions."""
     align_min = (Align.MIN, Align.MIN, Align.MIN)
@@ -72,9 +77,9 @@ def bounded_slanted_recess():
 
 @pytest.mark.timeout(120)
 def test_slanted_profile_and_blind_interruptions_are_recognised(slanted_blind_step):
-    dwg = build_drawing(slanted_blind_step, detail_view=True)
-    pockets = [f for f in dwg.model().features if f.kind == "pocket"]
-    steps = [f for f in dwg.model().features if f.kind == "step_level"]
+    model = detect_part_model(slanted_blind_step)
+    pockets = [f for f in model.features if f.kind == "pocket"]
+    steps = [f for f in model.features if f.kind == "step_level"]
 
     assert len(pockets) == 2
     assert all(p.edge_anchored for p in pockets)
@@ -87,6 +92,8 @@ def test_slanted_profile_and_blind_interruptions_are_recognised(slanted_blind_st
 @pytest.mark.timeout(120)
 def test_slanted_blind_step_gets_reconstructable_dimension_plan(slanted_blind_step):
     dwg = build_drawing(slanted_blind_step, detail_view=True)
+    detected = detect_part_model(_slanted_blind_step())
+    assert tuple(detected.features) == tuple(dwg.model().features)
     names = set(dwg.annotations())
 
     assert "m_env_width" in names
