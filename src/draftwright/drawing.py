@@ -488,8 +488,12 @@ def _geometry_key(shape):
     """Where a part sits, to the precision an exporter writes - a sort key."""
     box = shape.bounding_box()
     return (
-        round(box.min.X, 9), round(box.min.Y, 9), round(box.min.Z, 9),
-        round(box.max.X, 9), round(box.max.Y, 9), round(box.max.Z, 9),
+        round(box.min.X, 9),
+        round(box.min.Y, 9),
+        round(box.min.Z, 9),
+        round(box.max.X, 9),
+        round(box.max.Y, 9),
+        round(box.max.Z, 9),
         len(shape.edges()),
     )
 

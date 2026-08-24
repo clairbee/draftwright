@@ -115,7 +115,7 @@ def canonicalize_svg(svg_path: str) -> None:
 
     ExportSVG writes one element per face, in the order build123d hands them
     over - and that order follows the interpreter's hash seed, which is
-    randomized per process. Two faces of one glyph (the stem and the tittle of
+    randomized per process. Two faces of one glyph (the stem and the dot over
     an 'i') change places between runs, so two exports of one drawing differ in
     bytes while being the same picture. That is enough to make a drawing useless
     as something to check in and diff, which is how a caller notices that its
@@ -414,9 +414,7 @@ def _render_pdf(
         # carry the moment it was produced: a fixed /CreationDate and a derived
         # /ID rather than the clock's. Without it two renders of one drawing
         # differ in bytes.
-        canvas = Canvas(
-            pdf_path, pagesize=(drawing.width, drawing.height), invariant=reproducible
-        )
+        canvas = Canvas(pdf_path, pagesize=(drawing.width, drawing.height), invariant=reproducible)
         canvas.setCreator(_GENERATED_BY)
         canvas.setTitle(_GENERATED_BY)
         renderPDF.draw(drawing, canvas, 0, 0)
