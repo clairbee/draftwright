@@ -143,9 +143,10 @@ checks. Target is 100% passing. Tiers (#153):
   `scripts/pr-check --full` uses **`-n auto --dist worksteal`** to balance the long
   tail on many-core developer machines. At 4734 collected tests this measured
   159–172 s across three green 18-core runs, versus 266 s with `loadscope`
-  (2026-08, #1311). The advantage does not carry to CI-shaped machines: at four
-  cores the same comparison was 358 s versus 348 s, so CI deliberately retains
-  `loadscope` and its module-order/fixture guarantees. The tier grows with every
+  (2026-08, #1311). On the same 18-core host, limiting pytest to four workers
+  measured 358 s with `worksteal` versus 348 s with `loadscope`; that does not
+  model CPU affinity or a hosted runner. CI deliberately retains its established
+  class/module scope grouping with `loadscope`. The tier grows with every
   trust fix; a critique-style test should share a module-scoped built drawing,
   not mint a new dense fixture.
 - **`-m slow`** (CTC fixture builds) — CI-only.
