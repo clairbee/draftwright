@@ -1204,7 +1204,15 @@ def place_feature_leader_jobs(dwg, analysis, ctx, jobs, *, producer_floor=False)
         return 0
 
     trace = getattr(ctx, "trace", None)
-    shared_event = trace.pass_event("feature_leader_inventory") if trace is not None else None
+    # ``feature_leader_inventory`` is the authoritative cross-pass drain event: consumers
+    # and performance ratchets select it to measure the shared late solve. Immediate
+    # pre-drain batches retain their noun event below, but must not impersonate that drain
+    # merely because they now share its analytical implementation (#1308 release gate).
+    shared_event = (
+        trace.pass_event("feature_leader_inventory")
+        if trace is not None and not producer_floor
+        else None
+    )
     noun_events = (
         {
             noun: trace.pass_event(f"{noun}_callouts")
