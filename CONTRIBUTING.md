@@ -27,7 +27,9 @@ scripts/pr-check --quick      # smoke tier plus every static PR gate
 scripts/pr-check              # final preflight: full coverage plus changed-line gate
 ```
 
-For a full local run, spread it across cores with
+For the faster local final preflight, use `scripts/pr-check --full`; it spreads
+the fast tier across available workers with work stealing. To reproduce the
+hosted fast-tier distribution instead, use
 `uv run pytest -n auto --dist loadscope`. See [CLAUDE.md](CLAUDE.md) for the test
 tiers and the architecture overview, and `docs/adr/` for the design decisions
 behind layout, scaling, and annotation placement — please read the relevant ADRs

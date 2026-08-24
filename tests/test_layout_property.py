@@ -22,9 +22,9 @@ separate shrinking machinery needed. Case count is deliberately modest (15 per
 check) to keep the fast tier quick, per the issue's own guidance — each
 collision-check case is a single OCC build (~3-6s locally), each determinism
 case builds twice (~9-15s locally). The two checks live in separate classes so
-`pytest-xdist --dist loadscope` (this project's recommended local full-suite
-invocation) can schedule them on different workers instead of serializing all
-30 cases behind one module-level scope."""
+CI's retained `pytest-xdist --dist loadscope` invocation can schedule them on
+different workers instead of serializing all 30 cases behind one module-level
+scope."""
 
 from __future__ import annotations
 
@@ -179,7 +179,7 @@ def _generate(seed: int, index: int):
     return template(rng)
 
 
-# Each check lives in its own class (not a bare module-level function) so
+# Each check lives in its own class (not a bare module-level function) so CI's
 # `pytest-xdist --dist loadscope` treats them as two independently-schedulable
 # scopes instead of serializing all 30 cases behind one module-level group.
 class TestGeneratedPartCollisions:
