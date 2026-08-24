@@ -46,7 +46,7 @@ import pytest
 from build123d import Axis, Box, Cylinder, Pos, Rot
 
 from draftwright._core import _tol_suffix
-from draftwright.builder import build_drawing
+from draftwright.builder import build_drawing, detect_part_model
 from draftwright.model.compiled import compile_dimensions
 
 _TOL = 0.05
@@ -194,6 +194,15 @@ _PARTS = {
     "uniform_stepped_shaft": _uniform_stepped_shaft,
 }
 
+
+@pytest.mark.parametrize("part_name", sorted(_PARTS))
+def test_direct_detection_matches_built_model_features_for_sweep_parts(part_name):
+    """The faster model-only path must preserve this sweep's recognised features."""
+    built = tuple(build_drawing(_PARTS[part_name](), title="T", number="N").model().features)
+    detected = tuple(detect_part_model(_PARTS[part_name]()).features)
+    assert detected == built
+
+
 #: The two shapes a `decorations=` key takes. BOTH are swept, because they are not the same
 #: experiment: the role key tolerances one parameter, while the bare `(feature, kind)` key —
 #: the public spelling in ADR 0011 — tolerances every role of that kind at once. Only the
@@ -308,8 +317,7 @@ def _absence_reported(drawing) -> set:
 
 def _sweep(part_name, feature, param, mode):
     """Build with exactly one decoration and return ``(drops, unreported_absences)``."""
-    base = build_drawing(_PARTS[part_name](), title="T", number="N")
-    model = base.model()
+    model = detect_part_model(_PARTS[part_name]())
     target = next((f for f in model.features if f.kind == feature.kind and f == feature), None)
     if target is None:
         return [], []
@@ -360,10 +368,10 @@ def _sweep(part_name, feature, param, mode):
 @pytest.mark.parametrize("mode", _KEY_MODES)
 @pytest.mark.parametrize("part_name", sorted(_PARTS))
 def test_no_approved_tolerance_is_dropped_by_a_renderer(part_name, mode):
-    base = build_drawing(_PARTS[part_name](), title="T", number="N")
+    model = detect_part_model(_PARTS[part_name]())
     dropped: list[str] = []
     unreported: list[str] = []
-    for feature in base.model().features:
+    for feature in model.features:
         for param in feature.parameters():
             got_dropped, got_unreported = _sweep(part_name, feature, param, mode)
             dropped += got_dropped
@@ -386,8 +394,7 @@ def test_the_sweep_actually_decorates_something():
     """The precondition. A sweep that approves no toleranced dimension asserts nothing, and
     every part above must contribute — otherwise a fixture silently stops covering its site."""
     for part_name in sorted(_PARTS):
-        base = build_drawing(_PARTS[part_name](), title="T", number="N")
-        model = base.model()
+        model = detect_part_model(_PARTS[part_name]())
         seen = 0
         for feature in model.features:
             for param in feature.parameters():
@@ -465,10 +472,17 @@ def _tabulated_plate():
     return part
 
 
+def test_direct_detection_matches_built_model_features_for_tabulated_plate():
+    built = tuple(
+        build_drawing(_tabulated_plate(), page="A3", title="T", number="N").model().features
+    )
+    detected = tuple(detect_part_model(_tabulated_plate()).features)
+    assert detected == built
+
+
 def _toleranced_bore(part_fn, *, role="bore", kind="diameter"):
-    """Build *part_fn* twice: once to get the model, once with one bore toleranced."""
-    base = build_drawing(part_fn(), page="A3", title="T", number="N")
-    model = base.model()
+    """Detect *part_fn*, then build it with one bore toleranced."""
+    model = detect_part_model(part_fn())
     feature, param = next(
         (f, p)
         for f in model.features
@@ -629,6 +643,14 @@ def _blind_plate_for_table():
     for x in (-25, 25):
         part -= Pos(x, 0, 6) * Cylinder(5, 4)
     return part
+
+
+def test_direct_detection_matches_built_model_features_for_blind_table_plate():
+    built = tuple(
+        build_drawing(_blind_plate_for_table(), page="A3", title="T", number="N").model().features
+    )
+    detected = tuple(detect_part_model(_blind_plate_for_table()).features)
+    assert detected == built
 
 
 def test_the_hole_table_depth_column_prints_the_authored_tolerance():
@@ -823,8 +845,8 @@ def test_only_an_absence_code_counts_as_reporting_an_absence():
 
     from draftwright.model.compiled import DimensionId
 
-    drawing = build_drawing(_PARTS["blind_holes"](), title="T", number="N")
-    feature = next(f for f in drawing.model().features if f.kind == "hole")
+    model = detect_part_model(_PARTS["blind_holes"]())
+    feature = next(f for f in model.features if f.kind == "hole")
     mid = DimensionId(feature, "bore.diameter")
 
     def _with(code):
@@ -851,6 +873,12 @@ def _jittered_pattern():
     return part
 
 
+def test_direct_detection_matches_built_model_features_for_jittered_pattern():
+    built = tuple(build_drawing(_jittered_pattern(), title="T", number="N").model().features)
+    detected = tuple(detect_part_model(_jittered_pattern()).features)
+    assert detected == built
+
+
 def test_a_jittered_pattern_withholds_its_pitch_tolerance_and_says_so():
     """The r8 finding, as a test rather than a probe — the fix shipped without one.
 
@@ -860,8 +888,7 @@ def test_a_jittered_pattern_withholds_its_pitch_tolerance_and_says_so():
     prints the bare collapse and records `pattern_pitch_tolerance_withheld` against the pitch's
     measurement, so an author who tolerances a jittered pitch is told rather than lied to.
     """
-    base = build_drawing(_jittered_pattern(), title="T", number="N")
-    model = base.model()
+    model = detect_part_model(_jittered_pattern())
     pattern = next(f for f in model.features if f.kind == "pattern")
     param = next(pm for pm in pattern.parameters() if pm.role == "pitch")
     drawing = build_drawing(
@@ -893,12 +920,12 @@ def test_a_jittered_pattern_withholds_its_pitch_tolerance_and_says_so():
 
     # The control: exactly uniform spacing keeps the suffix — so the assertion above is about
     # the jitter, not about pitch tolerances never rendering.
-    uniform = build_drawing(_linear_pattern(), title="T", number="N")
-    upattern = next(f for f in uniform.model().features if f.kind == "pattern")
+    uniform_model = detect_part_model(_linear_pattern())
+    upattern = next(f for f in uniform_model.features if f.kind == "pattern")
     uparam = next(pm for pm in upattern.parameters() if pm.role == "pitch")
     udrawing = build_drawing(
         _linear_pattern(),
-        model=uniform.model(),
+        model=uniform_model,
         decorations={(upattern, uparam.kind, uparam.role): _TOL},
         title="T",
         number="N",
