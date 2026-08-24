@@ -46,13 +46,13 @@ from draftwright.annotations.leaders import (
     feature_leader_fixed_conflicts,
 )
 from draftwright.annotations.orchestrator import _PASS_SEQUENCE
-from draftwright.builder import _is_required_scale_drop
+from draftwright.builder import _is_required_scale_drop, detect_part_model
 from draftwright.layout import _assign_leader_candidates
 from draftwright.linting.issues import is_placement_drop
 from draftwright.model import fillet
 
 
-def _narrow_cross_pass_part():
+def _narrow_cross_pass_solid():
     """Public GRM-class geometry: two side bores, a long pocket and end rounds."""
 
     part = Box(13.55, 11, 80, align=(Align.MIN, Align.CENTER, Align.MIN))
@@ -72,7 +72,12 @@ def _narrow_cross_pass_part():
                 align=(Align.CENTER, Align.CENTER, Align.MIN),
             )
         )
-    detected = build_drawing(part, auto_dims=False).model()
+    return part
+
+
+def _narrow_cross_pass_part():
+    part = _narrow_cross_pass_solid()
+    detected = detect_part_model(part)
     rounded = [
         fillet(axis="x", radius=1, at=(0, -5.5, 0)),
         fillet(axis="x", radius=1, at=(13.55, -5.5, 0)),
@@ -81,6 +86,13 @@ def _narrow_cross_pass_part():
         fillet(axis="z", radius=1, at=(13.55, 5.5, 0)),
     ]
     return part, replace(detected, features=[*detected.features, *rounded])
+
+
+def test_direct_detection_matches_built_model_features_for_narrow_cross_pass_part():
+    """The repeated helper's direct model path must retain its recognised inventory."""
+    built = tuple(build_drawing(_narrow_cross_pass_solid(), auto_dims=False).model().features)
+    detected = tuple(detect_part_model(_narrow_cross_pass_solid()).features)
+    assert detected == built
 
 
 def _overfull_distinct_hole_strip_part():
