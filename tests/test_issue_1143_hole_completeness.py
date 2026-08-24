@@ -15,6 +15,7 @@ from b123d_recognisers import (
 from build123d import Align, Box, Compound, Cone, Cylinder, Pos, Rot
 
 from draftwright import Sheet, build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.linting.hole_coverage import canonical_hole_sites, hole_requirement_outcomes
 from draftwright.linting.issues import LintIssue
 from draftwright.model.compiled import compile_dimensions
@@ -198,6 +199,27 @@ def _stepped_x_shaft_with_coaxial_and_offset_bores():
     return (left + middle + right) - central - offset
 
 
+_MODEL_ONLY_PARTS = {
+    "blind_hole": _blind_hole,
+    "grid_pattern": _grid_pattern,
+    "linear_pattern": _linear_pattern,
+    "opposed_blind_holes": _opposed_blind_holes,
+    "opposed_blind_patterns": _opposed_blind_patterns,
+    "partial_lower_group": _partial_lower_group_with_opposed_blind_hole,
+    "pattern_and_central_bore": _pattern_and_central_bore,
+    "single_hole": _single_hole,
+    "two_scattered_same_spec_holes": _two_scattered_same_spec_holes,
+}
+
+
+@pytest.mark.parametrize("part_name", sorted(_MODEL_ONLY_PARTS))
+def test_direct_detection_matches_built_model_features_for_hole_completeness_parts(part_name):
+    part_fn = _MODEL_ONLY_PARTS[part_name]
+    built = tuple(build_drawing(part_fn(), auto_dims=False).model().features)
+    detected = tuple(detect_part_model(part_fn()).features)
+    assert detected == built
+
+
 def _outcomes(drawing):
     drawing.lint()
     return hole_requirement_outcomes(
@@ -327,7 +349,7 @@ def test_opposite_face_blind_holes_remain_two_physical_requirement_groups():
 
 def test_one_declared_blind_hole_cannot_certify_two_opposed_physical_bores():
     part = _opposed_blind_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     holes = [feature for feature in detected.features if feature.kind == "hole"]
     assert len(holes) == 2
     retained = [
@@ -349,7 +371,7 @@ def test_one_declared_blind_hole_cannot_certify_two_opposed_physical_bores():
 
 def test_exact_blind_hole_match_disambiguates_residual_tool_centre_match():
     part = _opposed_blind_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     holes = [feature for feature in detected.features if feature.kind == "hole"]
     retained = [
         feature for feature in detected.features if feature.kind not in {"hole", "pattern"}
@@ -373,7 +395,7 @@ def test_exact_blind_hole_match_disambiguates_residual_tool_centre_match():
 
 def test_same_face_tool_centre_cannot_certify_omitted_opposed_blind_bore():
     part = _opposed_blind_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     holes = sorted(
         (feature for feature in detected.features if feature.kind == "hole"),
         key=lambda feature: feature.frame.origin[2],
@@ -402,7 +424,7 @@ def test_same_face_tool_centre_cannot_certify_omitted_opposed_blind_bore():
 
 def test_ambiguous_exact_bore_owners_cannot_escape_through_tool_centre_fallback():
     part = _opposed_blind_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "hole"),
         key=lambda feature: feature.frame.origin[2],
@@ -433,7 +455,7 @@ def test_ambiguous_exact_bore_owners_cannot_escape_through_tool_centre_fallback(
 
 def test_extra_exact_owner_cannot_be_reused_for_omitted_opposed_blind_bore():
     part = _partial_lower_group_with_opposed_blind_hole()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     holes = [feature for feature in detected.features if feature.kind == "hole"]
     lower = next(feature for feature in holes if feature.count == 2)
     retained = [
@@ -457,7 +479,7 @@ def test_extra_exact_owner_cannot_be_reused_for_omitted_opposed_blind_bore():
 
 def test_blind_hole_with_unknown_declared_depth_fails_closed_without_crashing():
     part = _blind_hole()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     hole = next(feature for feature in detected.features if feature.kind == "hole")
     declared = _declared_model(part, replace(hole, depth=None))
 
@@ -514,7 +536,7 @@ def test_separate_declared_blind_tools_cover_one_physical_loose_group():
 
 def test_duplicate_exact_grouped_hole_owners_fail_closed():
     part = _two_scattered_same_spec_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     grouped = next(feature for feature in detected.features if feature.kind == "hole")
     retained = [feature for feature in detected.features if feature is not grouped]
     declared = replace(detected, features=[grouped, replace(grouped), *retained])
@@ -529,7 +551,7 @@ def test_duplicate_exact_grouped_hole_owners_fail_closed():
 
 def test_grouped_and_per_member_exact_owners_are_an_ambiguous_cover():
     part = _two_scattered_same_spec_holes()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     grouped = next(feature for feature in detected.features if feature.kind == "hole")
     separate = [
         declare_hole(diameter=grouped.diameter, at=member, axis="z", through=True)
@@ -904,8 +926,8 @@ def test_many_blind_patterns_use_indexed_tool_centre_correspondence(monkeypatch)
 def test_default_linear_direction_uses_bounded_member_traversal(monkeypatch):
     import draftwright.linting.hole_coverage as hole_coverage_module
 
-    drawing = build_drawing(_linear_pattern(), auto_dims=False)
-    pattern = next(feature for feature in drawing.model().features if feature.kind == "pattern")
+    model = detect_part_model(_linear_pattern())
+    pattern = next(feature for feature in model.features if feature.kind == "pattern")
     pattern = replace(
         pattern,
         count=4_000,
@@ -1032,7 +1054,7 @@ def test_grid_pattern_accounts_for_both_independent_pitch_measurements():
 
 def test_transposed_grid_declaration_corresponds_to_the_same_physical_lattice():
     part = _grid_pattern()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     features = []
     for feature in detected.features:
         if getattr(feature, "pattern", None) == "grid":
@@ -1054,7 +1076,7 @@ def test_transposed_grid_declaration_corresponds_to_the_same_physical_lattice():
 
 def test_inconsistent_grid_definition_cannot_be_certified_from_member_points_alone():
     part = _grid_pattern()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     features = [
         replace(feature, grid=(30.0, 26.0))
         if getattr(feature, "pattern", None) == "grid"
@@ -1070,7 +1092,7 @@ def test_inconsistent_grid_definition_cannot_be_certified_from_member_points_alo
 
 def test_linear_pattern_correspondence_treats_opposite_directions_as_the_same_axis():
     part = _linear_pattern()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     features = []
     for feature in detected.features:
         if getattr(feature, "pattern", None) == "linear":
@@ -1089,7 +1111,7 @@ def test_linear_pattern_correspondence_treats_opposite_directions_as_the_same_ax
 )
 def test_linear_direction_parallel_to_hole_axis_fails_closed(direction):
     part = _linear_pattern()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     declared = replace(
         detected,
         features=[
@@ -1225,7 +1247,7 @@ def test_declared_blind_pattern_tool_centres_correspond_to_recognised_openings()
 
 def test_one_declared_blind_pattern_cannot_certify_two_opposed_physical_patterns():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     patterns = [feature for feature in detected.features if feature.kind == "pattern"]
     assert len(patterns) == 2
     retained = [
@@ -1247,7 +1269,7 @@ def test_one_declared_blind_pattern_cannot_certify_two_opposed_physical_patterns
 
 def test_exact_blind_pattern_match_disambiguates_residual_tool_centres():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     patterns = [feature for feature in detected.features if feature.kind == "pattern"]
     retained = [
         feature for feature in detected.features if feature.kind not in {"hole", "pattern"}
@@ -1281,7 +1303,7 @@ def test_exact_blind_pattern_match_disambiguates_residual_tool_centres():
 
 def test_same_face_pattern_tool_centres_cannot_certify_omitted_opposed_pattern():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     patterns = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1317,7 +1339,7 @@ def test_same_face_pattern_tool_centres_cannot_certify_omitted_opposed_pattern()
 
 def test_ambiguous_exact_pattern_owners_cannot_escape_through_tool_centre_fallback():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1355,7 +1377,7 @@ def test_ambiguous_exact_pattern_owners_cannot_escape_through_tool_centre_fallba
 
 def test_partial_exact_pattern_owner_blocks_complete_tool_centre_fallback():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1394,7 +1416,7 @@ def test_partial_exact_pattern_owner_blocks_complete_tool_centre_fallback():
 
 def test_partial_owner_makes_a_complete_exact_pattern_ambiguous():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1419,7 +1441,7 @@ def test_partial_owner_makes_a_complete_exact_pattern_ambiguous():
 
 def test_exact_singleton_holes_block_pattern_tool_centre_fallback():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1466,7 +1488,7 @@ def test_exact_singleton_holes_block_pattern_tool_centre_fallback():
 
 def test_partial_tool_centre_owner_makes_complete_pattern_fallback_ambiguous():
     part = _opposed_blind_patterns()
-    detected = build_drawing(part, page="A3").model()
+    detected = detect_part_model(part)
     lower, upper = sorted(
         (feature for feature in detected.features if feature.kind == "pattern"),
         key=lambda feature: feature.frame.origin[2],
@@ -1869,7 +1891,7 @@ def test_live_furniture_retains_physical_member_center_provenance():
 
 def test_declared_step_cannot_make_plate_center_mark_replace_location_dimensions():
     part = _single_hole()
-    detected = build_drawing(part).model()
+    detected = detect_part_model(part)
     hole = next(feature for feature in detected.features if feature.kind == "hole")
     synthetic_step = StepFeature(
         frame=Frame(origin=hole.frame.origin, axis="z"),
@@ -2256,7 +2278,7 @@ def test_public_hole_table_does_not_claim_a_blank_blind_depth(monkeypatch):
 
     monkeypatch.setattr(Drawing, "add_table", capture_rows)
     part = _blind_hole()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     feature = next(feature for feature in detected.features if feature.kind == "hole")
     drawing = build_drawing(
         part,
@@ -2444,7 +2466,7 @@ def test_authored_omissions_are_suppressed_on_the_declared_path():
 
 def test_planner_omission_without_a_datum_is_missing_not_authored_suppression():
     part = _single_hole()
-    detected = build_drawing(part).model()
+    detected = detect_part_model(part)
     drawing = build_drawing(part, model=replace(detected, datums=[]))
 
     outcomes = {item.parameter_id: item.state for item in _outcomes(drawing)}
@@ -2517,7 +2539,7 @@ def test_equal_but_distinct_hole_is_not_consumed_as_a_pattern_member():
 
 def test_declared_structural_profile_cannot_certify_a_circular_hole():
     part = _single_hole()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     circular = next(feature for feature in detected.features if feature.kind == "hole")
     profiled = replace(
         circular,
@@ -2542,7 +2564,7 @@ def test_declared_structural_profile_cannot_certify_a_circular_hole():
 
 def test_shifted_declared_bolt_circle_center_cannot_certify_physical_location():
     part = _pattern_and_central_bore()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     pattern = next(feature for feature in detected.features if feature.kind == "pattern")
     z = pattern.frame.origin[2]
     shifted = replace(pattern, frame=replace(pattern.frame, origin=(5.0, 5.0, z)))
