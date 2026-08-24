@@ -6,6 +6,7 @@ from b123d_recognisers import recognise_channels, recognise_pockets
 from build123d import Align, Box, Cylinder, Pos, Rot
 
 from draftwright import build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.model import ChannelFeature, HoleFeature, PartModel, plan_dimensions
 
 
@@ -52,6 +53,8 @@ def test_corrected_fixture_has_one_channel_and_one_independent_wall_thickness():
     assert recognise_pockets(part) == []
 
     drawing = build_drawing(part)
+    detected = detect_part_model(_u_channel())
+    assert tuple(detected.features) == tuple(drawing.model().features)
     (channel,) = [
         feature for feature in drawing.model().features if isinstance(feature, ChannelFeature)
     ]
@@ -149,7 +152,7 @@ def test_channel_width_places_for_principal_axis_rotations_and_both_open_signs()
 
 def test_wrong_channel_identity_cannot_clear_the_physical_transition_warning():
     part = _u_channel()
-    detected = build_drawing(part, auto_dims=False).model()
+    detected = detect_part_model(part)
     features = [
         replace(feature, d_hi=feature.d_hi - 1) if isinstance(feature, ChannelFeature) else feature
         for feature in detected.features
@@ -169,7 +172,7 @@ def test_wrong_channel_identity_cannot_clear_the_physical_transition_warning():
 
 
 def test_declared_non_full_span_channel_does_not_suppress_a_wall():
-    detected = build_drawing(_u_channel(), auto_dims=False).model()
+    detected = detect_part_model(_u_channel())
     features = [
         replace(feature, lo=feature.lo + 1, hi=feature.hi - 1)
         if isinstance(feature, ChannelFeature)

@@ -4,6 +4,7 @@ from b123d_recognisers import recognise_rectangular_pads
 from build123d import Align, Box, Cylinder, Plane, Pos, SlotOverall, extrude
 
 from draftwright import build_drawing
+from draftwright.builder import detect_part_model
 from draftwright.model import PadFeature, pad
 from draftwright.sheet_emit import emit_sheet_script
 
@@ -62,7 +63,7 @@ def test_pad_declaration_and_sheet_emission_round_trip_surface():
     assert isinstance(feature, PadFeature)
     assert (feature.length, feature.width) == (40.0, 18.0)
 
-    model = build_drawing(_case_study()).model()
+    model = detect_part_model(_case_study())
     source = emit_sheet_script(model, "part", "out", title="T", number="N")
     assert source.count("sheet.pad(") == 4
     compile(source, "<generated-pad-sheet>", "exec")
@@ -85,6 +86,8 @@ def test_pad_declaration_and_sheet_emission_round_trip_surface():
 
 def test_auto_drawing_defines_pad_footprints_and_pocket_locations():
     drawing = build_drawing(_case_study())
+    detected = detect_part_model(_case_study())
+    assert tuple(detected.features) == tuple(drawing.model().features)
     assert [f.kind for f in drawing.model().features].count("pad") == 4
     names = set(drawing.annotations())
     assert len({name for name in names if name.startswith("m_pad")}) == 8
