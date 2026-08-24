@@ -245,3 +245,9 @@ def test_pre_drain_boss_diameter_builds_only_its_analytical_survivor(monkeypatch
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     event = next(item for item in trace["pass_events"] if item["label"] == "boss_callouts")
     assert event["assignment"] == "greedy_stage_boundary"
+    assert not [
+        item
+        for item in trace["pass_events"]
+        if item["label"] == "feature_leader_inventory"
+        and item["assignment"] == "greedy_stage_boundary"
+    ], "an immediate producer batch must not impersonate the authoritative cross-pass drain"
