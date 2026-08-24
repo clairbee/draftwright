@@ -75,6 +75,7 @@ from draftwright.export import (
     _render_png,
     add_svg_hyperlink,
     add_svg_metadata,
+    canonicalize_svg,
     fix_svg_page_size,
     sanitize_svg_arcs,
     set_dxf_metadata,
@@ -481,6 +482,34 @@ class ViewNotPlanned(KeyError):
 
     def __str__(self) -> str:
         return self.args[0] if self.args else ""
+
+
+def _geometry_key(shape):
+    """Where a part sits, to the precision an exporter writes - a sort key."""
+    box = shape.bounding_box()
+    return (
+        round(box.min.X, 9), round(box.min.Y, 9), round(box.min.Z, 9),
+        round(box.max.X, 9), round(box.max.Y, 9), round(box.max.Z, 9),
+        len(shape.edges()),
+    )
+
+
+def _canonical_parts(shape):
+    """*shape* as the parts an exporter would find in it, ordered by geometry.
+
+    Faces first and then the edges that belong to none of them, which is the
+    order the exporters walk a shape in anyway; sorting is what makes the walk
+    the same on the next run. A shape that yields nothing to sort is returned
+    as it is, so nothing is lost when this cannot tell what it is looking at.
+    """
+    try:
+        faces = sorted(shape.faces(), key=_geometry_key)
+        in_faces = {edge for face in faces for edge in face.edges()}
+        loose = sorted((e for e in shape.edges() if e not in in_faces), key=_geometry_key)
+    except Exception:
+        return shape
+    parts = faces + loose
+    return parts if parts else shape
 
 
 class Drawing:
@@ -3650,6 +3679,9 @@ class Drawing:
         self._add_shapes(svg_exp)
         svg_path = out + ".svg"
         svg_exp.write(svg_path)
+        # Before the passes below read it back: they rewrite what is there,
+        # this settles what order it is in. See canonicalize_svg().
+        canonicalize_svg(svg_path)
         fix_svg_page_size(svg_path, self.page_w, self.page_h)
         n_arcs = sanitize_svg_arcs(svg_path)
         if n_arcs:
@@ -4432,12 +4464,21 @@ class Drawing:
         return paths["pdf"]
 
     def _add_shapes(self, exporter):
-        """Add every view layer and annotation to *exporter* with error context."""
+        """Add every view layer and annotation to *exporter* with error context.
+
+        Each shape is handed over as its parts in a canonical order rather than
+        whole, so that an export writes the same bytes twice. An exporter walks a
+        shape with ``.faces()``/``.edges()``, and build123d returns those in an
+        order that follows the interpreter's hash seed - two faces of one glyph
+        change places between runs - which reaches the file as reordered SVG
+        elements and, in a DXF, as reordered entities with reshuffled handles.
+        Ordering by geometry costs one bounding box per part and settles both.
+        """
         for name, (vis, hid) in self.views.items():
-            _export_shape(exporter, vis, "part", f"view {name!r}")
+            _export_shape(exporter, _canonical_parts(vis), "part", f"view {name!r}")
             if hid:
-                _export_shape(exporter, hid, "hidden", f"view {name!r}")
+                _export_shape(exporter, _canonical_parts(hid), "hidden", f"view {name!r}")
         names = {id(annotation): name for name, annotation in self.iter_annotations()}
         for ann in self.items:
             identity = names.get(id(ann)) or getattr(ann, "label", "") or type(ann).__name__
-            _export_shape(exporter, ann, "dims", f"annotation {identity!r}")
+            _export_shape(exporter, _canonical_parts(ann), "dims", f"annotation {identity!r}")

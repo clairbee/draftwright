@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -104,6 +105,41 @@ def _semantic_font_name(font_path: str) -> str:
     digest = sha256(path.read_bytes()).hexdigest()[:12]
     stem = re.sub(r"[^A-Za-z0-9]+", "_", path.stem)
     return f"Draftwright_{stem}_{digest}"
+
+
+_SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def canonicalize_svg(svg_path: str) -> None:
+    """Emit the elements of each layer in an order that does not depend on the run.
+
+    ExportSVG writes one element per face, in the order build123d hands them
+    over - and that order follows the interpreter's hash seed, which is
+    randomized per process. Two faces of one glyph (the stem and the tittle of
+    an 'i') change places between runs, so two exports of one drawing differ in
+    bytes while being the same picture. That is enough to make a drawing useless
+    as something to check in and diff, which is how a caller notices that its
+    output has changed.
+
+    Sorting each layer's children by their serialized form settles it. The
+    layers keep their order, so what paints over what is unchanged; within a
+    layer these are disjoint outlines with one style, where order is not
+    something the drawing means. Only groups whose children are all leaves are
+    touched, so a nested group is never flattened or reordered.
+    """
+    # Round-tripping through ElementTree drops the default namespace unless it
+    # is registered, and an SVG without its xmlns is one nothing downstream can
+    # read - svglib included, which is how the PDF is rendered.
+    ET.register_namespace("", _SVG_NS.strip("{}"))
+    ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+    tree = ET.parse(svg_path)
+    for group in tree.getroot().iter(_SVG_NS + "g"):
+        children = list(group)
+        if len(children) < 2 or any(len(child) for child in children):
+            continue
+        children.sort(key=lambda e: ET.tostring(e, encoding="unicode"))
+        group[:] = children
+    tree.write(svg_path, encoding="utf-8", xml_declaration=True)
 
 
 def fix_svg_page_size(svg_path: str, page_w: float, page_h: float) -> None:
@@ -207,7 +243,7 @@ def set_dxf_metadata(dxf) -> None:
         pass
 
 
-def write_dxf(dxf, path: str, page_w: float, page_h: float) -> None:
+def write_dxf(dxf, path: str, page_w: float, page_h: float, reproducible: bool = True) -> None:
     """Write *dxf* with the viewport zoomed to the known page window.
 
     ``ExportDXF.write`` resets the viewport via ``ezdxf.zoom.extents`` — a
@@ -231,7 +267,35 @@ def write_dxf(dxf, path: str, page_w: float, page_h: float) -> None:
     except Exception:
         dxf.write(path)
         return
+    if reproducible:
+        _make_dxf_reproducible(doc)
     doc.saveas(path, fmt="asc")
+
+
+def _make_dxf_reproducible(doc) -> None:
+    """Take the clock and the hash seed out of what ezdxf is about to write.
+
+    Every save stamps the time it happened ($TDCREATE/$TDUPDATE and their UTC
+    twins), a freshly generated $VERSIONGUID/$FINGERPRINTGUID pair, and a marker
+    string carrying another timestamp. ezdxf writes fixed values for all of them
+    behind one option - a fixed date, the all-zero GUID a new document starts
+    with, and a constant marker.
+
+    The CLASSES section is the other half. ezdxf registers a class entry for
+    every DXF type the document uses and finds them by iterating a set of type
+    names, whose order over strings follows the interpreter's hash seed. A
+    caller cannot pin that seed from the environment in every host (a sandbox
+    running under '-I' makes Python ignore PYTHONHASHSEED), so the names are
+    registered here first, sorted: 'add_class()' keeps the first entry for a key,
+    and ezdxf's own pass during the save then adds only what is left.
+    """
+    try:
+        ezdxf.options.write_fixed_meta_data_for_testing = True
+        for dxftype in sorted(doc.entitydb.dxf_types_in_use()):
+            doc.classes.add_class(dxftype)
+    except Exception:
+        # Reproducibility is not worth failing an export over.
+        _log.debug("could not pin the DXF metadata", exc_info=True)
 
 
 class _DraftwrightDXF(ExportDXF):
@@ -316,7 +380,13 @@ def sanitize_svg_arcs(svg_path: str) -> int:
     return n
 
 
-def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> None:
+def _render_pdf(
+    svg_path: str,
+    pdf_path: str,
+    link_rect=None,
+    text_runs=(),
+    reproducible: bool = True,
+) -> None:
     """Render *svg_path* to *pdf_path* via svglib + reportlab, adding draftwright
     metadata and — when *link_rect* (drawing page coords, Y up) is given — a
     clickable PDF link annotation over that rectangle. *text_runs* overlays
@@ -340,7 +410,13 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
     try:
         from reportlab.graphics import renderPDF
 
-        canvas = Canvas(pdf_path, pagesize=(drawing.width, drawing.height))
+        # 'invariant' is reportlab's own switch for a file that does not
+        # carry the moment it was produced: a fixed /CreationDate and a derived
+        # /ID rather than the clock's. Without it two renders of one drawing
+        # differ in bytes.
+        canvas = Canvas(
+            pdf_path, pagesize=(drawing.width, drawing.height), invariant=reproducible
+        )
         canvas.setCreator(_GENERATED_BY)
         canvas.setTitle(_GENERATED_BY)
         renderPDF.draw(drawing, canvas, 0, 0)
