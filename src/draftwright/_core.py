@@ -358,7 +358,10 @@ _QUOTED_RE = re.compile(r"'([^']*)'")
 
 @functools.lru_cache(maxsize=512)
 def _text_size(
-    text: str, font_size: float, font_path: str | None = PLEX_MONO, font: str = "Arial"
+    text: str,
+    font_size: float,
+    font_path: str | None = PLEX_MONO,
+    font: str = "Arial",
 ) -> tuple[float, float]:
     """Measured rendered (width, height) (page-mm) of *text* at *font_size*.
 

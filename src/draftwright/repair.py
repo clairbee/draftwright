@@ -100,6 +100,32 @@ def repair_drawing(dwg, max_iter: int = 3):
             break
         if len(dwg.lint(physical=False)) > len(before):
             # The repairs net-worsened the sheet — undo this pass and stop.
+            #
+            # Note what this counts: EVERY placement issue, while `_REPAIRABLE_CODES`
+            # holds one. So a code the loop cannot target still decides whether a
+            # repair survives. A flip that corrects a `dim_inside_part` while moving
+            # its dimension line across a neighbour's label nets +1 and is undone,
+            # leaving the wrong-side dimension in place.
+            #
+            # Not one-directional, though: the flip moves the dimension line, which
+            # IS the ink `annotation_ink_overlap` measures, so it can clear a
+            # crossing as readily as create one. An earlier revision of this comment
+            # claimed such codes "can vote a repair down but never vote one up",
+            # which the measurement quoted below does not establish and the geometry
+            # contradicts.
+            #
+            # Measured over the population where it can actually occur. A first
+            # measurement counted zero flips across the 23 STEP fixtures, which was
+            # true and beside the point: `dim_inside_part` fires on Python-built
+            # parts, so that corpus cannot exercise this at all. Instrumenting
+            # `_repair_dim_inside_part` across the **whole test suite** records 2
+            # flips, of which 0 net-worsen counting ink and 0 are reverted because of
+            # it. So the veto is reachable and does not currently fire.
+            #
+            # The asymmetry is pre-existing and structural rather than anything #1321
+            # introduced — it acquires a new member with every lint code added — and
+            # it dissolves once #1333 makes these codes repairable, at which point the
+            # loop can improve what it is being judged on.
             dwg.items[:] = snap_annotations
             dwg.registry.restore(snap_registry)
             break

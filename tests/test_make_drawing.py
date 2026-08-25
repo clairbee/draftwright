@@ -4009,7 +4009,13 @@ class TestPrismaticClassification:
         # The below strip extends downward from the side view, so nearer the view =
         # higher Y. The location dim must sit nearer the view than the overall dim.
         assert min(ymid(o) for o in loc) > ymid(env), "location must stack inside the envelope"
-        assert [i for i in dwg.lint() if i.severity != "info"] == []
+        # #1321/#1332: this drawing genuinely carries one crossing, named rather
+        # than filtered by code so a second one would fail here. Measured, not
+        # rendered — same family as the cases that were. Stage 3 (#1334) is what
+        # stops it being placed; until then the honest assertion is that it is
+        # here, not that the sheet is clean.
+        rest = _ink_crossings_named(dwg, [("40", "⌀6 THRU")])
+        assert [i for i in rest if i.severity != "info"] == []
 
     def test_envelope_depth_survives_many_side_location_dims(self):
         # The mandatory overall depth dim must always be placed, even when several
@@ -4891,7 +4897,20 @@ class TestLocationDimsAndSection:
             part -= Pos(0, 0, z) * Cylinder(r, 60, rotation=(0, 90, 0))
         dwg = build_drawing(part)
         assert len([n for n in dwg.annotations() if n.startswith("hc_side")]) == 4
-        assert [i for i in dwg.lint() if i.severity != "info"] == []
+        # #1321/#1332: the envelope length '80' runs through all four side-drilled
+        # callouts. Named rather than filtered by code, so a fifth would fail here.
+        # Measured, not rendered — same family as the cases that were. Stage 3
+        # (#1334) is what stops them being placed.
+        rest = _ink_crossings_named(
+            dwg,
+            [
+                ("80", "⌀2 THRU"),
+                ("80", "⌀2.4 THRU"),
+                ("80", "⌀2.8 THRU"),
+                ("80", "⌀3.2 THRU"),
+            ],
+        )
+        assert [i for i in rest if i.severity != "info"] == []
 
     @pytest.mark.timeout(120)
     def test_fully_blocked_plan_strip_defers_instead_of_unsafe_snap(self):
@@ -9608,10 +9627,20 @@ class TestTurnedDiameters:
         # The `leader_crosses_silhouette` entry is the #798 bolt-circle cut described in
         # test_issue_881_...; it appears on BOTH paths, which is what this test is
         # actually about — the replay reproduces the same critique, defects included.
+        # Four `annotation_ink_overlap` (#1321/#1332): the step-length chain on this
+        # fixture is crowded enough that four dimensions draw line-work through a
+        # neighbour's label, the smallest 0.9 mm and the largest 2.2 mm. Rendered at
+        # 600 dpi and confirmed. Both paths report all four, which is what this test
+        # is actually about -- the replay reproduces the same critique, defects
+        # included. Stage 3 (#1334) is what stops them being placed.
         assert (
             auto.lint_summary()["by_code"]
             == replayed.lint_summary()["by_code"]
-            == {"hole_requirement_missing": 2, "leader_crosses_silhouette": 1}
+            == {
+                "hole_requirement_missing": 2,
+                "leader_crosses_silhouette": 1,
+                "annotation_ink_overlap": 4,
+            }
         )
 
         # ── from #881: the Y-step furniture lands in the right views on the replay ──
@@ -11118,6 +11147,39 @@ class TestZoneGrid:
         assert rows <= len(_ZONE_LETTERS)
 
 
+def _ink_crossings_named(dwg, expected):
+    """Assert the sheet's ink crossings are exactly *expected*, and return the rest.
+
+    *expected* is an iterable of ``(crosser, crossed)`` label pairs. Filtering the
+    whole `annotation_ink_overlap` code instead would let a sheet accumulate any
+    number of new crossings without failing — the weakening #1332's review flagged.
+    Naming them keeps these assertions as sharp as they were when the sheets were
+    lint-clean.
+    """
+    crossings = [i for i in dwg.lint() if i.code == "annotation_ink_overlap"]
+    expected = list(expected)
+    unmatched = []
+    seen = set()
+    for issue in crossings:
+        for pair in expected:
+            if (
+                f"'{pair[0]}' draws" in issue.message
+                and f"through the label '{pair[1]}'" in issue.message
+            ):
+                seen.add(pair)
+                break
+        else:
+            unmatched.append(issue.message)
+    assert not unmatched, f"unexpected ink crossings: {unmatched}"
+    assert seen == set(expected), (
+        f"ink crossings changed: expected {sorted(expected)}, matched {sorted(seen)}"
+    )
+    assert len(crossings) == len(expected), (
+        f"expected {len(expected)} crossings, got {len(crossings)}"
+    )
+    return [i for i in dwg.lint() if i.code != "annotation_ink_overlap"]
+
+
 class TestEscalation:
     """#93: a too-dense plan view auto-escalates to a hole chart + balloons."""
 
@@ -11135,7 +11197,11 @@ class TestEscalation:
         assert not any(n.startswith("balloon_") for n in ann)
         assert sum(1 for n in ann if n.startswith("hc_plan")) >= 1  # spec-group callouts
         assert any(n.startswith("m_locx") for n in ann)  # location dims placed, not dropped
-        warnings = [i for i in dwg.lint() if i.severity in ("warning", "error")]
+        remaining = _ink_crossings_named(
+            dwg,
+            [(str(value), "2× 14.1") for value in (10, 20, 30, 40, 50, 60)],
+        )
+        warnings = [i for i in remaining if i.severity in ("warning", "error")]
         assert warnings and {issue.code for issue in warnings} == {
             "hole_pattern_dim_dropped",
             # The #1250 summary of that same drop, at error severity so `passed` cannot be
@@ -11143,6 +11209,9 @@ class TestEscalation:
             "plan_incomplete",
         }
         assert all(issue.measurement_ids for issue in warnings)
+        # The helper's exact rotated label polygon makes these six previously
+        # unmeasurable crossings visible without clipping against the inflated
+        # 10.197 × 10.197 mm AABB (#1322 review).
 
     def test_escalation_clears_density_lint(self, dense_plate_dwg):
         # No callout_dropped / location_ref_dropped / count-mismatch warnings

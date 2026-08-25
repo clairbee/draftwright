@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- New lint code `annotation_ink_overlap`: reports another annotation's line-work —
+  a dimension line, an extension line or a leader shaft — drawn through a label's
+  text, which `annotation_overlap` cannot see because it compares label boxes to
+  each other and to nothing else. Measured as the longest connected stroke path
+  crossing the label's exact polygon (or its axis-aligned box), in millimetres,
+  with a 0.5 mm floor. It scores on legibility, so
+  dense sheets that previously scored clean now score lower — 17 findings on
+  NIST CTC-02 AP203 alone, every sampled one confirmed a real defect by rendering.
+  Repair does not yet act on it (#1333) and the corridor solve does not yet avoid
+  it (#1334) (#1321, #1332).
+
 ### Changed
+
+- `annotation_overlap` now reports the whole defect when the same pair also draws
+  line-work through one of the two labels: the message names the crosser, the label
+  crossed and the millimetres, and replaces the "use `label_offset_x`" remedy, which
+  is the advice that case contradicts. `LintIssue.suggestion` is `None` for those
+  issues rather than a snippet that re-places the text (#1321, #1332).
 
 - Recogniser integration now uses only the exact `b123d-recognisers` dependency in
   `pyproject.toml` and `uv.lock`. The separate release-evidence record, dependency-bump workflow,

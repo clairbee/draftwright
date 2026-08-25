@@ -23,6 +23,7 @@ from draftwright._geometry import (
     _segment_clips_box,
     material_reentry_span,
 )
+from draftwright.linting.ink_overlap import crossable_region, label_crossings, segments_of
 from draftwright.linting.issues import LintIssue, _IssueAggregation
 from draftwright.projection import _MATERIAL_PAGE_TOLERANCE
 
@@ -359,14 +360,52 @@ def lint_drawing(
     # item's box exactly once up front and index into it instead (#161); the
     # result is identical. Centre lines are compared via _centerline_extent, not
     # this box, so they don't need one.
-    def _label_box(item):
-        lb = _label_bbox(item, warned_label_bbox)
+    def _label_box(item, index):
+        # `label_boxes[index]`, not a second `_label_bbox(item, ...)` call: this
+        # loop and the one above ran it once each per item, which is the
+        # recomputation the note above cites #161 for.
+        lb = label_boxes[index]
         if lb is not None:
             return lb
         return _ann_box(item, box_cache)
 
-    boxes: list = []
+    # Text extents and located line-work, computed ONCE per item. #161 removed
+    # exactly this recomputation from the pair loop below ("previously recomputed
+    # for both items of every pair (O(n²): ~200 s on an 83-hole part)"), and the
+    # #1321 check reintroduced it: `_label_bbox` per pair plus `segments`, a
+    # property that rebuilds its list from the annotation's location on every
+    # read. Measured on `nist_ctc_02_asme1_ap203` (162 annotations) that cost
+    # +32% of lint time, and a build lints 3-7 times.
+    label_boxes: list = []
+    crossable_regions: list = []
+    ink_segments: list = []
+    # Per-run memo for the "cannot measure this" warnings, so one diagonal label
+    # warns once for the whole lint rather than once per pass — `repair()` lints
+    # twice per pass for up to three passes.
+    warned_unmeasurable: set[str] = set()
     for item in items:
+        _box = _label_bbox(item, warned_label_bbox)
+        label_boxes.append(_box)
+        # A SEPARATE list. `label_boxes` feeds `_label_box` and through it
+        # `annotation_overlap`, which must keep comparing the real text extents:
+        # nulling an entry here made that check fall back to `_ann_box`, the full
+        # annotation extent including witness lines, and it began firing on pairs
+        # it had never reported. Only the ink check may treat an untight box as
+        # absent. Excluded once per item so the warning cannot repeat per pair.
+        item_segments = segments_of(item, warned_unmeasurable)
+        ink_segments.append(item_segments)
+        crossable_regions.append(
+            crossable_region(
+                _box,
+                item=item,
+                segments=item_segments,
+                seen=warned_unmeasurable,
+                report=True,
+            )
+        )
+
+    boxes: list = []
+    for index, item in enumerate(items):
         # The sheet frame (#767) spans the page by design; a None box excludes it from every
         # pairwise overlap (like a centerline), so it doesn't "overlap" every annotation.
         if (
@@ -376,11 +415,12 @@ def lint_drawing(
         ):
             boxes.append(None)
             continue
-        boxes.append(_label_box(item))
+        boxes.append(_label_box(item, index))
 
     # #701: the check body runs unguarded — the fragile duck-typed reads happened
     # above (boxes) or inside the callee; a bug here must fail loudly, not silently
     # disable the check forever.
+
     for i, item_a in enumerate(items):
         for j in range(i + 1, len(items)):
             item_b = items[j]
@@ -418,17 +458,125 @@ def lint_drawing(
             if ox > 0.5 and oy > 0.5:
                 la = getattr(item_a, "label", "?")
                 lb = getattr(item_b, "label", "?")
-                issues.append(
-                    LintIssue(
-                        severity="warning",
-                        message=(
-                            f"labels '{la}' and '{lb}' overlap by "
-                            f"{ox:.1f}×{oy:.1f} mm — use label_offset_x or "
-                            f"increase dim offset to separate them"
-                        ),
-                        code="annotation_overlap",
-                    )
+                # If the same pair ALSO draws line-work through one of those
+                # labels, moving the text is not the whole remedy — #1321 exists
+                # to say so. Only one code is emitted for the pair (the ink check
+                # below is skipped), so the surviving message has to carry both
+                # facts rather than send the reader after `label_offset_x` alone.
+                crossings_here = label_crossings(
+                    ink_segments[i],
+                    ink_segments[j],
+                    label_a=crossable_regions[i],
+                    label_b=crossable_regions[j],
                 )
+                also_crosses = bool(crossings_here)
+                if not also_crosses:
+                    remedy = "use label_offset_x or increase dim offset to separate them"
+                else:
+                    # State which label, by what, and how far. An earlier revision
+                    # computed exactly this and reduced it to a boolean, while the
+                    # note below deferred those same three facts to #1333 as the
+                    # detail the reader loses.
+                    worst = crossings_here[0]
+                    crosser, crossed = (item_a, item_b) if worst.crosses_b else (item_b, item_a)
+                    crosser_label = getattr(crosser, "label", None) or _item_label(crosser) or "?"
+                    crossed_label = getattr(crossed, "label", None) or _item_label(crossed) or "?"
+                    remedy = (
+                        f"'{crosser_label}' also draws {worst.length:.1f} mm of "
+                        f"line-work through the label '{crossed_label}', so separating "
+                        "the text is not enough — move what is drawn (#1321)"
+                    )
+                overlap_issue = LintIssue(
+                    severity="warning",
+                    message=(
+                        f"labels '{la}' and '{lb}' overlap by {ox:.1f}×{oy:.1f} mm — {remedy}"
+                    ),
+                    code="annotation_overlap",
+                )
+                issues.append(overlap_issue)
+                # `annotation_overlap` deliberately does NOT enter #1147's ledger,
+                # and this branch must not put it there. Two revisions tried and
+                # both changed the score of a code that never participated,
+                # because `_primary_issues` keys on `(code, token)`: recording
+                # every overlap collapsed pairs that merely shared a subject
+                # (2 raw -> 1 primary, and which survived depended on `items`
+                # order), and restricting it to pairs that ALSO cross collapsed
+                # pairs that shared a *crossed* label (3 raw -> 2 primary against
+                # main's 3), so adding ink crossings to a sheet RAISED its
+                # legibility score.
+                #
+                # Collapsing by the crossed label is right for
+                # `annotation_ink_overlap`, where one unreadable label is one
+                # defect. It is wrong for `annotation_overlap`, which is about two
+                # labels colliding with each other and has no single subject.
+                #
+                # The cost is real and stays: a pair both overlapped and crossed
+                # reports only the overlap, so the reader loses which label is
+                # obscured, by what, and how far. #1333 owns that, and the fix is
+                # to carry the detail in the surviving message rather than to key
+                # a second code into the ledger.
+                continue
+
+            # The label boxes clear each other, which does not mean the
+            # line-work does: a dimension line, an extension line or a leader
+            # shaft drawn across a label is not a label, and the test above
+            # cannot see it (#1321).
+            #
+            # Arithmetic on the annotations' own located segments — no CAD
+            # boolean, so there is nothing to budget and both supported build123d
+            # releases answer identically. The extents are the ones computed once
+            # above; `label_boxes` holds TEXT extents, so an annotation without a
+            # label_bbox contributes `None` and cannot be crossed. Falling back to
+            # its full extent would report every dimension whose line-work reaches
+            # a neighbour's arm.
+            for crossing in label_crossings(
+                ink_segments[i],
+                ink_segments[j],
+                label_a=crossable_regions[i],
+                label_b=crossable_regions[j],
+            ):
+                crosser, crossed = (item_a, item_b) if crossing.crosses_b else (item_b, item_a)
+                lc = getattr(crosser, "label", None) or _item_label(crosser) or "?"
+                lx = getattr(crossed, "label", None) or _item_label(crossed) or "?"
+                # Label text is NOT unique on a sheet. Measured on
+                # `nist_ctc_02_asme1_ap203`, `'4× 75'` names two annotations and
+                # `'5× ⌀8.4 ↧ 25'` names three, so three of that sheet's findings
+                # read identically apart from the millimetre figure and a reader
+                # told to "move what is drawn" cannot tell which of six pairings
+                # is meant. The crossed label's centre disambiguates them, and the
+                # sibling pairwise check `_lint_centerline_dim_overlap` already
+                # reports a location for the same reason.
+                crossed_box = crossing.label_box
+                location = (
+                    (
+                        (crossed_box[0] + crossed_box[2]) / 2.0,
+                        (crossed_box[1] + crossed_box[3]) / 2.0,
+                    )
+                    if crossed_box
+                    else None
+                )
+                issue = LintIssue(
+                    severity="warning",
+                    message=(
+                        f"'{lc}' draws {crossing.length:.1f} mm of line-work "
+                        f"through the label '{lx}' — the labels clear each "
+                        "other, so this is a dimension line, an extension "
+                        "line or a leader over text; move what is drawn, "
+                        "not just the text"
+                    ),
+                    code="annotation_ink_overlap",
+                    location=location,
+                )
+                issues.append(issue)
+                # #1147: the defect belongs to the label being obscured, not to
+                # each thing that crosses it. On `nist_ctc_03_asme1_ap203` six
+                # different dimensions cross the single label '19.1'; without
+                # this the one unreadable label costs six primary warnings
+                # against the legibility score. The token is the crossed item's,
+                # so the ledger collapses them onto it.
+                crossed_token = pair_tokens.get(id(crossed))
+                if _aggregation is not None and crossed_token is not None:
+                    _aggregation.record_pair(issue, crossed_token)
 
     # Page-bounds check — annotations must stay within the drawable area.
     # (#701: unguarded — _ann_box absorbs the fragile measure; the rest is arithmetic.)
