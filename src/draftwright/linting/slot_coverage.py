@@ -16,7 +16,14 @@ from b123d_recognisers import RecognitionResult
 
 from draftwright.linting.issues import LintIssue
 
-SlotRequirementState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
+SlotRequirementState = Literal[
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+]
 SlotSourceKind = Literal["slot", "slot_pattern"]
 
 
@@ -195,15 +202,20 @@ def _physical_requirement_count(kind: SlotSourceKind, source) -> int:
     return 5 if _pattern_key(source)[0] == "linear" else 6
 
 
-def _state(feature, parameter, *, placed, suppressed, dropped, registry):
+def _state(feature, parameter, *, placed, satisfied, suppressed, dropped, registry):
     if any(_matches(measurement, feature, parameter) for measurement in placed):
         return "placed"
+    if any(_matches(identity, feature, parameter) for identity in satisfied):
+        return "satisfied_by_structured_note"
     if (feature, parameter) in suppressed:
         return "suppressed"
     if any(_matches(measurement, feature, parameter) for measurement in dropped):
         return "dropped"
     associated = registry.names_for_feature(feature)
-    if any(not registry.measurement_of(name) for name in associated):
+    if any(
+        not registry.measurement_of(name) and not registry.satisfaction_of(name)
+        for name in associated
+    ):
         return "unverifiable"
     return "missing"
 
@@ -256,6 +268,9 @@ def slot_requirement_outcomes(
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
+    satisfied = {
+        identity for name in registry.names() for identity in registry.satisfaction_of(name)
+    }
     suppressed = {
         (omission.feature, omission.parameter_id)
         for omission in omissions
@@ -298,6 +313,7 @@ def slot_requirement_outcomes(
                     feature,
                     parameter,
                     placed=placed,
+                    satisfied=satisfied,
                     suppressed=suppressed,
                     dropped=dropped,
                     registry=registry,
@@ -328,7 +344,7 @@ def lint_slot_coverage(
     }
     issues = []
     for outcome in slot_requirement_outcomes(recognition, features, registry, omissions):
-        if outcome.state in {"placed", "dropped"}:
+        if outcome.state in {"placed", "satisfied_by_structured_note", "dropped"}:
             continue
         noun = "slot" if outcome.source_kind == "slot" else f"{outcome.member_count}-slot pattern"
         issues.append(

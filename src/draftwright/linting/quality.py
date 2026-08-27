@@ -18,7 +18,8 @@ Completeness is deliberately marked partial.  Only the feature families with a s
 for the missing physical denominator.
 
 Its scalar is therefore named ``audited_score``, not ``score``.  A part reaches 1.0 whenever
-every requirement recognition *did* identify was placed, however much of the part it missed:
+every requirement recognition *did* identify was placed or explicitly satisfied by structured
+note authority, however much of the part it missed:
 what was never recognised never became a requirement, so it is absent from the ledger rather
 than counted against it.  (Where nothing auditable was recognised at all, the component
 reports ``available: False`` and a ``None`` score — not a perfect one.)  The qualifier
@@ -38,7 +39,14 @@ from draftwright.linting.issues import LintIssue, is_placement_drop
 from draftwright.linting.polygonal_stock_coverage import polygonal_stock_outcomes
 from draftwright.linting.slot_coverage import slot_requirement_outcomes
 
-_OUTCOME_STATES = ("placed", "suppressed", "dropped", "missing", "unverifiable")
+_OUTCOME_STATES = (
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+)
 
 # Structural diagnostics that describe whether the composed sheet remains readable. Placement
 # drops have their own explicit inventory below because a ``*_dropped`` suffix alone cannot
@@ -584,7 +592,8 @@ def _completeness_component(recognition, features, registry, omissions, issues) 
         if getattr(recognition, attribute, ())
     }
     unaudited = sorted(recognised - set(_AUDITED_FAMILIES))
-    audited_score = counts["placed"] / requirements if requirements else None
+    covered = counts["placed"] + counts["satisfied_by_structured_note"]
+    audited_score = covered / requirements if requirements else None
     if requirements:
         reason = (
             "audited_score covers recognized requirements in audited families only; it is "

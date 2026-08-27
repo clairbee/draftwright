@@ -123,6 +123,23 @@ a chainable handle (`sheet.hole(bore)`) that the aspect and `control(...)` verbs
 targets are placed automatically — the view and strip are derived from the referenced
 feature or face, with `view=`/`side=` overrides.
 
+A feature-linked note can explicitly satisfy requirements that are legitimately communicated
+as one compound shop instruction instead of separate dimensions. Use the canonical ids exposed
+by the handle; free prose alone never changes coverage:
+
+```python
+assert "counterbore.diameter" in hole.dimension_ids()
+hole.note(
+    "PROFILED BORE: ⌀14 × 8 DEEP",
+    satisfies=("counterbore.diameter", "counterbore.depth"),
+)
+```
+
+Each id remains an independent requirement in lint output, reported as
+`satisfied_by_structured_note`; the assertion counts only if the normal placement solve places
+the note. Generated Sheet scripts preserve the structured claim. Invalid, duplicate, ambiguous,
+or face-only claims fail at declaration time.
+
 ### From a part to an object-referenced script
 
 `draftwright part.step --script` writes an editable `Sheet` script. When you built the part

@@ -2019,7 +2019,7 @@ def finish(ra, ref, part=None, *, view=None, side=None) -> Finish:
     return Finish(frame=Frame(site, axis), ra=ra, view=v, side=s, origin=origin)
 
 
-def note(text, ref, part=None, *, view=None, side=None) -> Note:
+def note(text, ref, part=None, *, view=None, side=None, satisfies: tuple[str, ...] = ()) -> Note:
     """A free-text manufacturing note (#488) on a leader to *ref* — a feature or a planar face
     (ADR 0011 P2c). The shop callouts detection can't infer: thread specs (``M3x0.5 TAP``),
     ``DEBURR``, chip-relief, knurl. Placed like the GD&T items (a first-class ADR 0009 corridor
@@ -2029,7 +2029,14 @@ def note(text, ref, part=None, *, view=None, side=None) -> Note:
         raise ValueError("note needs text (e.g. 'M3x0.5 TAP')")
     v, s, site, axis = _surface_target(ref, part, view=view, side=side)
     origin = ref if isinstance(ref, Feature) else None
-    return Note(frame=Frame(site, axis), text=text, view=v, side=s, origin=origin)
+    return Note(
+        frame=Frame(site, axis),
+        text=text,
+        view=v,
+        side=s,
+        origin=origin,
+        satisfies=satisfies,
+    )
 
 
 def control_frame(

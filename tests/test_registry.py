@@ -154,7 +154,14 @@ def test_identity_of_reapply_round_trips_every_axis():
     # exactly the tool this identity exists to feed (#1002, Codex r2).
     r = AnnotationRegistry()
     obj, feat = object(), object()
-    r.add(obj, "d1", "front", feature=feat, measurement=("bore.depth",))
+    r.add(
+        obj,
+        "d1",
+        "front",
+        feature=feat,
+        measurement=("bore.depth",),
+        satisfaction=("counterbore.depth",),
+    )
     r.pin("d1")
     ident = r.identity_of("d1")
 
@@ -163,6 +170,7 @@ def test_identity_of_reapply_round_trips_every_axis():
         "view": None,
         "feature": None,
         "measurement": (),
+        "satisfaction": (),
         "pinned": False,
     }
 
@@ -171,6 +179,7 @@ def test_identity_of_reapply_round_trips_every_axis():
     assert r.view_of("d1") == "front"
     assert r.feature_of("d1") is feat
     assert r.measurement_of("d1") == ("bore.depth",)
+    assert r.satisfaction_of("d1") == ("counterbore.depth",)
     assert r.is_pinned("d1")
 
 
@@ -178,12 +187,20 @@ def test_reapply_clears_axes_the_identity_does_not_carry():
     # Authoritative, not additive: a restore must never leave the name wearing metadata
     # from whatever briefly held the slot.
     r = AnnotationRegistry()
-    r.add(object(), "d1", "plan", feature=object(), measurement=("width.length",))
+    r.add(
+        object(),
+        "d1",
+        "plan",
+        feature=object(),
+        measurement=("width.length",),
+        satisfaction=("height.length",),
+    )
     r.pin("d1")
     r.reapply("d1", {"view": "front", "feature": None, "measurement": (), "pinned": False})
     assert r.view_of("d1") == "front"
     assert r.feature_of("d1") is None
     assert r.measurement_of("d1") == ()
+    assert r.satisfaction_of("d1") == ()
     assert not r.is_pinned("d1")
 
 

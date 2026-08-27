@@ -86,7 +86,16 @@ def _decode_hole_location_fact(fact):
     return feature, parameter, point
 
 
-def place_annotation(registry, items, obj, name=None, view=None, feature=None, measurement=None):
+def place_annotation(
+    registry,
+    items,
+    obj,
+    name=None,
+    view=None,
+    feature=None,
+    measurement=None,
+    satisfaction=None,
+):
     """The annotation-placement primitive (#817): register *obj* under *name* — replacing any
     prior object of that name (dropped from the render list *items*) so a name maps to one
     object — append it to *items*, and record its owning *view* + source *feature* in *registry*.
@@ -94,13 +103,15 @@ def place_annotation(registry, items, obj, name=None, view=None, feature=None, m
     annotations without reaching into the ``Drawing``. Returns *obj*.
 
     *measurement* is the `DimensionId` *obj* draws, where the caller holds one (#1002) —
-    one axis finer than *feature*, since a feature has several measurements."""
+    one axis finer than *feature*, since a feature has several measurements. *satisfaction*
+    is the separate set of requirements a structured note explicitly satisfies (#1351); it
+    never claims that the note drew a measurement."""
     displaced = registry.named(name) if name is not None else None
     if displaced is not None:
         items.remove(displaced)
     annotate(obj, name)
     items.append(obj)
-    registry.add(obj, name, view, feature, measurement)
+    registry.add(obj, name, view, feature, measurement, satisfaction)
     return obj
 
 

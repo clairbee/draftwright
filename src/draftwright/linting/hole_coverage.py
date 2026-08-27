@@ -18,7 +18,14 @@ from draftwright._core import _decode_hole_location_fact
 from draftwright._geometry import _END_ON, _is_principal_axis
 from draftwright.linting.issues import LintIssue, is_placement_drop
 
-HoleRequirementState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
+HoleRequirementState = Literal[
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+]
 HoleSourceKind = Literal["hole", "hole_pattern"]
 _DIRECTION_PROJECTION_REL_TOL = 1e-6
 
@@ -502,6 +509,7 @@ def _location_members(feature, parameter: str):
 @dataclass
 class _HoleEvidence:
     placed: set[tuple[object, str]]
+    satisfied: set[tuple[object, str]]
     dropped: set[tuple[object, str]]
     requirement_counts: dict[tuple[object, str], set[int]]
     locations: dict[tuple[object, str], set[tuple[float, float, float]]]
@@ -520,6 +528,13 @@ def _normalised_location(feature, point) -> tuple[float, float, float]:
 
 def _index_hole_evidence(registry) -> _HoleEvidence:
     placed = set()
+    satisfied: set[tuple[object, str]] = set()
+    for name in registry.names():
+        for identity in registry.satisfaction_of(name):
+            feature = getattr(identity, "feature", None)
+            parameter = getattr(identity, "parameter", None)
+            if feature is not None and isinstance(parameter, str):
+                satisfied.add((feature, parameter))
     requirement_counts: dict[tuple[object, str], set[int]] = defaultdict(set)
     locations: dict[tuple[object, str], set[tuple[float, float, float]]] = defaultdict(set)
     centers: dict[object, set[tuple[tuple[float, float, float], str]]] = defaultdict(set)
@@ -608,6 +623,7 @@ def _index_hole_evidence(registry) -> _HoleEvidence:
     )
     return _HoleEvidence(
         placed,
+        satisfied,
         dropped,
         requirement_counts,
         locations,
@@ -696,6 +712,9 @@ def _state(features, parameter, *, member_count, evidence_index, suppressed, tur
         # requirement needs every separately declared physical member tied to the mark.
         if all(per_feature) if "location" in parameter else any(per_feature):
             return "placed"
+    satisfied = [(feature, evidence_parameter) in evidence_index.satisfied for feature in features]
+    if all(satisfied) if "location" in parameter else any(satisfied):
+        return "satisfied_by_structured_note"
     if all((feature, evidence_parameter) in suppressed for feature in features):
         return "suppressed"
     drop_parameter = (
@@ -1066,7 +1085,7 @@ def lint_hole_coverage(
     }
     issues = []
     for outcome in hole_requirement_outcomes(recognition, features, registry, omissions):
-        if outcome.state in {"placed", "dropped"}:
+        if outcome.state in {"placed", "satisfied_by_structured_note", "dropped"}:
             continue
         noun = "hole" if outcome.source_kind == "hole" else f"{outcome.member_count}-hole pattern"
         issues.append(

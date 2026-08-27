@@ -3296,6 +3296,7 @@ class Drawing:
                 assembly=self.assembly,
                 holes=holes,
                 bosses=bosses,
+                registry=self._registry,
             )
             issues += lint_axial_coverage(
                 self.part,

@@ -9,7 +9,14 @@ from b123d_recognisers import RecognitionResult, has_multi_axis_plates
 
 from draftwright.linting.issues import LintIssue
 
-ChannelRequirementState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
+ChannelRequirementState = Literal[
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+]
 
 
 @dataclass(frozen=True)
@@ -50,17 +57,22 @@ def _matches(measurement, feature, parameter: str) -> bool:
     )
 
 
-def _state(feature, parameter, *, placed, suppressed, dropped, registry):
+def _state(feature, parameter, *, placed, satisfied, suppressed, dropped, registry):
     if feature is None:
         return "unverifiable"
     if any(_matches(measurement, feature, parameter) for measurement in placed):
         return "placed"
+    if any(_matches(identity, feature, parameter) for identity in satisfied):
+        return "satisfied_by_structured_note"
     if (feature, parameter) in suppressed:
         return "suppressed"
     if any(_matches(measurement, feature, parameter) for measurement in dropped):
         return "dropped"
     associated = registry.names_for_feature(feature)
-    if any(not registry.measurement_of(name) for name in associated):
+    if any(
+        not registry.measurement_of(name) and not registry.satisfaction_of(name)
+        for name in associated
+    ):
         return "unverifiable"
     return "missing"
 
@@ -93,6 +105,9 @@ def channel_requirement_outcomes(
 
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
+    }
+    satisfied = {
+        identity for name in registry.names() for identity in registry.satisfaction_of(name)
     }
     suppressed = {
         (omission.feature, omission.parameter_id)
@@ -147,6 +162,7 @@ def channel_requirement_outcomes(
                         feature,
                         parameter,
                         placed=placed,
+                        satisfied=satisfied,
                         suppressed=suppressed,
                         dropped=dropped,
                         registry=registry,
@@ -176,7 +192,7 @@ def lint_channel_coverage(
     }
     issues = []
     for outcome in channel_requirement_outcomes(recognition, features, registry, omissions):
-        if outcome.state in {"placed", "dropped"}:
+        if outcome.state in {"placed", "satisfied_by_structured_note", "dropped"}:
             continue
         issues.append(
             LintIssue(

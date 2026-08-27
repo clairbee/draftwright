@@ -16,7 +16,14 @@ from b123d_recognisers import RecognitionResult
 from draftwright._geometry import _canonical_axis_direction
 from draftwright.linting.issues import LintIssue
 
-FlatRequirementState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
+FlatRequirementState = Literal[
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+]
 
 
 @dataclass(frozen=True, order=True)
@@ -113,6 +120,9 @@ def flat_requirement_outcomes(
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
+    satisfied = {
+        identity for name in registry.names() for identity in registry.satisfaction_of(name)
+    }
     authored_suppressions = {
         (omission.feature, omission.parameter_id)
         for omission in omissions
@@ -138,6 +148,12 @@ def flat_requirement_outcomes(
                 for measurement in placed
             ):
                 state = "placed"
+            elif any(
+                _matches(identity, *requirement_id)
+                for requirement_id in expected
+                for identity in satisfied
+            ):
+                state = "satisfied_by_structured_note"
             elif all(requirement_id in authored_suppressions for requirement_id in expected):
                 state = "suppressed"
             elif any(
@@ -152,7 +168,10 @@ def flat_requirement_outcomes(
                 }
                 state = (
                     "unverifiable"
-                    if any(not registry.measurement_of(name) for name in associated_names)
+                    if any(
+                        not registry.measurement_of(name) and not registry.satisfaction_of(name)
+                        for name in associated_names
+                    )
                     else "missing"
                 )
         outcomes.append(
@@ -186,7 +205,7 @@ def lint_flat_coverage(
         # `flat_dropped` is already a user-facing build issue. Its measurement identity is
         # what proves this outcome; emitting a second warning here would score one defect
         # twice, contrary to the existing coverage/drop de-duplication contract.
-        if outcome.state in {"placed", "dropped"}:
+        if outcome.state in {"placed", "satisfied_by_structured_note", "dropped"}:
             continue
         stock = (
             f"{outcome.axis.upper()} stock along {outcome.axis_direction} at axis line "

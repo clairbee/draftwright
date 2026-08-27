@@ -1827,7 +1827,31 @@ class Note:
     view: str
     side: str
     origin: object | None = None
+    # Canonical ParameterIds whose manufacturing requirements this authored note explicitly
+    # carries (#1351). Kept separate from ``parameters()``: the note does not become a
+    # dimension, and coverage can distinguish a drawn measurement from an authored semantic
+    # assertion instead of parsing prose.
+    satisfies: tuple[str, ...] = ()
     kind: ClassVar[str] = "note"
+
+    def __post_init__(self) -> None:
+        if not self.satisfies:
+            return
+        if not isinstance(self.satisfies, tuple) or any(
+            not isinstance(parameter, str) or not parameter.strip() for parameter in self.satisfies
+        ):
+            raise ValueError("note satisfies= must be a tuple of non-empty parameter ids")
+        if len(set(self.satisfies)) != len(self.satisfies):
+            raise ValueError("note satisfies= contains duplicate parameter ids")
+        if not isinstance(self.origin, Feature):
+            raise ValueError("a note with satisfies= must target a dimensionable feature")
+        available = {parameter.parameter_id for parameter in self.origin.parameters()}
+        invalid = sorted(set(self.satisfies) - available)
+        if invalid:
+            raise ValueError(
+                f"note satisfies= names invalid parameter id(s) {invalid} for "
+                f"{type(self.origin).__name__}; choose from {sorted(available)}"
+            )
 
     def parameters(self) -> list[DimParameter]:
         return []

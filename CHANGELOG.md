@@ -4,6 +4,10 @@
 
 ### Added
 
+- Feature-linked Sheet notes can explicitly satisfy one or more canonical requirement ids with
+  `.note(..., satisfies=(...))`. Placed structured notes retain each requirement's identity in
+  coverage reports and generated scripts without masquerading as dimensions or parsing prose;
+  removing the note restores the ordinary missing/suppressed diagnostics (#1351).
 - `Sheet.from_part(...).take_over(...)` now adopts detected features in place while choosing
   authored or automatic dimension, principal-view, and derived-view sources explicitly. This
   preserves detected handles, supports automatic principal views with authored requirements,

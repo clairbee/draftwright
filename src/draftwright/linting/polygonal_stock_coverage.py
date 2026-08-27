@@ -9,7 +9,14 @@ from b123d_recognisers import RecognitionResult
 
 from draftwright.linting.issues import LintIssue
 
-PolygonalStockState = Literal["placed", "suppressed", "dropped", "missing", "unverifiable"]
+PolygonalStockState = Literal[
+    "placed",
+    "satisfied_by_structured_note",
+    "suppressed",
+    "dropped",
+    "missing",
+    "unverifiable",
+]
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,9 @@ def polygonal_stock_outcomes(recognition, features, registry, omissions=()):
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
+    satisfied = {
+        identity for name in registry.names() for identity in registry.satisfaction_of(name)
+    }
     suppressed = {
         (omission.feature, omission.parameter_id)
         for omission in omissions
@@ -77,6 +87,11 @@ def polygonal_stock_outcomes(recognition, features, registry, omissions=()):
                 for measurement in placed
             ):
                 state = "placed"
+            elif any(
+                identity.feature == feature and identity.parameter == parameter
+                for identity in satisfied
+            ):
+                state = "satisfied_by_structured_note"
             elif (feature, parameter) in suppressed:
                 state = "suppressed"
             elif any(
@@ -103,7 +118,7 @@ def lint_polygonal_stock_coverage(
     }
     issues = []
     for outcome in polygonal_stock_outcomes(recognition, features, registry, omissions):
-        if outcome.state in {"placed", "dropped"}:
+        if outcome.state in {"placed", "satisfied_by_structured_note", "dropped"}:
             continue
         issues.append(
             LintIssue(

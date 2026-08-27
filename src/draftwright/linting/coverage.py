@@ -255,6 +255,7 @@ def lint_feature_coverage(
     assembly=None,
     holes=None,
     bosses=None,
+    registry=None,
 ) -> list:
     """Coarse completeness check: report part diameters with no callout (#80).
 
@@ -295,6 +296,10 @@ def lint_feature_coverage(
     yields a ``feature_count_mismatch`` warning. A diameter covered by any
     free-text ø-label is exempt from the count check — text labels carry no
     count semantics. Location coverage remains out of scope (#93).
+
+    A placed feature-linked note may instead carry explicit ``DimensionId``
+    satisfaction provenance. Only canonical diameter parameters on that exact
+    feature contribute; the note's prose is never parsed for this purpose (#1351).
     """
     z_cyls, cross_cyls = cyls if cyls is not None else analyse_cylinders(part)
     if holes is None:
@@ -315,6 +320,27 @@ def lint_feature_coverage(
     mentioned: set[float] = set()
     text_mentioned: set[float] = set()
     provided: dict[float, int] = {}
+    if registry is not None:
+        # Structured note authority is a semantic assertion, not prose parsing. Resolve only
+        # canonical diameter parameters on the exact feature carried by each DimensionId;
+        # malformed identities contribute nothing rather than guessing (#1351).
+        for name in registry.names():
+            for identity in registry.satisfaction_of(name):
+                feature = getattr(identity, "feature", None)
+                parameter_id = getattr(identity, "parameter", None)
+                parameter = next(
+                    (
+                        item
+                        for item in getattr(feature, "parameters", lambda: ())()
+                        if item.parameter_id == parameter_id and item.kind == "diameter"
+                    ),
+                    None,
+                )
+                if parameter is None:
+                    continue
+                value = float(parameter.value)
+                mentioned.add(value)
+                provided[value] = provided.get(value, 0) + int(getattr(feature, "count", 1) or 1)
     for ann in annotations:
         if isinstance(ann, TitleBlock):
             continue

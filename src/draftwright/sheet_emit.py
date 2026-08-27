@@ -597,6 +597,11 @@ def _feature_line(
         return _control_frame_line(f, origin_ref)
     if k == "datum_ref":
         return _datum_ref_line(f, origin_ref)
+    if k == "note" and origin_ref is not None:
+        kwargs = [f"view={f.view!r}", f"side={f.side!r}"]
+        if f.satisfies:
+            kwargs.append(f"satisfies={f.satisfies!r}")
+        return f"{origin_ref}.note({f.text!r}, {', '.join(kwargs)})"
     if k == "envelope":
         if part_envelope is not None and f == part_envelope:
             # `sheet.envelope()` defaults to the whole part and now measures its SOLIDS with a
@@ -864,8 +869,8 @@ def _feature_line(
             f'sheet.plate(axis="{f.axis}", lo={_n(f.lo)}, hi={_n(f.hi)}, u={_n(f.u)}, v={_n(f.v)})'
         )
     # Kinds with no declarative verb: flag inline so they aren't silently lost. Since #945 every
-    # geometric kind has a verb, so this catches the remaining aspect kinds
-    # (finish/note) and, more usefully, a newly added kind whose emit line nobody wrote.
+    # geometric kind has a verb, so this catches bare-face aspects that cannot be rebound and,
+    # more usefully, a newly added kind whose emit line nobody wrote.
     return f"# {k} @ {_pt(f.frame.origin)} — no declarative verb yet; drawn by the auto-pass"
 
 
@@ -1401,7 +1406,7 @@ def _feature_block(
         summary = _run_summary(run)
         out.append(f"#   {section}" + (f" · {summary}" if summary else "") + " ─────")
         for f in run:
-            gdt_with_origin = f.kind in ("control_frame", "datum_ref")
+            gdt_with_origin = f.kind in ("control_frame", "datum_ref", "note")
             origin_ref = names.get(id(f.origin)) if gdt_with_origin else None
             if (
                 gdt_with_origin
@@ -1412,6 +1417,11 @@ def _feature_block(
                 raise ValueError(
                     f"emit_sheet_script(): cannot preserve a {f.kind} whose origin has "
                     "no emitted binding"
+                )
+            if f.kind == "note" and f.satisfies and origin_ref is None:
+                raise ValueError(
+                    "emit_sheet_script(): cannot preserve structured note satisfaction "
+                    "without its feature binding"
                 )
             nominal_parameter = {
                 "step": "step.diameter",
