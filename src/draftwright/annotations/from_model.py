@@ -105,7 +105,7 @@ from draftwright.layout import StripCandidate, plan_strip
 # drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
-from draftwright.model.compiled import FeatureRef, resolve_feature
+from draftwright.model.compiled import DimensionId, FeatureRef, resolve_feature
 from draftwright.model.ir import (
     AUTHORED_DIMENSION_KINDS,
     ChamferFeature,
@@ -5716,6 +5716,9 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
     for i, item in enumerate(items):
         name = f"m_gdt{i}"
         source_ids = _pmi_source_ids(item)
+        satisfaction = tuple(
+            DimensionId(item.origin, parameter) for parameter in getattr(item, "satisfies", ())
+        )
         vk = views.get(item.view)
         if vk is None or item.side not in ("above", "below", "left", "right"):
             ctx.record_issue(
@@ -5800,6 +5803,7 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
             _feat=item.origin or item,
             _tb=tb_box,
             _source=source_ids,
+            _satisfaction=satisfaction,
         ):
             # Fallthrough (#481): the declared/derived side is full — try the OPPOSITE side of
             # the same view before dropping, so a congested default still places somewhere
@@ -5849,7 +5853,13 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                     dim = _bld(pos, _hz=hz)
                     if _box_hits(_anno_box(dim), (_tb,)):  # would overlap the title block — skip
                         continue
-                    ctx.place(dim, nm, view=_v, feature=_feat)  # relaxed side
+                    ctx.place(
+                        dim,
+                        nm,
+                        view=_v,
+                        feature=_feat,
+                        satisfaction=_satisfaction,
+                    )  # relaxed side
                     ctx.record_issue(
                         "info",
                         "gdt_side_relaxed",
@@ -5888,6 +5898,7 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                 # Declared frames belong to their decorated feature. An imported frame has
                 # external source provenance but no separately-owned geometric IR feature.
                 feature=item.origin or item,
+                satisfaction=satisfaction or None,
                 size=size,
                 # Even a force-kept frame must not stack into the title block (#481 review) —
                 # place_strip_candidates rejects a placement hitting this box, then on_drop's

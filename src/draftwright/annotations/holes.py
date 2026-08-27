@@ -619,10 +619,16 @@ def _record_callout_drop(
     """
     ctx.coverage.drop_diam(diam)
     count = int(getattr(callout, "covers_count", 1) or 1)
+    measurements = tuple(getattr(callout, "measurements", ()))
+    owners: list[object] = []
+    for measurement in measurements:
+        owner = getattr(measurement, "feature", None)
+        if owner is not None and not any(candidate is owner for candidate in owners):
+            owners.append(owner)
+    profile_owner = owners[0] if len(owners) == 1 else feat
     for profile in getattr(callout, "covers_profiles", ()):
         for _ in range(count):
-            ctx.coverage.drop_profile(profile)
-    measurements = tuple(getattr(callout, "measurements", ()))
+            ctx.coverage.drop_profile(profile, profile_owner)
     hole_requirements = (
         tuple(
             (feat, requirement) for requirement in getattr(callout, "covers_hole_requirements", ())

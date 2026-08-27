@@ -74,6 +74,11 @@ class AnnotationRegistry:
         # would have to be widened again later, and worse, would make the audit's
         # "exact when present" promise false for a callout's other measurements.
         self._anno_measurement: dict = {}
+        # name -> DimensionIds a placed structured note explicitly satisfies (#1351).
+        # Separate from ``_anno_measurement`` because a note carries manufacturing authority
+        # without pretending to be dimensional ink; coverage and quality reports must retain
+        # that distinction. Like every identity axis, this is snapshot/restored transactionally.
+        self._anno_satisfaction: dict = {}
         self._pinned: set = set()
         self._build_issues: list = []
 
@@ -114,6 +119,14 @@ class AnnotationRegistry:
         ids: tuple = self._anno_measurement.get(name, ())
         return ids
 
+    def satisfaction_of(self, name) -> tuple:
+        """The ``DimensionId`` requirements *name* satisfies as structured note authority.
+
+        This provenance is deliberately separate from :meth:`measurement_of`: a note can
+        meet a requirement without pretending to draw a dimension (#1351)."""
+        ids: tuple = self._anno_satisfaction.get(name, ())
+        return ids
+
     def names_for_feature(self, feature) -> list:
         """Every annotation name owned by *feature* (matched by value equality, so a
         feature from ``dwg.model()`` finds the annotations rendered for it) (#398).
@@ -149,6 +162,7 @@ class AnnotationRegistry:
             "anno_view": dict(self._anno_view),
             "anno_feature": dict(self._anno_feature),
             "anno_measurement": dict(self._anno_measurement),
+            "anno_satisfaction": dict(self._anno_satisfaction),
             "pinned": set(self._pinned),
         }
 
@@ -162,6 +176,8 @@ class AnnotationRegistry:
         self._anno_feature.update(snap.get("anno_feature", {}))
         self._anno_measurement.clear()
         self._anno_measurement.update(snap.get("anno_measurement", {}))
+        self._anno_satisfaction.clear()
+        self._anno_satisfaction.update(snap.get("anno_satisfaction", {}))
         self._pinned.clear()
         self._pinned.update(snap["pinned"])
 
@@ -184,6 +200,7 @@ class AnnotationRegistry:
             "view": self._anno_view.get(name),
             "feature": self._anno_feature.get(name),
             "measurement": self._anno_measurement.get(name, ()),
+            "satisfaction": self._anno_satisfaction.get(name, ()),
             "pinned": name in self._pinned,
         }
 
@@ -213,12 +230,17 @@ class AnnotationRegistry:
             self._anno_measurement[name] = ids
         else:
             self._anno_measurement.pop(name, None)
+        satisfactions = _as_ids(identity.get("satisfaction"))
+        if satisfactions:
+            self._anno_satisfaction[name] = satisfactions
+        else:
+            self._anno_satisfaction.pop(name, None)
         if identity.get("pinned"):
             self._pinned.add(name)
         else:
             self._pinned.discard(name)
 
-    def add(self, obj, name, view, feature=None, measurement=None):
+    def add(self, obj, name, view, feature=None, measurement=None, satisfaction=None):
         """Register *obj* under *name* and record its owning *view* (and source *feature*).
 
         Returns the object previously registered under *name* (so the caller can
@@ -252,6 +274,11 @@ class AnnotationRegistry:
                 self._anno_measurement[name] = ids
             else:
                 self._anno_measurement.pop(name, None)
+            satisfactions = _as_ids(satisfaction)
+            if satisfactions:
+                self._anno_satisfaction[name] = satisfactions
+            else:
+                self._anno_satisfaction.pop(name, None)
         return displaced
 
     def remove(self, name):
@@ -262,6 +289,7 @@ class AnnotationRegistry:
             self._anno_view.pop(name, None)
             self._anno_feature.pop(name, None)
             self._anno_measurement.pop(name, None)
+            self._anno_satisfaction.pop(name, None)
         return obj
 
     def clear(self, keep) -> dict:
@@ -274,6 +302,9 @@ class AnnotationRegistry:
         self._anno_view = {n: v for n, v in self._anno_view.items() if n in keep_set}
         self._anno_feature = {n: f for n, f in self._anno_feature.items() if n in keep_set}
         self._anno_measurement = {n: m for n, m in self._anno_measurement.items() if n in keep_set}
+        self._anno_satisfaction = {
+            n: s for n, s in self._anno_satisfaction.items() if n in keep_set
+        }
         return kept_named
 
     # -- pins -----------------------------------------------------------------

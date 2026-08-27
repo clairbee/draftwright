@@ -468,10 +468,20 @@ class _Hole(_Nameable):
         self._sheet._gdt_finish(ra, self._i, view=view, side=side)
         return self
 
-    def note(self, text, *, view: str | None = None, side: str | None = None) -> _Hole:
-        """A free-text manufacturing note on a leader to this hole (#488). ``.note("M3x0.5 TAP")``
-        — the shop callout; ``view``/``side`` override the derived strip."""
-        self._sheet._gdt_note(text, self._i, view=view, side=side)
+    def note(
+        self,
+        text,
+        *,
+        satisfies: tuple[DimensionParameterId, ...] = (),
+        view: str | None = None,
+        side: str | None = None,
+    ) -> _Hole:
+        """A manufacturing note on a leader to this hole (#488).
+
+        ``satisfies`` explicitly names canonical parameter ids from :meth:`dimension_ids` that
+        the placed note meets instead of a drawn dimension. Plain prose has no coverage effect;
+        ``view``/``side`` override the derived strip (#1351)."""
+        self._sheet._gdt_note(text, self._i, view=view, side=side, satisfies=satisfies)
         return self
 
     def _set(self, **kw) -> _Hole:
@@ -545,10 +555,21 @@ class _Dim(_Nameable):
         self._sheet._gdt_finish(ra, self._i, view=view, side=side)
         return self
 
-    def note(self, text, *, view: str | None = None, side: str | None = None) -> _Dim:
-        """A free-text manufacturing note on a leader to this feature (#488).
-        ``diameter(knurl).note("KNURL 0.8 STRAIGHT")``; ``view``/``side`` override the strip."""
-        self._sheet._gdt_note(text, self._i, view=view, side=side)
+    def note(
+        self,
+        text,
+        *,
+        satisfies: tuple[DimensionParameterId, ...] = (),
+        view: str | None = None,
+        side: str | None = None,
+    ) -> _Dim:
+        """A manufacturing note on a leader to this feature (#488).
+
+        ``diameter(knurl).note("KNURL 0.8 STRAIGHT")``; ``satisfies`` explicitly names
+        canonical parameter ids returned by ``dimension_ids()`` that the placed note meets
+        instead of a drawn dimension. Plain prose has no coverage effect; ``view``/``side``
+        override the strip (#1351)."""
+        self._sheet._gdt_note(text, self._i, view=view, side=side, satisfies=satisfies)
         return self
 
     def knurl(
@@ -733,17 +754,28 @@ class _Params(_Nameable):
         )
         return self
 
-    def note(self, text, ref=None, *, view: str | None = None, side: str | None = None) -> _Params:
+    def note(
+        self,
+        text,
+        ref=None,
+        *,
+        satisfies: tuple[DimensionParameterId, ...] = (),
+        view: str | None = None,
+        side: str | None = None,
+    ) -> _Params:
         """A free-text manufacturing note (#841). With no *ref* the note anchors to THIS feature —
         ``sheet.slot(...).note("5X OBROUND SLOT")`` — mirroring :meth:`_Hole.note` / :meth:`_Dim.note`
         (previously this raised, because the forwarded ``Sheet.note`` needs a target). An explicit
         *ref* (a face or feature) still forwards to :meth:`Sheet.note`, preserving the handle's
         forwarding contract for ``sheet.slot(...).note("DEBURR", face)``. Returns the handle
-        (chainable); ``view``/``side`` override the derived strip."""
+        (chainable). ``satisfies`` explicitly names canonical parameter ids from
+        ``dimension_ids()`` that the placed note meets instead of a drawn dimension;
+        plain prose has no coverage effect. ``view``/``side`` override the derived strip
+        (#1351)."""
         if ref is None:
-            self._sheet._gdt_note(text, self._i, view=view, side=side)
+            self._sheet._gdt_note(text, self._i, view=view, side=side, satisfies=satisfies)
         else:
-            self._sheet.note(text, ref, view=view, side=side)
+            self._sheet.note(text, ref, view=view, side=side, satisfies=satisfies)
         return self
 
 
@@ -1113,7 +1145,7 @@ class Sheet:
         and token-binds that provenance exactly like the public GD&T verbs."""
         src_token = None
         if (
-            getattr(feature, "kind", None) in ("control_frame", "datum_ref")
+            getattr(feature, "kind", None) in ("control_frame", "datum_ref", "note")
             and feature.origin is not None
         ):
             src_token = self._declared_token(feature.origin, verb=f"add() {feature.kind} origin")
@@ -1121,6 +1153,19 @@ class Sheet:
                 feature = replace(
                     feature,
                     origin=self._features[self._index_of_token(src_token)],
+                )
+            elif getattr(feature, "satisfies", ()):
+                raise ValueError(
+                    "add() structured note origin must be a feature already managed by this "
+                    "Sheet; use that feature's handle.note(...)"
+                )
+            if (
+                "location" in getattr(feature, "satisfies", ())
+                and _location_role(feature.origin) is None
+            ):
+                raise ValueError(
+                    "add() structured note satisfies='location' targets a feature with no "
+                    "planned location measurement"
                 )
         self._features.append(feature)
         self._bind_gdt_source(self._token_at(len(self._features) - 1), src_token)
@@ -1551,13 +1596,42 @@ class Sheet:
         self._append_gdt(_declare_finish(ra, target, self._part, view=view, side=side), src)
         return self
 
-    def note(self, text, ref, *, view: str | None = None, side: str | None = None) -> Sheet:
-        """Declare a free-text manufacturing note (#488) on a leader to *ref* — a build123d planar
+    def note(
+        self,
+        text,
+        ref,
+        *,
+        satisfies: tuple[DimensionParameterId, ...] = (),
+        view: str | None = None,
+        side: str | None = None,
+    ) -> Sheet:
+        """Declare a manufacturing note (#488) on a leader to *ref* — a build123d planar
         face or a feature. The shop callouts detection can't infer: thread specs
         (``sheet.note("M3x0.5 TAP", bore)``), ``DEBURR``, chip-relief, knurl. Placed like the GD&T
-        items, clear of the views/title block; ``view``/``side`` override the derived strip."""
+        items, clear of the views/title block; ``view``/``side`` override the derived strip.
+        ``satisfies`` may name canonical parameter ids only when *ref* is a feature; it grants
+        coverage only when this structured note is placed, never by parsing its prose (#1351)."""
         target, src = self._gdt_ref(ref)
-        self._append_gdt(_declare_note(text, target, self._part, view=view, side=side), src)
+        if satisfies and src is None:
+            raise ValueError(
+                "note satisfies= must target a feature already managed by this Sheet; "
+                "use its handle or the exact feature from sheet.features"
+            )
+        if "location" in satisfies and _location_role(target) is None:
+            raise ValueError(
+                "note satisfies='location' targets a feature with no planned location measurement"
+            )
+        self._append_gdt(
+            _declare_note(
+                text,
+                target,
+                self._part,
+                view=view,
+                side=side,
+                satisfies=satisfies,
+            ),
+            src,
+        )
         return self
 
     # -- view declaration (ADR 0018) ---------------------------------------
@@ -1943,10 +2017,29 @@ class Sheet:
         item = _declare_finish(ra, self._features[src_index], self._part, view=view, side=side)
         self._append_gdt(item, self._token_at(src_index))
 
-    def _gdt_note(self, text, src_index: int, *, view=None, side=None) -> None:
+    def _gdt_note(
+        self,
+        text,
+        src_index: int,
+        *,
+        view=None,
+        side=None,
+        satisfies: tuple[DimensionParameterId, ...] = (),
+    ) -> None:
         """A note declared through a fluent handle — like :meth:`_gdt_finish`, sources provenance
         from the feature INDEX so a later size verb on the same handle can't strand it."""
-        item = _declare_note(text, self._features[src_index], self._part, view=view, side=side)
+        if "location" in satisfies and _location_role(self._features[src_index]) is None:
+            raise ValueError(
+                "note satisfies='location' targets a feature with no planned location measurement"
+            )
+        item = _declare_note(
+            text,
+            self._features[src_index],
+            self._part,
+            view=view,
+            side=side,
+            satisfies=satisfies,
+        )
         self._append_gdt(item, self._token_at(src_index))
 
     def _append_gdt(self, item, src_token) -> None:

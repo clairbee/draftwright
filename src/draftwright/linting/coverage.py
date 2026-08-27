@@ -55,6 +55,7 @@ from draftwright._core import (
     _fmt,
     _xyz,
 )
+from draftwright.linting._registry import annotation_owner, satisfaction_ids
 from draftwright.linting.issues import LintIssue
 from draftwright.linting.profiled_bore_coverage import profiled_bore_key
 from draftwright.view_plan import VIEW_AXES
@@ -169,6 +170,10 @@ class CoverageState:
         # Exact profiled-bore specifications dropped with those callouts. Diameter alone
         # cannot distinguish equal-major profiles with different A/F or orientation (#1061).
         self._dropped_profiles: list[tuple] = []
+        # The same events with their compiler-owned feature when available. The legacy
+        # spec-only list remains for compatibility; critique uses this richer identity to
+        # avoid combining a drop on A with placed authority on A to certify B (#1351).
+        self._dropped_profile_evidence: list[tuple[tuple, object | None]] = []
 
     # -- pattern coverage -----------------------------------------------------
 
@@ -203,14 +208,16 @@ class CoverageState:
         """Clear dropped-diameter tracking (top of _auto_annotate)."""
         self._dropped_callout_diams = []
         self._dropped_profiles = []
+        self._dropped_profile_evidence = []
 
     def drop_diam(self, diam) -> None:
         """Record a diameter dropped by the per-view callout cap."""
         self._dropped_callout_diams.append(diam)
 
-    def drop_profile(self, profile: tuple) -> None:
+    def drop_profile(self, profile: tuple, owner=None) -> None:
         """Record an exact profiled-bore specification whose callout was dropped."""
         self._dropped_profiles.append(profile)
+        self._dropped_profile_evidence.append((profile, owner))
 
     @property
     def dropped_diams(self) -> list:
@@ -221,6 +228,11 @@ class CoverageState:
     def dropped_profiles(self) -> list[tuple]:
         """Profile specifications already reported by ``callout_dropped``."""
         return self._dropped_profiles
+
+    @property
+    def dropped_profile_evidence(self) -> list[tuple[tuple, object | None]]:
+        """Dropped profile specifications paired with their exact IR owner when known."""
+        return self._dropped_profile_evidence
 
     # -- transactional snapshot (#647) ----------------------------------------
 
@@ -234,16 +246,18 @@ class CoverageState:
             set(self._scattered_hole_docs),
             list(self._dropped_callout_diams),
             list(self._dropped_profiles),
+            list(self._dropped_profile_evidence),
         )
 
     def restore(self, snap: tuple) -> None:
         """Restore the collections captured by :meth:`snapshot`."""
-        pc, ph, shd, dropped, dropped_profiles = snap
+        pc, ph, shd, dropped, dropped_profiles, dropped_profile_evidence = snap
         self._pattern_callouts = set(pc)
         self._patterned_holes = set(ph)
         self._scattered_hole_docs = set(shd)
         self._dropped_callout_diams = list(dropped)
         self._dropped_profiles = list(dropped_profiles)
+        self._dropped_profile_evidence = list(dropped_profile_evidence)
 
 
 def lint_feature_coverage(
@@ -255,6 +269,7 @@ def lint_feature_coverage(
     assembly=None,
     holes=None,
     bosses=None,
+    registry=None,
 ) -> list:
     """Coarse completeness check: report part diameters with no callout (#80).
 
@@ -295,6 +310,10 @@ def lint_feature_coverage(
     yields a ``feature_count_mismatch`` warning. A diameter covered by any
     free-text ø-label is exempt from the count check — text labels carry no
     count semantics. Location coverage remains out of scope (#93).
+
+    A placed feature-linked note may instead carry explicit ``DimensionId``
+    satisfaction provenance. Only canonical diameter parameters on that exact
+    feature contribute; the note's prose is never parsed for this purpose (#1351).
     """
     z_cyls, cross_cyls = cyls if cyls is not None else analyse_cylinders(part)
     if holes is None:
@@ -314,7 +333,43 @@ def lint_feature_coverage(
 
     mentioned: set[float] = set()
     text_mentioned: set[float] = set()
-    provided: dict[float, int] = {}
+    # One physical owner can carry the same requirement in several representations (for
+    # example, both a callout and a manufacturing note). Union those authorities by exact
+    # owner/value before counting them; summing annotations lets one documented bore certify
+    # an identical undocumented sibling (#1351 review).
+    owned_provided: dict[tuple[int, float], int] = {}
+    unowned_provided: dict[float, int] = {}
+
+    def provide(value, count, owner=None) -> None:
+        value = float(value)
+        count = int(count or 1)
+        if owner is None:
+            unowned_provided[value] = unowned_provided.get(value, 0) + count
+            return
+        key = (id(owner), value)
+        owned_provided[key] = max(owned_provided.get(key, 0), count)
+
+    if registry is not None:
+        # Structured note authority is a semantic assertion, not prose parsing. Resolve only
+        # canonical diameter parameters on the exact feature carried by each DimensionId;
+        # malformed identities contribute nothing rather than guessing (#1351).
+        identities = satisfaction_ids(registry)
+        for identity in identities:
+            feature = getattr(identity, "feature", None)
+            parameter_id = getattr(identity, "parameter", None)
+            parameter = next(
+                (
+                    item
+                    for item in getattr(feature, "parameters", lambda: ())()
+                    if item.parameter_id == parameter_id and item.kind == "diameter"
+                ),
+                None,
+            )
+            if parameter is None:
+                continue
+            value = float(parameter.value)
+            mentioned.add(value)
+            provide(value, getattr(feature, "count", 1), feature)
     for ann in annotations:
         if isinstance(ann, TitleBlock):
             continue
@@ -327,7 +382,11 @@ def lint_feature_coverage(
         count = getattr(ann, "covers_count", 1)
         for v in structured_diameters:
             mentioned.add(v)
-            provided[v] = provided.get(v, 0) + count
+            provide(v, count, annotation_owner(registry, ann))
+
+    provided: dict[float, int] = dict(unowned_provided)
+    for (_owner_id, value), count in owned_provided.items():
+        provided[value] = provided.get(value, 0) + count
 
     exclude = exclude or ()
     issues = [
@@ -415,6 +474,12 @@ def lint_location_coverage(
     marks: dict[str, list] = {}
     dim_verts: dict[str, list] = {}
     structured_locations: set[tuple[object, str, HoleRef]] = set()
+    registry = getattr(dwg, "registry", None)
+    satisfied_locations = {
+        identity.feature
+        for identity in satisfaction_ids(registry)
+        if getattr(identity, "parameter", None) == "location"
+    }
     for name, ann in dwg.iter_annotations():
         view = dwg.view_of(name)
         if view is None:
@@ -444,7 +509,8 @@ def lint_location_coverage(
     # O(holes × model-features × members) rescan and preserves the documented
     # external-producer contract: no ``Drawing.model()`` method is required.
     feature_index: dict[tuple[str, HoleRef], set[object]] = {}
-    for feature in {owner for owner, _parameter, _point in structured_locations}:
+    semantic_owners = {owner for owner, _parameter, _point in structured_locations}
+    for feature in semantic_owners | satisfied_locations:
         frame = getattr(feature, "frame", None)
         if frame is None:
             continue
@@ -477,7 +543,7 @@ def lint_location_coverage(
         page_axes = VIEW_AXES[view]
 
         def _axis_covered(model_axis):
-            semantic = any(
+            semantic = any(owner in features for owner in satisfied_locations) or any(
                 owner in features and parameter.endswith(f".{model_axis}") and point == ref
                 for owner, parameter, point in structured_locations
             )
@@ -907,6 +973,14 @@ def lint_prismatic_coverage(
         assembly = len(part.solids()) > 1
     severity: Literal["info", "warning"] = "info" if assembly else "warning"
     pairs_by_view: dict[str, list] = {}
+    registry = getattr(dwg, "registry", None)
+    satisfied_ids = satisfaction_ids(registry)
+
+    def satisfied(feature, parameter: str) -> bool:
+        return any(
+            identity.feature == feature and identity.parameter == parameter
+            for identity in satisfied_ids
+        )
 
     def pairs(view: str):
         return pairs_by_view.setdefault(view, _dimension_endpoint_pairs(dwg, view))
@@ -944,24 +1018,46 @@ def lint_prismatic_coverage(
                 ),
                 None,
             )
-            size_x = owner is not None and _pair_covers(ps, 0, x0, x1, tol, owner=owner)
-            size_y = owner is not None and _pair_covers(ps, 1, y0, y1, tol, owner=owner)
+            parameter_by_axis = (
+                {
+                    owner.long_axis: "pad_length.length",
+                    owner.width_axis: "pad_width.length",
+                }
+                if owner is not None
+                else {}
+            )
+            size_x = owner is not None and (
+                _pair_covers(ps, 0, x0, x1, tol, owner=owner)
+                or satisfied(owner, parameter_by_axis["x"])
+            )
+            size_y = owner is not None and (
+                _pair_covers(ps, 1, y0, y1, tol, owner=owner)
+                or satisfied(owner, parameter_by_axis["y"])
+            )
             located_x = (
-                abs(pad.x0 - bb.min.X) <= tol
-                or abs(pad.x1 - bb.max.X) <= tol
-                or any(
-                    _pair_covers(ps, 0, edge, bound, tol)
-                    for edge in (bx0, bx1)
-                    for bound in (x0, x1, xc_page)
+                owner is not None
+                and satisfied(owner, "location")
+                or (
+                    abs(pad.x0 - bb.min.X) <= tol
+                    or abs(pad.x1 - bb.max.X) <= tol
+                    or any(
+                        _pair_covers(ps, 0, edge, bound, tol)
+                        for edge in (bx0, bx1)
+                        for bound in (x0, x1, xc_page)
+                    )
                 )
             )
             located_y = (
-                abs(pad.y0 - bb.min.Y) <= tol
-                or abs(pad.y1 - bb.max.Y) <= tol
-                or any(
-                    _pair_covers(pairs("side"), 0, edge, bound, tol)
-                    for edge in (sby0, sby1)
-                    for bound in (sy0, sy1, syc)
+                owner is not None
+                and satisfied(owner, "location")
+                or (
+                    abs(pad.y0 - bb.min.Y) <= tol
+                    or abs(pad.y1 - bb.max.Y) <= tol
+                    or any(
+                        _pair_covers(pairs("side"), 0, edge, bound, tol)
+                        for edge in (sby0, sby1)
+                        for bound in (sy0, sy1, syc)
+                    )
                 )
             )
             if not (size_x and size_y and located_x and located_y):
@@ -982,17 +1078,17 @@ def lint_prismatic_coverage(
     model_pockets = []
     for feature in features:
         if getattr(feature, "kind", None) == "pocket":
-            model_pockets.append((feature, (feature.frame.origin,), False))
+            model_pockets.append((feature, feature, (feature.frame.origin,), False))
         elif getattr(feature, "kind", None) == "pocket_pattern":
-            model_pockets.append((feature.member, tuple(feature.members), True))
+            model_pockets.append((feature.member, feature, tuple(feature.members), True))
     missing_ir = 0
 
     def pocket_owner(pocket):
         source_location = pocket.location
         return next(
             (
-                f
-                for f, locations, is_pattern in model_pockets
+                owner
+                for f, owner, locations, is_pattern in model_pockets
                 if f.width_axis == pocket.width_axis
                 and f.long_axis == pocket.long_axis
                 and abs(f.width - pocket.width) <= tol
@@ -1021,8 +1117,11 @@ def lint_prismatic_coverage(
     bb = bbox if bbox is not None else part.bounding_box()
     centre = bb.center()
     for pocket in pocket_inventory:
-        if pocket_owner(pocket) is None:
+        owner = pocket_owner(pocket)
+        if owner is None:
             missing_ir += 1
+            continue
+        if satisfied(owner, "location"):
             continue
         if getattr(pocket, "edge_anchored", False):
             continue
@@ -1183,8 +1282,8 @@ def lint_prismatic_coverage(
     return issues
 
 
-def _axial_covered_from_drawing(part, dwg, prof, tol: float = 0.6) -> int:
-    """How many of a turned part's step lengths are dimensioned **in the drawing**
+def _axial_covered_from_drawing(part, dwg, prof, tol: float = 0.6) -> set[int]:
+    """Which turned-profile step lengths are dimensioned **in the drawing**
     — a step counts as covered when some profile-view ``Dimension`` has witnesses
     at both of its shoulders' page positions. Drawing-derived, so it judges any
     producer (not the engine's :class:`CoverageState` side channel).
@@ -1251,7 +1350,7 @@ def _axial_covered_from_drawing(part, dwg, prof, tol: float = 0.6) -> int:
                 ):
                     covered_steps.add(i)
                     break
-    return len(covered_steps)
+    return covered_steps
 
 
 def _overall_axial_extent_is_dimensioned(part, dwg, prof, tol: float = 0.6) -> bool:
@@ -1278,14 +1377,15 @@ def _overall_axial_extent_is_dimensioned(part, dwg, prof, tol: float = 0.6) -> b
     return False
 
 
-def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET) -> list:
+def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET, recognition=None) -> list:
     """Report a stepped turned part whose axial step lengths are undimensioned.
 
     A turned part can have every diameter called out yet be unmanufacturable: with
     no shoulder located, the lengths are unknown (the drive-screw gap). A complete
-    chain dimensions all ``n`` steps; coverage is counted **from the drawing**
-    (:func:`_axial_covered_from_drawing`), not a build-time side channel — so it
-    judges any producer. A shortfall yields one ``axial_length_missing`` issue.
+    chain dimensions all ``n`` steps; coverage is counted from placed drawing witnesses or
+    placed structured-note provenance joined to the same physical spans, not a build-time
+    side channel — so it judges any producer. A shortfall yields one
+    ``axial_length_missing`` issue.
 
     *dwg* is the drawing, duck-typed (needs ``at``/``annotations``/``view_of``).
 
@@ -1296,6 +1396,9 @@ def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET) -> list:
     *prof* may be supplied (the single inventory, #244) to skip re-detection;
     omitted, it is detected here. A sentinel distinguishes "not supplied" from a
     valid ``prof=None`` (non-turned part).
+
+    ``recognition`` supplies the run-owned groove inventory used only to evidence-gate a
+    structured ``groove.length`` claim; an unrelated declared groove cannot fill the count.
     """
     if prof is _UNSET:
         prof = TurnedProfile.from_steps(recognise_turned_steps(part))
@@ -1304,13 +1407,72 @@ def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET) -> list:
     if assembly is None:
         assembly = len(part.solids()) > 1
     n = len(prof.steps)
-    covered = _axial_covered_from_drawing(part, dwg, prof)
+    covered_steps = _axial_covered_from_drawing(part, dwg, prof)
+    registry = getattr(dwg, "registry", None)
+    placed_ids = (
+        {identity for name in registry.names() for identity in registry.measurement_of(name)}
+        if registry is not None
+        else set()
+    )
+    satisfied_ids = satisfaction_ids(registry)
+    # Match structured step-length authority back to the recognition-owned physical band by
+    # its axial span. This preserves the denominator and prevents an unrelated declared step
+    # from certifying one merely because both share the same role (#1351, ADR 0017).
+    axis_index = "xyz".index(prof.axis)
+    for identity in satisfied_ids:
+        feature = getattr(identity, "feature", None)
+        if (
+            getattr(identity, "parameter", None) != "step.length"
+            or getattr(feature, "kind", None) != "step"
+        ):
+            continue
+        span = getattr(feature, "span", None)
+        if span is None:
+            continue
+        lo, hi = sorted(float(point[axis_index]) for point in span)
+        for index, step in enumerate(prof.steps):
+            if abs(lo - float(step.lo)) <= 1e-3 and abs(hi - float(step.hi)) <= 1e-3:
+                covered_steps.add(index)
+                break
+    covered = len(covered_steps)
     # A groove band's axial extent is dimensioned by its width callout, not a step length, so
     # detect.py leaves it out of the step-length chain (#606). Count each *rendered* groove-width
     # callout on the turning axis as covering its band — so a fully-dimensioned grooved shaft
     # (N−1 step lengths + the groove width) is not flagged (#628); a *dropped* groove callout
     # leaves its band uncovered, so a genuine gap still fires (reconcile rendered, not intent).
     covered += sum(1 for name in dwg.annotations() if name.startswith(f"m_groove_{prof.axis}"))
+    placed_grooves = {
+        identity.feature
+        for identity in placed_ids
+        if getattr(identity, "parameter", None) == "groove.length"
+    }
+    physical_grooves = {
+        (
+            groove.axis,
+            round(float(groove.width), 3),
+            round(float(groove.diameter), 3),
+            tuple(round(float(value), 3) for value in groove.at),
+        )
+        for groove in getattr(recognition, "grooves", ())
+    }
+    satisfied_grooves = {
+        identity.feature
+        for identity in satisfied_ids
+        if getattr(identity, "parameter", None) == "groove.length"
+        and getattr(identity.feature, "kind", None) == "groove"
+        and identity.feature not in placed_grooves
+    }
+    covered += sum(
+        1
+        for feature in satisfied_grooves
+        if (
+            feature.axis,
+            round(float(feature.width), 3),
+            round(float(feature.diameter), 3),
+            tuple(round(float(value), 3) for value in feature.frame.origin),
+        )
+        in physical_grooves
+    )
     if covered >= n:
         return []
     # #955: when placement drops the complete chain, its specific warning already says the
@@ -1319,7 +1481,6 @@ def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET) -> list:
     # part's total extent is now stated. The drop is a required half of this condition: an
     # authored drawing that chooses only the overall extent still lacks shoulder locations
     # and must continue to receive ``axial_length_missing``.
-    registry = getattr(dwg, "registry", None)
     chain_drop_reported = any(
         issue.code == "step_dim_dropped" for issue in getattr(registry, "issues", ())
     )
@@ -1371,6 +1532,7 @@ def lint_boss_height_coverage(part, dwg, features, assembly=None, omissions=()) 
         if registry is not None
         else set()
     )
+    satisfied = satisfaction_ids(registry)
     conveyed = {
         omission.feature
         for omission in omissions
@@ -1380,6 +1542,10 @@ def lint_boss_height_coverage(part, dwg, features, assembly=None, omissions=()) 
         1
         for boss in bosses
         if boss not in conveyed
+        and not any(
+            identity.feature == boss and identity.parameter == "boss_height.length"
+            for identity in satisfied
+        )
         and not any(isinstance(ann, Dimension) for ann in dwg.annotations_of(boss).values())
     )
     if not missing:

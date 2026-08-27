@@ -597,6 +597,11 @@ def _feature_line(
         return _control_frame_line(f, origin_ref)
     if k == "datum_ref":
         return _datum_ref_line(f, origin_ref)
+    if k == "note" and origin_ref is not None:
+        kwargs = [f"view={f.view!r}", f"side={f.side!r}"]
+        if f.satisfies:
+            kwargs.append(f"satisfies={f.satisfies!r}")
+        return f"{origin_ref}.note({f.text!r}, {', '.join(kwargs)})"
     if k == "envelope":
         if part_envelope is not None and f == part_envelope:
             # `sheet.envelope()` defaults to the whole part and now measures its SOLIDS with a
@@ -864,8 +869,8 @@ def _feature_line(
             f'sheet.plate(axis="{f.axis}", lo={_n(f.lo)}, hi={_n(f.hi)}, u={_n(f.u)}, v={_n(f.v)})'
         )
     # Kinds with no declarative verb: flag inline so they aren't silently lost. Since #945 every
-    # geometric kind has a verb, so this catches the remaining aspect kinds
-    # (finish/note) and, more usefully, a newly added kind whose emit line nobody wrote.
+    # geometric kind has a verb, so this catches bare-face aspects that cannot be rebound and,
+    # more usefully, a newly added kind whose emit line nobody wrote.
     return f"# {k} @ {_pt(f.frame.origin)} — no declarative verb yet; drawn by the auto-pass"
 
 
@@ -1066,7 +1071,9 @@ def _binding(f, line: str, counts: dict[str, int]) -> str | None:
     ``None`` for a kind with no declarative verb: its "line" is a comment, and
     ``rotational1 = # …`` does not parse.
     """
-    if line.lstrip().startswith("#"):
+    # Fluent ``handle.note(...)`` returns the origin handle, not the appended Note. Binding
+    # that expression as ``note1`` would therefore lie about which feature the name denotes.
+    if f.kind == "note" or line.lstrip().startswith("#"):
         return None
     counts[f.kind] = counts.get(f.kind, 0) + 1
     return f"{f.kind}{counts[f.kind]}"
@@ -1384,11 +1391,18 @@ def _feature_block(
     the wrong hole, which still runs.
 
     Lines are grouped under section sub-headers (with a repeat tally) and each carries a
-    trailing describing comment. Runs are CONSECUTIVE in the given order — no reorder.
+    trailing describing comment. Geometric features retain their consecutive order. Notes
+    are dependent aspect statements, so they are emitted after the independently bindable
+    features; this lets an identity-preserving public reorder put a note before its origin
+    without making the generated relationship impossible to spell (#1351).
     """
     if not features:
         return ["# ── Features: none detected ──"], {}
-    out = [f"# ── Features ({len(features)}): {_manifest(features)} ──"]
+    source_features = tuple(features)
+    out = [f"# ── Features ({len(source_features)}): {_manifest(source_features)} ──"]
+    features = tuple(f for f in source_features if f.kind != "note") + tuple(
+        f for f in source_features if f.kind == "note"
+    )
     counts: dict[str, int] = {}
     names: dict[int, str] = {}
     i = 0
@@ -1401,10 +1415,11 @@ def _feature_block(
         summary = _run_summary(run)
         out.append(f"#   {section}" + (f" · {summary}" if summary else "") + " ─────")
         for f in run:
-            gdt_with_origin = f.kind in ("control_frame", "datum_ref")
+            gdt_with_origin = f.kind in ("control_frame", "datum_ref", "note")
             origin_ref = names.get(id(f.origin)) if gdt_with_origin else None
             if (
                 gdt_with_origin
+                and (f.kind != "note" or bool(f.satisfies))
                 and f.origin is not None
                 and getattr(f.origin, "kind", None) != "pmi"
                 and origin_ref is None
@@ -1412,6 +1427,11 @@ def _feature_block(
                 raise ValueError(
                     f"emit_sheet_script(): cannot preserve a {f.kind} whose origin has "
                     "no emitted binding"
+                )
+            if f.kind == "note" and f.satisfies and origin_ref is None:
+                raise ValueError(
+                    "emit_sheet_script(): cannot preserve structured note satisfaction "
+                    "without its feature binding"
                 )
             nominal_parameter = {
                 "step": "step.diameter",

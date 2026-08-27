@@ -3296,11 +3296,13 @@ class Drawing:
                 assembly=self.assembly,
                 holes=holes,
                 bosses=bosses,
+                registry=self._registry,
             )
             issues += lint_axial_coverage(
                 self.part,
                 self,
                 assembly=self.assembly,
+                recognition=recognition,
                 **prof_kw,
             )
             model = self._part_model
@@ -3365,7 +3367,10 @@ class Drawing:
                 self.part,
                 self.items,
                 recognition=recognition,
+                features=getattr(model, "features", ()) if model is not None else (),
+                registry=self._registry,
                 dropped_profiles=self._coverage.dropped_profiles,
+                dropped_profile_evidence=self._coverage.dropped_profile_evidence,
                 assembly=self.assembly,
             )
             issues += lint_flat_coverage(
