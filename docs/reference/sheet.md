@@ -64,6 +64,23 @@ sections. Leaving that authored set empty suppresses inferred derived views; sel
 changing the Sheet, and automatic dimensions remain incompatible with authored views under ADR
 0018.
 
+To emit editable Python from an adopted Sheet, pass both request halves to the script emitter;
+the model carries the feature/dimension semantics and `view_constraints` carries the independent
+view sources and semantic targets:
+
+```python
+from draftwright.sheet_emit import emit_sheet_script
+
+source = emit_sheet_script(
+    s.model(),
+    "part = make_part()",
+    "drawing",
+    title="BRACKET",
+    number="DWG-001",
+    view_constraints=s.view_constraints,
+)
+```
+
 ## View handle
 
 ::: draftwright.sheet._View

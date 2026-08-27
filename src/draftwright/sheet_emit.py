@@ -1538,6 +1538,22 @@ def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) 
     """Emit a semantic Sheet request for an adopted view-source state (#1350)."""
     principal_source = constraints.principal_source or "automatic"
     derived_source = constraints.derived_source or "automatic"
+    for records, actual_source, expected_source, label in (
+        (constraints.principals, constraints.principal_source, "authored", "principal"),
+        (
+            constraints.added_principals,
+            constraints.principal_source,
+            "automatic",
+            "added principal",
+        ),
+        (constraints.derived, constraints.derived_source, "authored", "derived"),
+        (constraints.added_derived, constraints.derived_source, "automatic", "added derived"),
+    ):
+        if records and actual_source != expected_source:
+            raise ValueError(
+                f"cannot emit {label} views with source {actual_source!r}; "
+                f"expected {expected_source!r}"
+            )
     lines = [
         "# Adopt the detected baseline with independent dimension/principal/derived sources.",
         "sheet.take_over(",
@@ -1548,8 +1564,24 @@ def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) 
     ]
     handles: dict[str, str] = {}
 
+    def reject_unexpressed_spec_fields(spec) -> None:
+        unsupported = [
+            field for field in ("camera", "up", "page_axes") if getattr(spec, field) is not None
+        ]
+        if unsupported:
+            raise ValueError(
+                f"cannot emit {spec.name!r}: Sheet view verbs do not express "
+                f"{', '.join(unsupported)}"
+            )
+
     def emit_principal(item, verb: str) -> None:
         spec = item.spec
+        reject_unexpressed_spec_fields(spec)
+        expected_kind = "pictorial" if spec.name == "iso" else "principal"
+        if spec.name not in {"front", "plan", "side", "iso"} or spec.kind != expected_kind:
+            raise ValueError(f"cannot emit principal view {spec.name!r} with kind {spec.kind!r}")
+        if spec.target is not None:
+            raise ValueError(f"cannot emit principal view {spec.name!r} with a target")
         handle = f"{spec.name}_view"
         handles[spec.name] = handle
         suffix = "" if spec.scale_factor is None else f".scale({spec.scale_factor!r})"
@@ -1557,6 +1589,9 @@ def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) 
 
     def emit_derived(item, verb: str) -> None:
         spec = item.spec
+        reject_unexpressed_spec_fields(spec)
+        if spec.kind not in {"section", "detail"}:
+            raise ValueError(f"cannot emit derived view {spec.name!r} with kind {spec.kind!r}")
         label = _derived_label(spec.name, spec.kind)
         target = spec.target
         if not isinstance(target, tuple) or len(target) != 2:
@@ -1589,14 +1624,36 @@ def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) 
         emit_derived(item, f"add_{item.spec.kind}_view")
 
     for relation in constraints.relations:
-        handle = handles.get(relation.subject)
-        if handle is None:
-            raise ValueError(
-                f"cannot emit relation for automatic view {relation.subject!r}; "
-                "declare or add the subject view to obtain its public handle"
-            )
         gap = "" if relation.gap is None else f", gap={relation.gap!r}"
-        lines.append(f'{handle}.{relation.relation}("{relation.reference}"{gap})')
+        handle = handles.get(relation.subject)
+        if handle is not None:
+            if relation.relation in {"align_x", "align_y"} and relation.gap is not None:
+                raise ValueError(
+                    f"cannot emit {relation.relation} relation with gap={relation.gap!r}; "
+                    "the public alignment verbs do not accept a gap"
+                )
+            lines.append(f'{handle}.{relation.relation}("{relation.reference}"{gap})')
+            continue
+        if relation.relation in {"left_of", "right_of"}:
+            left, right = (
+                (relation.subject, relation.reference)
+                if relation.relation == "left_of"
+                else (relation.reference, relation.subject)
+            )
+            lines.append(f'sheet.row("{left}", "{right}"{gap})')
+            continue
+        if relation.relation in {"above", "below"}:
+            below, above = (
+                (relation.reference, relation.subject)
+                if relation.relation == "above"
+                else (relation.subject, relation.reference)
+            )
+            lines.append(f'sheet.column("{below}", "{above}"{gap})')
+            continue
+        raise ValueError(
+            f"cannot emit {relation.relation} relation for automatic view "
+            f"{relation.subject!r}; declare or add the subject view to obtain its public handle"
+        )
     for pin in constraints.pins:
         handle = handles.get(pin.view)
         if handle is None:

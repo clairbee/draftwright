@@ -151,6 +151,73 @@ def test_takeover_rejects_contradictory_sources_atomically():
     assert sheet.view_constraints == before
 
 
+@pytest.mark.parametrize(
+    "invalid_declaration",
+    [
+        lambda sheet: sheet.view("bogus"),
+        lambda sheet: sheet.section_view("A"),
+        lambda sheet: sheet.detail_view("B", object()),
+    ],
+)
+def test_invalid_authored_view_declarations_do_not_poison_a_detected_sheet(
+    invalid_declaration,
+):
+    sheet = Sheet.from_part(_counterbored_blind_part())
+    before = sheet.view_constraints
+
+    with pytest.raises(ValueError):
+        invalid_declaration(sheet)
+    assert sheet.view_constraints == before
+
+    # A failed declaration left no hidden authored source behind, so the matching automatic
+    # takeover remains valid and produces the untouched detected baseline.
+    sheet.take_over(
+        dimensions="authored",
+        principal_views="automatic",
+        derived_views="automatic",
+    )
+    assert sheet.view_constraints.principal_source == "automatic"
+    assert sheet.view_constraints.derived_source == "automatic"
+
+
+@pytest.mark.parametrize("legacy_verb", ["section", "detail"])
+def test_legacy_derived_augmentations_conflict_atomically_in_both_orders(legacy_verb):
+    before_takeover = Sheet.from_part(_counterbored_blind_part())
+    with pytest.warns(DeprecationWarning):
+        if legacy_verb == "section":
+            before_takeover.section(_counterbore(before_takeover))
+        else:
+            before_takeover.detail()
+    before_constraints = before_takeover.view_constraints
+    with pytest.raises(ValueError, match=r"legacy section\(\)/detail\(\)"):
+        before_takeover.take_over(
+            dimensions="authored",
+            principal_views="automatic",
+            derived_views="authored",
+        )
+    assert before_takeover.view_constraints == before_constraints
+
+    after_takeover = Sheet.from_part(_counterbored_blind_part()).take_over(
+        dimensions="authored",
+        principal_views="automatic",
+        derived_views="authored",
+    )
+    before_constraints = after_takeover.view_constraints
+    before_options = dict(after_takeover._opts)
+    before_section = after_takeover._section
+    with (
+        pytest.warns(DeprecationWarning),
+        pytest.raises(ValueError, match="cannot follow an authored derived-view source"),
+    ):
+        if legacy_verb == "section":
+            after_takeover.section(_counterbore(after_takeover))
+        else:
+            after_takeover.detail()
+    assert after_takeover.view_constraints == before_constraints
+    assert after_takeover._opts == before_options
+    assert after_takeover._section == before_section
+
+
 def test_takeover_rejects_prior_explicit_sources_and_accepts_all_automatic():
     authored = Sheet.from_part(_counterbored_blind_part()).authored_dimensions()
     with pytest.raises(ValueError, match="authored dimension source"):
@@ -191,6 +258,22 @@ def test_takeover_rejects_prior_explicit_sources_and_accepts_all_automatic():
             principal_views="authored",
             derived_views="authored",
         )
+
+    pending_dimension = Sheet.from_part(_counterbored_blind_part())
+    envelope = next(
+        feature for feature in pending_dimension.features if feature.kind == "envelope"
+    )
+    with pytest.warns(SoftDeprecationWarning):
+        pending_dimension.add_dimension(envelope, "width.length")
+    before_views = pending_dimension.view_constraints
+    with pytest.raises(ValueError, match=r"conflicts with add_dimension\(\)"):
+        pending_dimension.take_over(
+            dimensions="authored",
+            principal_views="automatic",
+            derived_views="authored",
+        )
+    assert pending_dimension.view_constraints == before_views
+    assert set(pending_dimension.build().views) == {"front", "plan", "side", "iso", "section_aa"}
 
     all_automatic = Sheet.from_part(_counterbored_blind_part()).take_over(
         dimensions="automatic",
@@ -292,6 +375,21 @@ def test_emitter_preserves_authored_added_and_whole_view_constraints():
     assert 'front_view.below("iso", gap=3.0)' in source
     assert "front_view.pin((40.0, 50.0))" in source
 
+    namespace = {"part": _counterbored_blind_part()}
+    body = source.replace("\npart\n", "\n", 1)
+    exec(  # noqa: S102 - exercise exact authored-relation reconstruction
+        compile(body[: body.index("drawing = sheet.build()")], "<authored-layout-emit>", "exec"),
+        namespace,
+    )
+    regenerated = namespace["sheet"].view_constraints
+    assert [
+        (relation.subject, relation.relation, relation.reference, relation.gap)
+        for relation in regenerated.relations
+    ] == [
+        (relation.subject, relation.relation, relation.reference, relation.gap)
+        for relation in constraints.relations
+    ]
+
     augmenting = ViewConstraints(
         principal_source="automatic",
         added_principals=(ViewConstraint(ViewSpec("side", "principal")),),
@@ -310,9 +408,71 @@ def test_emitter_preserves_authored_added_and_whole_view_constraints():
     assert 'detail_c_view = sheet.add_detail_view("C", around=hole1)' in augmenting_source
 
 
+def test_emitter_round_trips_directional_relations_between_automatic_views():
+    sheet = _adopted_sheet()
+    sheet.row("front", "side", gap=2.0)
+    sheet.column("front", "plan", gap=4.0)
+
+    source = emit_sheet_script(
+        sheet.model(),
+        "part",
+        "automatic-layout",
+        title="T",
+        number="N",
+        view_constraints=sheet.view_constraints,
+    )
+    assert 'sheet.row("front", "side", gap=2.0)' in source
+    assert 'sheet.column("front", "plan", gap=4.0)' in source
+
+    namespace = {"part": _counterbored_blind_part()}
+    body = source.replace("\npart\n", "\n", 1)
+    exec(  # noqa: S102 - exercise the generated public Sheet source
+        compile(body[: body.index("drawing = sheet.build()")], "<layout-emit>", "exec"),
+        namespace,
+    )
+    regenerated = namespace["sheet"]
+    assert [
+        (relation.subject, relation.relation, relation.reference, relation.gap)
+        for relation in regenerated.view_constraints.relations
+    ] == [
+        (relation.subject, relation.relation, relation.reference, relation.gap)
+        for relation in sheet.view_constraints.relations
+    ]
+
+
 @pytest.mark.parametrize(
     ("constraints", "message"),
     [
+        (
+            ViewConstraints(
+                principal_source="automatic",
+                principals=(ViewConstraint(ViewSpec("front", "principal")),),
+            ),
+            "principal views with source 'automatic'",
+        ),
+        (
+            ViewConstraints(
+                principal_source="authored",
+                principals=(
+                    ViewConstraint(ViewSpec("front", "principal", camera=(0.0, 0.0, 1.0))),
+                ),
+            ),
+            "do not express camera",
+        ),
+        (
+            ViewConstraints(
+                principal_source="authored",
+                principals=(ViewConstraint(ViewSpec("front", "principal", target=("at", 0.0))),),
+            ),
+            "principal view 'front' with a target",
+        ),
+        (
+            ViewConstraints(
+                derived_source="authored",
+                derived=(ViewConstraint(ViewSpec("front", "principal", target=("at", 0.0))),),
+            ),
+            "derived view 'front' with kind 'principal'",
+        ),
         (
             ViewConstraints(
                 derived_source="authored",
@@ -344,8 +504,16 @@ def test_emitter_preserves_authored_added_and_whole_view_constraints():
             "unsupported target",
         ),
         (
-            ViewConstraints(relations=(ViewRelation("front", "above", "plan"),)),
-            "relation for automatic view",
+            ViewConstraints(relations=(ViewRelation("front", "align_x", "plan"),)),
+            "align_x relation for automatic view",
+        ),
+        (
+            ViewConstraints(
+                principal_source="authored",
+                principals=(ViewConstraint(ViewSpec("front", "principal")),),
+                relations=(ViewRelation("front", "align_x", "plan", gap=1.0),),
+            ),
+            "alignment verbs do not accept a gap",
         ),
         (
             ViewConstraints(pins=(ViewPin("front", (10.0, 20.0)),)),

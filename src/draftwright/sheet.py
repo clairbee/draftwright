@@ -1672,6 +1672,18 @@ class Sheet:
                 "take_over(dimensions='authored') conflicts with an explicit "
                 "auto_dimensions() source"
             )
+        if dimensions == "authored" and self._added_dimensions:
+            raise ValueError(
+                "take_over(dimensions='authored') conflicts with add_dimension() automatic-set "
+                "additions"
+            )
+        if derived_views == "authored" and (
+            self._section is not None or self._opts.get("detail_view") is True
+        ):
+            raise ValueError(
+                "take_over(derived_views='authored') conflicts with a legacy section()/detail() "
+                "automatic-set augmentation; migrate it to section_view()/detail_view()"
+            )
 
         source_requests = (
             (
@@ -1756,9 +1768,9 @@ class Sheet:
                 "view() defines the complete authored set and cannot follow auto_views(); "
                 "use add_view() to augment the automatic set"
             )
+        name, kind = self._principal_view_name(name)
         self._principal_view_source = "authored"
         self._principal_view_source_at = self._principal_view_source_at or _constraint_source()
-        name, kind = self._principal_view_name(name)
         return self._append_view_record(
             "_principal_views", name=name, kind=kind, source=_constraint_source()
         )
@@ -1795,13 +1807,15 @@ class Sheet:
                 "section_view() defines the authored derived set and cannot follow auto_views(); "
                 "use add_section_view() to augment automatic derived views"
             )
+        name = self._derived_view_name("section", label)
+        target = self._derived_target("section_view()", feature=through, at=at)
         self._derived_view_source = "authored"
         self._derived_view_source_at = self._derived_view_source_at or _constraint_source()
         return self._append_view_record(
             "_derived_views",
-            name=self._derived_view_name("section", label),
+            name=name,
             kind="section",
-            target=self._derived_target("section_view()", feature=through, at=at),
+            target=target,
             source=_constraint_source(),
         )
 
@@ -1827,13 +1841,15 @@ class Sheet:
                 "detail_view() defines the authored derived set and cannot follow auto_views(); "
                 "use add_detail_view() to augment automatic derived views"
             )
+        name = self._derived_view_name("detail", label)
+        target = self._derived_target("detail_view()", feature=around, at=None)
         self._derived_view_source = "authored"
         self._derived_view_source_at = self._derived_view_source_at or _constraint_source()
         return self._append_view_record(
             "_derived_views",
-            name=self._derived_view_name("detail", label),
+            name=name,
             kind="detail",
-            target=self._derived_target("detail_view()", feature=around, at=None),
+            target=target,
             source=_constraint_source(),
         )
 
@@ -1869,6 +1885,11 @@ class Sheet:
             DeprecationWarning,
             stacklevel=2,
         )
+        if self._derived_view_source == "authored":
+            raise ValueError(
+                "section() augments automatic derived views and cannot follow an authored "
+                "derived-view source; use section_view()"
+            )
         if at is not None:
             if not math.isfinite(at):
                 raise ValueError(f"section(at=…) needs a finite Y, got {at!r}")
@@ -1899,6 +1920,11 @@ class Sheet:
             DeprecationWarning,
             stacklevel=2,
         )
+        if self._derived_view_source == "authored":
+            raise ValueError(
+                "detail() augments automatic derived views and cannot follow an authored "
+                "derived-view source; use detail_view()"
+            )
         self._opts["detail_view"] = True
         return self
 
