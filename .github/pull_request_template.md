@@ -28,4 +28,4 @@ Use `N/A` with a reason for items that do not apply, such as fixture evidence on
 
 ## Contributor License Agreement
 
-- [ ] I have read the [CLA](https://github.com/pzfreo/draftwright/blob/main/CLA.md) and agree to it for this Contribution. If I am contributing on behalf of an organisation, I am authorised to agree on its behalf.
+- [ ] I have read the [CLA](https://github.com/pzfreo/draftwright/blob/main/CLA.md) and agree to it. If I am contributing on behalf of an organisation, I am authorised to agree on its behalf.
