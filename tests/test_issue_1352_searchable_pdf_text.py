@@ -922,6 +922,31 @@ def test_named_font_opt_out_supports_build123d_010(monkeypatch):
     assert regular != bold
 
 
+def test_named_font_opt_out_supports_build123d_009(monkeypatch):
+    import sys
+    from enum import Enum
+    from types import ModuleType
+
+    class LegacyFontStyle(Enum):
+        REGULAR = 1
+        BOLD = 2
+        ITALIC = 3
+
+    legacy_build123d = ModuleType("build123d")
+    legacy_build123d.FontStyle = LegacyFontStyle
+    _resolved_semantic_font_path.cache_clear()
+    monkeypatch.setitem(sys.modules, "build123d", legacy_build123d)
+    monkeypatch.setitem(sys.modules, "build123d.text", None)
+    try:
+        regular = Path(_resolved_semantic_font_path(None, "Arial", "REGULAR"))
+        bold = Path(_resolved_semantic_font_path(None, "Arial", "BOLD"))
+    finally:
+        _resolved_semantic_font_path.cache_clear()
+
+    assert regular.is_file() and bold.is_file()
+    assert regular != bold
+
+
 def test_non_ttfont_semantic_face_falls_back_once_without_losing_text(
     tmp_path, monkeypatch, caplog
 ):

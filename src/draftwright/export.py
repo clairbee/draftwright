@@ -72,25 +72,21 @@ def _resolved_semantic_font_path(
         import os
         import sys
 
-        from OCP.Font import (
-            Font_FA_Bold,
-            Font_FA_BoldItalic,
-            Font_FA_Italic,
-            Font_FA_Regular,
-            Font_FontMgr,
-        )
+        import OCP.Font as ocp_font
         from OCP.TCollection import TCollection_AsciiString
 
         if sys.platform.startswith("linux"):
             os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
             os.environ["FONTCONFIG_PATH"] = "/etc/fonts/"
-        font_aspect = {
-            FontStyle.REGULAR: Font_FA_Regular,
-            FontStyle.BOLD: Font_FA_Bold,
-            FontStyle.ITALIC: Font_FA_Italic,
-            FontStyle.BOLDITALIC: Font_FA_BoldItalic,
-        }[style]
-        face = Font_FontMgr.GetInstance_s().FindFont(
+        font_aspects = {
+            FontStyle.REGULAR: ocp_font.Font_FA_Regular,
+            FontStyle.BOLD: ocp_font.Font_FA_Bold,
+            FontStyle.ITALIC: ocp_font.Font_FA_Italic,
+        }
+        if hasattr(FontStyle, "BOLDITALIC"):
+            font_aspects[FontStyle.BOLDITALIC] = ocp_font.Font_FA_BoldItalic
+        font_aspect = font_aspects[style]
+        face = ocp_font.Font_FontMgr.GetInstance_s().FindFont(
             TCollection_AsciiString(font_name), font_aspect
         )
         return str(face.FontPath(font_aspect).ToCString())
