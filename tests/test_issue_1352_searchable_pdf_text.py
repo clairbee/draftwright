@@ -907,6 +907,21 @@ def test_named_font_opt_out_resolves_the_renderer_face_and_style():
     assert regular != bold
 
 
+def test_named_font_opt_out_supports_build123d_010(monkeypatch):
+    import sys
+
+    _resolved_semantic_font_path.cache_clear()
+    monkeypatch.setitem(sys.modules, "build123d.text", None)
+    try:
+        regular = Path(_resolved_semantic_font_path(None, "Arial", "REGULAR"))
+        bold = Path(_resolved_semantic_font_path(None, "Arial", "BOLD"))
+    finally:
+        _resolved_semantic_font_path.cache_clear()
+
+    assert regular.is_file() and bold.is_file()
+    assert regular != bold
+
+
 def test_non_ttfont_semantic_face_falls_back_once_without_losing_text(
     tmp_path, monkeypatch, caplog
 ):

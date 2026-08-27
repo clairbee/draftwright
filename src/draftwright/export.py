@@ -58,9 +58,43 @@ def _resolved_semantic_font_path(
         return font_path
 
     from build123d import FontStyle
-    from build123d.text import FONT_ASPECT, FontManager
 
     style = FontStyle[font_style]
+    try:
+        from build123d.text import FONT_ASPECT, FontManager
+    except ModuleNotFoundError as exc:
+        if exc.name != "build123d.text":  # pragma: no cover - broken installation
+            raise
+
+        # build123d 0.10 resolves fonts inline in Compound.make_text(); the public
+        # FontManager wrapper arrived in 0.11.  Mirror the 0.10 renderer so the
+        # invisible PDF face remains the one that produced the visible outlines.
+        import os
+        import sys
+
+        from OCP.Font import (
+            Font_FA_Bold,
+            Font_FA_BoldItalic,
+            Font_FA_Italic,
+            Font_FA_Regular,
+            Font_FontMgr,
+        )
+        from OCP.TCollection import TCollection_AsciiString
+
+        if sys.platform.startswith("linux"):
+            os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
+            os.environ["FONTCONFIG_PATH"] = "/etc/fonts/"
+        font_aspect = {
+            FontStyle.REGULAR: Font_FA_Regular,
+            FontStyle.BOLD: Font_FA_Bold,
+            FontStyle.ITALIC: Font_FA_Italic,
+            FontStyle.BOLDITALIC: Font_FA_BoldItalic,
+        }[style]
+        face = Font_FontMgr.GetInstance_s().FindFont(
+            TCollection_AsciiString(font_name), font_aspect
+        )
+        return str(face.FontPath(font_aspect).ToCString())
+
     face = FontManager().find_font(font_name, style)
     return str(face.FontPath(FONT_ASPECT[style]).ToCString())
 
