@@ -55,7 +55,7 @@ import math
 import warnings
 from collections.abc import MutableSequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from draftwright._geometry import _solids_body
 from draftwright._warnings import SoftDeprecationWarning
@@ -111,6 +111,8 @@ from draftwright.view_plan import (
     ViewRelation,
     ViewSpec,
 )
+
+_SOURCE_CHOICES = ("automatic", "authored")
 
 #: "Not supplied" for `Sheet.dimension`'s positional parameters. They cannot simply be
 #: required: a keyword-only legacy call has to reach the removal message rather than die on
@@ -1614,13 +1616,112 @@ class Sheet:
         return _View(self, bucket, len(records) - 1)
 
     def _reject_authored_view_auto_dimensions(self, verb: str) -> None:
-        if self._auto_dimensions is not None:
+        if self._auto_dimensions == "explicit":
             raise ValueError(
                 f"{verb} authors the view set, but this sheet already called "
                 "auto_dimensions(). ADR 0018 makes requirements determine views, not the "
                 "reverse: use authored_dimensions() with explicit dimension(...) lines, or "
                 "keep auto_views() and use add_view()/add_section_view()/add_detail_view()."
             )
+
+    def take_over(
+        self,
+        *,
+        dimensions: Literal["automatic", "authored"],
+        principal_views: Literal["automatic", "authored"],
+        derived_views: Literal["automatic", "authored"],
+    ) -> Sheet:
+        """Adopt a detected baseline with explicit, independently chosen sources.
+
+        This is the public transition from :meth:`from_part`'s detected features and implicit
+        automatic dimensions to an editable Sheet request.  Principal and derived views are
+        separate sources (ADR 0018): keeping automatic principal planning while authoring the
+        complete derived set replaces an inferred section instead of augmenting it; an empty
+        authored derived set explicitly suppresses every inferred section/detail.
+
+        The declaration is atomic and order-independent.  Matching declarations made before
+        this call are accepted, while an explicit contradictory source raises without changing
+        any source.  The incoherent ADR 0018 combination -- authored views with automatic
+        dimensions -- is always refused.
+        """
+        choices = {
+            "dimensions": dimensions,
+            "principal_views": principal_views,
+            "derived_views": derived_views,
+        }
+        invalid = {name: value for name, value in choices.items() if value not in _SOURCE_CHOICES}
+        if invalid:
+            name, value = next(iter(invalid.items()))
+            raise ValueError(f"{name} must be 'automatic' or 'authored', got {value!r}")
+        if dimensions == "automatic" and (
+            principal_views == "authored" or derived_views == "authored"
+        ):
+            raise ValueError(
+                "take_over() cannot combine automatic dimensions with authored views. "
+                "ADR 0018 makes requirements determine views, not views determine requirements"
+            )
+
+        authored_dimensions = bool(self._authored) or self._authored_source
+        if dimensions == "automatic" and authored_dimensions:
+            raise ValueError(
+                "take_over(dimensions='automatic') conflicts with this sheet's authored "
+                "dimension source"
+            )
+        if dimensions == "authored" and self._auto_dimensions == "explicit":
+            raise ValueError(
+                "take_over(dimensions='authored') conflicts with an explicit "
+                "auto_dimensions() source"
+            )
+        if dimensions == "authored" and self._added_dimensions:
+            raise ValueError(
+                "take_over(dimensions='authored') conflicts with add_dimension() automatic-set "
+                "additions"
+            )
+        if derived_views == "authored" and (
+            self._section is not None or self._opts.get("detail_view") is True
+        ):
+            raise ValueError(
+                "take_over(derived_views='authored') conflicts with a legacy section()/detail() "
+                "automatic-set augmentation; migrate it to section_view()/detail_view()"
+            )
+
+        source_requests = (
+            (
+                "principal_views",
+                principal_views,
+                self._principal_view_source,
+                self._added_principal_views,
+            ),
+            (
+                "derived_views",
+                derived_views,
+                self._derived_view_source,
+                self._added_derived_views,
+            ),
+        )
+        for name, requested, current, added_records in source_requests:
+            if current is not None and current != requested:
+                raise ValueError(
+                    f"take_over({name}={requested!r}) conflicts with the existing "
+                    f"{current!r} {name} source"
+                )
+            if requested == "authored" and added_records:
+                raise ValueError(
+                    f"take_over({name}='authored') conflicts with automatic-set additions"
+                )
+
+        # All checks precede mutation: a failed takeover never leaves a partly changed Sheet.
+        source = _constraint_source()
+        if dimensions == "authored":
+            self._authored_source = True
+            self._auto_dimensions = None
+        else:
+            self._auto_dimensions = "explicit"
+        self._principal_view_source = principal_views
+        self._derived_view_source = derived_views
+        self._principal_view_source_at = self._principal_view_source_at or source
+        self._derived_view_source_at = self._derived_view_source_at or source
+        return self
 
     def authored_views(self) -> Sheet:
         """Declare that subsequent :meth:`view` lines are the complete principal set.
@@ -1667,9 +1768,9 @@ class Sheet:
                 "view() defines the complete authored set and cannot follow auto_views(); "
                 "use add_view() to augment the automatic set"
             )
+        name, kind = self._principal_view_name(name)
         self._principal_view_source = "authored"
         self._principal_view_source_at = self._principal_view_source_at or _constraint_source()
-        name, kind = self._principal_view_name(name)
         return self._append_view_record(
             "_principal_views", name=name, kind=kind, source=_constraint_source()
         )
@@ -1706,13 +1807,15 @@ class Sheet:
                 "section_view() defines the authored derived set and cannot follow auto_views(); "
                 "use add_section_view() to augment automatic derived views"
             )
+        name = self._derived_view_name("section", label)
+        target = self._derived_target("section_view()", feature=through, at=at)
         self._derived_view_source = "authored"
         self._derived_view_source_at = self._derived_view_source_at or _constraint_source()
         return self._append_view_record(
             "_derived_views",
-            name=self._derived_view_name("section", label),
+            name=name,
             kind="section",
-            target=self._derived_target("section_view()", feature=through, at=at),
+            target=target,
             source=_constraint_source(),
         )
 
@@ -1738,13 +1841,15 @@ class Sheet:
                 "detail_view() defines the authored derived set and cannot follow auto_views(); "
                 "use add_detail_view() to augment automatic derived views"
             )
+        name = self._derived_view_name("detail", label)
+        target = self._derived_target("detail_view()", feature=around, at=None)
         self._derived_view_source = "authored"
         self._derived_view_source_at = self._derived_view_source_at or _constraint_source()
         return self._append_view_record(
             "_derived_views",
-            name=self._derived_view_name("detail", label),
+            name=name,
             kind="detail",
-            target=self._derived_target("detail_view()", feature=around, at=None),
+            target=target,
             source=_constraint_source(),
         )
 
@@ -1780,6 +1885,11 @@ class Sheet:
             DeprecationWarning,
             stacklevel=2,
         )
+        if self._derived_view_source == "authored":
+            raise ValueError(
+                "section() augments automatic derived views and cannot follow an authored "
+                "derived-view source; use section_view()"
+            )
         if at is not None:
             if not math.isfinite(at):
                 raise ValueError(f"section(at=…) needs a finite Y, got {at!r}")
@@ -1810,6 +1920,11 @@ class Sheet:
             DeprecationWarning,
             stacklevel=2,
         )
+        if self._derived_view_source == "authored":
+            raise ValueError(
+                "detail() augments automatic derived views and cannot follow an authored "
+                "derived-view source; use detail_view()"
+            )
         self._opts["detail_view"] = True
         return self
 
@@ -2211,6 +2326,14 @@ class Sheet:
             # authored set is the script overriding that choice, not contradicting itself.
             # (An explicit `auto_dimensions()` line already raised above.)
             self._auto_dimensions = None
+        if self._auto_dimensions and (
+            self._principal_view_source == "authored" or self._derived_view_source == "authored"
+        ):
+            raise ValueError(
+                "authored views require authored dimensions. Sheet.from_part() starts with an "
+                "implicit automatic dimension source; call authored_dimensions() or "
+                "take_over(dimensions='authored', ...) before build()"
+            )
         if self._added_dimensions and not self._auto_dimensions:
             raise ValueError(
                 "add_dimension() augments the planner's automatic dimension set, so the sheet "

@@ -40,6 +40,49 @@ refused at declaration and constraints are never silently relaxed. The immutable
 snapshot is available as `sheet.view_constraints`, while `drawing.view_plan` is the distinct
 resolved result.
 
+### Taking over a detected baseline
+
+`Sheet.from_part(part)` retains the detector's feature set and starts with implicit automatic
+dimensions. Use `take_over(...)` to adopt that same Sheet as an explicit editable request without
+copying features into a second Sheet:
+
+```python
+s = Sheet.from_part(part)
+hole = s.of(next(feature for feature in s.features if feature.kind == "hole"))
+s.take_over(
+    dimensions="authored",
+    principal_views="automatic",
+    derived_views="authored",
+)
+s.dimension(hole, "bore.diameter")
+s.section_view("A", through=hole)
+```
+
+The three sources are chosen atomically. In this example the principal planner keeps the
+automatic front/plan/side/isometric baseline, while the authored derived set replaces inferred
+sections. Leaving that authored set empty suppresses inferred derived views; selecting
+`derived_views="automatic"` accepts them. Matching declarations may appear before or after
+`take_over(...)` with the same result. Explicit source contradictions fail without partially
+changing the Sheet, and automatic dimensions remain incompatible with authored views under ADR
+0018.
+
+To emit editable Python from an adopted Sheet, pass both request halves to the script emitter;
+the model carries the feature/dimension semantics and `view_constraints` carries the independent
+view sources and semantic targets:
+
+```python
+from draftwright.sheet_emit import emit_sheet_script
+
+source = emit_sheet_script(
+    s.model(),
+    "part = make_part()",
+    "drawing",
+    title="BRACKET",
+    number="DWG-001",
+    view_constraints=s.view_constraints,
+)
+```
+
 ## View handle
 
 ::: draftwright.sheet._View

@@ -29,9 +29,11 @@ fixtures (#472).
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Literal, cast
 
@@ -44,6 +46,7 @@ from draftwright.model.ir import (
     ThreadRequirement,
     ToleranceDecoration,
 )
+from draftwright.view_plan import ViewConstraints
 
 
 @dataclass(frozen=True)
@@ -1524,6 +1527,154 @@ def _validate_scale_policy(scale, scale_policy) -> None:
         raise ValueError("scale_policy applies only when an explicit scale is supplied")
 
 
+def _derived_label(name: str, kind: str) -> str:
+    """Recover the public one-character label from a canonical derived-view name."""
+    if kind == "section" and re.fullmatch(r"section_([a-z0-9])\1", name):
+        return name[-1].upper()
+    if kind == "detail" and re.fullmatch(r"detail_[a-z0-9]", name):
+        return name[-1].upper()
+    raise ValueError(f"cannot emit {kind} view with non-canonical name {name!r}")
+
+
+def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) -> list[str]:
+    """Emit a semantic Sheet request for an adopted view-source state (#1350)."""
+    principal_source = constraints.principal_source or "automatic"
+    derived_source = constraints.derived_source or "automatic"
+    for records, actual_source, expected_source, label in (
+        (constraints.principals, constraints.principal_source, "authored", "principal"),
+        (
+            constraints.added_principals,
+            constraints.principal_source,
+            "automatic",
+            "added principal",
+        ),
+        (constraints.derived, constraints.derived_source, "authored", "derived"),
+        (constraints.added_derived, constraints.derived_source, "automatic", "added derived"),
+    ):
+        if records and actual_source != expected_source:
+            raise ValueError(
+                f"cannot emit {label} views with source {actual_source!r}; "
+                f"expected {expected_source!r}"
+            )
+    lines = [
+        "# Adopt the detected baseline with independent dimension/principal/derived sources.",
+        "sheet.take_over(",
+        '    dimensions="authored",',
+        f'    principal_views="{principal_source}",',
+        f'    derived_views="{derived_source}",',
+        ")",
+    ]
+    handles: dict[str, str] = {}
+
+    def reject_unexpressed_spec_fields(spec) -> None:
+        unsupported = [
+            field for field in ("camera", "up", "page_axes") if getattr(spec, field) is not None
+        ]
+        if unsupported:
+            raise ValueError(
+                f"cannot emit {spec.name!r}: Sheet view verbs do not express "
+                f"{', '.join(unsupported)}"
+            )
+
+    def emit_principal(item, verb: str) -> None:
+        spec = item.spec
+        reject_unexpressed_spec_fields(spec)
+        expected_kind = "pictorial" if spec.name == "iso" else "principal"
+        if spec.name not in {"front", "plan", "side", "iso"} or spec.kind != expected_kind:
+            raise ValueError(f"cannot emit principal view {spec.name!r} with kind {spec.kind!r}")
+        if spec.target is not None:
+            raise ValueError(f"cannot emit principal view {spec.name!r} with a target")
+        handle = f"{spec.name}_view"
+        handles[spec.name] = handle
+        suffix = "" if spec.scale_factor is None else f".scale({spec.scale_factor!r})"
+        lines.append(f'{handle} = sheet.{verb}("{spec.name}"){suffix}')
+
+    def emit_derived(item, verb: str) -> None:
+        spec = item.spec
+        reject_unexpressed_spec_fields(spec)
+        if spec.kind not in {"section", "detail"}:
+            raise ValueError(f"cannot emit derived view {spec.name!r} with kind {spec.kind!r}")
+        label = _derived_label(spec.name, spec.kind)
+        target = spec.target
+        if not isinstance(target, tuple) or len(target) != 2:
+            raise ValueError(f"cannot emit {spec.name!r}: it has no semantic target")
+        target_kind, target_value = target
+        if target_kind == "feature":
+            feature_name = names.get(id(target_value))
+            if feature_name is None:
+                raise ValueError(
+                    f"cannot emit {spec.name!r}: its target feature has no script binding"
+                )
+            keyword = "through" if spec.kind == "section" else "around"
+            args = f'"{label}", {keyword}={feature_name}'
+        elif target_kind == "at" and spec.kind == "section":
+            if (
+                isinstance(target_value, bool)
+                or not isinstance(target_value, Real)
+                or not math.isfinite(float(target_value))
+            ):
+                raise ValueError(
+                    f"cannot emit {spec.name!r}: an at= target must be a finite numeric value"
+                )
+            args = f'"{label}", at={float(target_value)!r}'
+        else:
+            raise ValueError(f"cannot emit {spec.name!r}: unsupported target {target!r}")
+        handle = f"{spec.name}_view"
+        handles[spec.name] = handle
+        suffix = "" if spec.scale_factor is None else f".scale({spec.scale_factor!r})"
+        lines.append(f"{handle} = sheet.{verb}({args}){suffix}")
+
+    for item in constraints.principals:
+        emit_principal(item, "view")
+    for item in constraints.added_principals:
+        emit_principal(item, "add_view")
+    for item in constraints.derived:
+        emit_derived(item, f"{item.spec.kind}_view")
+    for item in constraints.added_derived:
+        emit_derived(item, f"add_{item.spec.kind}_view")
+
+    for relation in constraints.relations:
+        gap = "" if relation.gap is None else f", gap={relation.gap!r}"
+        handle = handles.get(relation.subject)
+        if handle is not None:
+            if relation.relation in {"align_x", "align_y"} and relation.gap is not None:
+                raise ValueError(
+                    f"cannot emit {relation.relation} relation with gap={relation.gap!r}; "
+                    "the public alignment verbs do not accept a gap"
+                )
+            lines.append(f'{handle}.{relation.relation}("{relation.reference}"{gap})')
+            continue
+        if relation.relation in {"left_of", "right_of"}:
+            left, right = (
+                (relation.subject, relation.reference)
+                if relation.relation == "left_of"
+                else (relation.reference, relation.subject)
+            )
+            lines.append(f'sheet.row("{left}", "{right}"{gap})')
+            continue
+        if relation.relation in {"above", "below"}:
+            below, above = (
+                (relation.reference, relation.subject)
+                if relation.relation == "above"
+                else (relation.subject, relation.reference)
+            )
+            lines.append(f'sheet.column("{below}", "{above}"{gap})')
+            continue
+        raise ValueError(
+            f"cannot emit {relation.relation} relation for automatic view "
+            f"{relation.subject!r}; declare or add the subject view to obtain its public handle"
+        )
+    for pin in constraints.pins:
+        handle = handles.get(pin.view)
+        if handle is None:
+            raise ValueError(
+                f"cannot emit pin for automatic view {pin.view!r}; "
+                "declare or add the view to obtain its public handle"
+            )
+        lines.append(f"{handle}.pin({pin.at!r})")
+    return lines
+
+
 def emit_sheet_script(
     model,
     part_expr: str,
@@ -1548,6 +1699,7 @@ def emit_sheet_script(
     source_part: Shape | None = None,
     formats: Sequence[str] = ("pdf",),
     settled_layout: Mapping | None = None,
+    view_constraints: ViewConstraints | None = None,
 ) -> str:
     """The generated declarative ``Sheet`` script text for a detected *model*.
 
@@ -1577,7 +1729,10 @@ def emit_sheet_script(
     semantic correction changed the initially composed scale or view set. The generated
     script mirrors dimensions as an authored set, so that correction is deliberately gated
     off on re-run; spelling the already-resolved scale/page/views preserves round-trip parity
-    without pretending an edited authored set is still automatic."""
+    without pretending an edited authored set is still automatic. ``view_constraints`` lets a
+    caller emitting an adopted :class:`~draftwright.Sheet` preserve its independent principal
+    and derived source choices plus semantic view declarations; targets remain stable feature
+    bindings rather than raw page coordinates."""
     _validate_scale_policy(scale, scale_policy)
     # The script declares this model — `model` plus an envelope when the overall height would
     # otherwise be unnameable under the mirrored (authored) set. BEFORE the import scan, since
@@ -1733,7 +1888,9 @@ def emit_sheet_script(
         for name in (() if settled_layout is None else settled_layout["views"])
         if name in {"front", "plan", "side", "iso"}
     )
-    if principal_views and principal_views != ("front", "plan", "side", "iso"):
+    if view_constraints is not None:
+        lines += _adopted_view_block(view_constraints, _names)
+    elif principal_views and principal_views != ("front", "plan", "side", "iso"):
         lines += [
             "# The automatic build settled on this complete view set; it is declared so",
             "# the editable authored-dimension mirror reproduces that resolved layout.",
@@ -1742,7 +1899,7 @@ def emit_sheet_script(
         ]
     else:
         lines.append("# front / plan / side / iso are produced automatically.")
-    if _needs_section(model):
+    if view_constraints is None and _needs_section(model):
         lines.append("# Section A–A auto-triggers from the counterbore/blind bore above.")
     # Build and export as two statements, so the finalized Drawing has a name (#968). That is
     # the lifecycle the architecture already has — Sheet declares intent, `build()` compiles and

@@ -4,6 +4,11 @@
 
 ### Added
 
+- `Sheet.from_part(...).take_over(...)` now adopts detected features in place while choosing
+  authored or automatic dimension, principal-view, and derived-view sources explicitly. This
+  preserves detected handles, supports automatic principal views with authored requirements,
+  replaces or suppresses inferred sections without duplicates, and round-trips the adopted view
+  request through generated Sheet code (#1350).
 - Referential Sheet dimensions can preserve an explicit number of decimal places with
   `sheet.dimension(feature, "parameter.id").format(decimals=n)`. The policy changes only
   printed display text: numeric reconciliation, tolerances, suppression and dimension

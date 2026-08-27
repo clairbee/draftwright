@@ -116,10 +116,11 @@ class TestSourceCoherence:
         with pytest.raises(ValueError, match="authors the view set"):
             sheet.view("front")
 
-    def test_from_part_implicit_automatic_dimensions_also_refuse_authored_views(self):
+    def test_from_part_implicit_automatic_dimensions_refuse_authored_views_at_build(self):
         sheet = Sheet.from_part(Box(30, 20, 10))
-        with pytest.raises(ValueError, match="authors the view set"):
-            sheet.view("front")
+        sheet.view("front")
+        with pytest.raises(ValueError, match="authored views require authored dimensions"):
+            sheet.build()
 
     def test_add_forms_require_auto_views_at_build(self):
         sheet = _sheet()
