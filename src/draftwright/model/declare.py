@@ -617,31 +617,31 @@ def _read_fillet_face(face) -> tuple[str, float, Point]:
     along), the radius (the cylinder radius), and a point **on the round** (mid angular/axial of
     the trimmed face — the ``R`` leader's tip). Agrees with the recogniser (recognition/fillets.py)
     in the two in-plane (placement) coordinates; the along-edge coordinate is view depth."""
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Cylinder
+    from b123d_recognisers.experimental_geometry import AnalyticSurface, inspect_face
 
-    s = BRepAdaptor_Surface(face.wrapped)
-    if s.GetType() != GeomAbs_Cylinder:
+    inspection = inspect_face(face)
+    surface = inspection.surface
+    if not isinstance(surface, AnalyticSurface) or surface.kind.value != "cylinder":
         raise ValueError(
             "fillet(face=...) needs a cylindrical blend face (the round); an edge or flat "
             "face is not a fillet — declare with axis=, radius=, at= instead"
         )
-    d = s.Cylinder().Axis().Direction()
-    comp = (abs(d.X()), abs(d.Y()), abs(d.Z()))
+    comp = tuple(abs(value) for value in surface.parameters[3:6])
     if max(comp) <= 0.99:
         raise ValueError(
             "fillet(face=...): the round must run along one principal axis; use axis=, radius=, at="
         )
     edge_i = max(range(3), key=lambda i: comp[i])
-    # Anchor on the curved radius surface itself — the recogniser's own fillet_anchor
-    # (#622 lesson: never the bbox centre), so a declared fillet's leader tip is
-    # identical to the detected one's by construction (#704).
-    from b123d_recognisers import fillet_anchor
-
-    p = fillet_anchor(s)
+    # The inspection result owns both the analytic fact and trimmed-surface anchor, so
+    # Draftwright sees neither a graph handle nor a recogniser implementation helper.
+    p = inspection.anchor
+    if p is None:
+        raise ValueError(
+            "fillet(face=...): no stable point on the round is available; use axis=, radius=, at="
+        )
     return (
         "xyz"[edge_i],
-        round(s.Cylinder().Radius(), 3),
+        round(surface.parameters[6], 3),
         (
             round(p[0], 4),
             round(p[1], 4),
