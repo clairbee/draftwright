@@ -17,6 +17,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
+from itertools import permutations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
@@ -140,6 +141,22 @@ def _exact_vertex_rotation(source_vertices, target_vertices) -> float | None:
     if error / target_norm >= 1e-12:
         return None
     return math.degrees(math.atan2(transform.imag, transform.real))
+
+
+def _exact_face_rotation(source_faces, target_faces) -> float | None:
+    """Exact outline rotation independent of disconnected-face enumeration order."""
+    if len(source_faces) != len(target_faces) or not source_faces or len(source_faces) > 6:
+        return None
+    source_vertices = [vertex for face in source_faces for vertex in face.vertices()]
+    source_counts = [len(face.vertices()) for face in source_faces]
+    for ordered_targets in permutations(target_faces):
+        if source_counts != [len(face.vertices()) for face in ordered_targets]:
+            continue
+        target_vertices = [vertex for face in ordered_targets for vertex in face.vertices()]
+        rotation = _exact_vertex_rotation(source_vertices, target_vertices)
+        if rotation is not None:
+            return rotation
+    return None
 
 
 _PDF_VECTOR_ONLY_TEXT = str.maketrans("⌴⌵↧", "   ")
@@ -3835,16 +3852,8 @@ class Drawing:
                         if not source_face_options:
                             continue
                         if len(candidate) == 1:
-                            target_vertices = [
-                                vertex for face in glyph_faces for vertex in face.vertices()
-                            ]
                             for _font_error, exact_faces in source_face_options:
-                                source_vertices = [
-                                    vertex for face in exact_faces for vertex in face.vertices()
-                                ]
-                                exact_rotation = _exact_vertex_rotation(
-                                    source_vertices, target_vertices
-                                )
+                                exact_rotation = _exact_face_rotation(exact_faces, glyph_faces)
                                 if exact_rotation is not None:
                                     raw_basic_exact_matches.add(id(annotation))
                                     shape_matches.append((0.0, candidate, exact_rotation))

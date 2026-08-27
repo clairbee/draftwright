@@ -755,6 +755,45 @@ def test_raw_drawing_font_single_glyph_prefers_exact_outline(tmp_path, label, ax
         pdf.close()
 
 
+def test_raw_same_face_multi_outline_glyph_ignores_face_order(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    custom = Draft(font_size=20)
+    custom.font_path = drawing.draft.font_path
+    angle = math.radians(-170)
+    annotation = Dimension(
+        (50, 50, 0),
+        (50 + math.cos(angle), 50 + math.sin(angle), 0),
+        "above",
+        1,
+        custom,
+        label="%",
+        basic=True,
+        rotation=30,
+    )
+    annotation.location = Location((0, 0, 0), (0, 0, 20))
+    box = annotation.bounding_box()
+    annotation.location = (
+        Location((100 - (box.min.X + box.max.X) / 2, 100 - (box.min.Y + box.max.Y) / 2, 0))
+        * annotation.location
+    )
+    drawing.registry.add(annotation, "raw_multi_outline", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "raw_multi_outline"), formats=("pdf",))["pdf"]
+    pdf, text_page, _extracted = _pdf_text(pdf_path)
+    try:
+        text_object = next(
+            item
+            for item in text_page.parent.get_objects(textpage=text_page)
+            if isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == "%"
+        )
+        a, b, _c, _d, _e, _f = text_object.get_matrix().get()
+        assert math.degrees(math.atan2(b, a)) == pytest.approx(60.0, abs=1.0)
+    finally:
+        text_page.close()
+        pdf.close()
+
+
 @pytest.mark.parametrize("label", ["C", "%"])
 def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path, label):
     drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
