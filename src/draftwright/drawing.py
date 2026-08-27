@@ -3670,8 +3670,9 @@ class Drawing:
             upper, minus, lower = limits.partition(" -")
             if separator and minus and prefix == bare_value:
                 # Helper compatibility metadata reverses asymmetric tuple limits relative
-                # to the visible string. Equal-width geometry cannot select the right order.
-                candidates.insert(0, f"{prefix} +{lower} -{upper}{unit_suffix}")
+                # to the visible string. This grammar is authoritative: proportional ink
+                # bounds cannot reliably break the equal-advance ordering tie.
+                return [f"{prefix} +{lower} -{upper}{unit_suffix}"]
             return list(dict.fromkeys(candidates))
 
         def text_rotation(annotation) -> float:
@@ -3688,12 +3689,23 @@ class Drawing:
             if spec is not None and hasattr(annotation, "measured_length"):
                 dx, dy = spec.p2[0] - spec.p1[0], spec.p2[1] - spec.p1[1]
                 if math.hypot(dx, dy) > 1e-9:
-                    return upright(
-                        math.degrees(math.atan2(dy, dx))
+                    # Dimension first makes its path label upright, then BaseSketchObject
+                    # applies constructor/live transforms to the whole annotation. Do not
+                    # upright-normalise again after those transforms: 120° must remain 120°.
+                    return (
+                        upright(math.degrees(math.atan2(dy, dx)))
                         + float(spec.kwargs.get("rotation", 0.0))
                         + live_rotation
                     )
             if getattr(annotation, "is_basic", False):
+                # Raw helper geometry has already absorbed its constructor rotation; live
+                # location transforms are reflected by ``segments`` too. Match the helper's
+                # operation order: upright the pre-transform axis, then reapply both.
+                transform_rotation = float(getattr(annotation, "_init_rot", 0.0)) + live_rotation
+
+                def raw_basic_text_angle(final_axis: float) -> float:
+                    return upright(final_axis - transform_rotation) + transform_rotation
+
                 # A basic dimension's keep-clear polygon is its axis-aligned frame,
                 # not its rotated text. For short labels, distinguish collinear shaft spans,
                 # parallel witness
@@ -3707,13 +3719,14 @@ class Drawing:
                     angle = math.degrees(math.atan2(dy, dx))
                     bx, by = b1[0] - b0[0], b1[1] - b0[1]
                     if abs(dx * by - dy * bx) > 1e-7:
-                        return upright(angle)
+                        return raw_basic_text_angle(angle)
                     separation = dx * (b0[1] - a0[1]) - dy * (b0[0] - a0[0])
-                    return upright(angle if abs(separation) < 1e-7 else angle + 90.0)
+                    axis = angle if abs(separation) < 1e-7 else angle + 90.0
+                    return raw_basic_text_angle(axis)
                 for start, end in ink:
                     dx, dy = end[0] - start[0], end[1] - start[1]
                     if math.hypot(dx, dy) > 1e-9:
-                        return upright(math.degrees(math.atan2(dy, dx)))
+                        return raw_basic_text_angle(math.degrees(math.atan2(dy, dx)))
                 # An extremely wide label can consume every shaft and witness span. Recover
                 # angle magnitude from the rotated text AABB (the frame adds a known pad),
                 # using glyph-face covariance only for the sign.
@@ -3774,7 +3787,8 @@ class Drawing:
                         )
                     if matches:
                         magnitude = min(matches)[1]
-                        return upright(-magnitude if xy < 0.0 else magnitude)
+                        axis = -magnitude if xy < 0.0 else magnitude
+                        return raw_basic_text_angle(axis)
             polygon = getattr(annotation, "label_polygon", None)
             if polygon and len(polygon) >= 2:
                 (x0, y0), (x1, y1) = polygon[:2]
