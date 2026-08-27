@@ -29,7 +29,18 @@ if TYPE_CHECKING:
 
     from draftwright.compose import StripDepths
 
-from build123d import Align, BoundBox, Compound, Edge, Location, Mode, Shape, Text, Vector
+from build123d import (
+    Align,
+    BoundBox,
+    Compound,
+    Edge,
+    FontStyle,
+    Location,
+    Mode,
+    Shape,
+    Text,
+    Vector,
+)
 from build123d_drafting.helpers import (
     Dimension,
     TitleBlock,
@@ -373,6 +384,7 @@ def _text_size(
     font_size: float,
     font_path: str | None = PLEX_MONO,
     font: str = "Arial",
+    font_style: FontStyle = FontStyle.REGULAR,
 ) -> tuple[float, float]:
     """Measured rendered (width, height) (page-mm) of *text* at *font_size*.
 
@@ -394,10 +406,41 @@ def _text_size(
         font_size=font_size,
         font=font,
         font_path=font_path,
+        font_style=font_style,
         align=(Align.CENTER, Align.CENTER),
         mode=Mode.PRIVATE,
     ).bounding_box()
     return (bb.size.X, bb.size.Y)
+
+
+@functools.lru_cache(maxsize=32)
+def _text_line_spacing_em(
+    font_size: float,
+    font_path: str | None = PLEX_MONO,
+    font: str = "Arial",
+) -> float:
+    """Return OCCT's actual newline advance for a regular face, in em units.
+
+    The advance is face-dependent (Plex Mono is 1.3 em; named Arial on macOS is
+    about 1.15 em).  Measure the same repeated glyph twice through build123d so
+    the invisible PDF layer follows the renderer instead of baking either value.
+    """
+    probe = Text(
+        txt="A\nA",
+        font_size=font_size,
+        font=font,
+        font_path=font_path,
+        font_style=FontStyle.REGULAR,
+        align=(Align.CENTER, Align.CENTER),
+        mode=Mode.PRIVATE,
+    )
+    centres = sorted(
+        ((face.bounding_box().min.Y + face.bounding_box().max.Y) / 2.0 for face in probe.faces()),
+        reverse=True,
+    )
+    if len(centres) < 2:  # pragma: no cover - defensive for a pathological font
+        return 1.3
+    return abs(centres[0] - centres[-1]) / font_size
 
 
 def _text_width(text: str, font_size: float, font_path: str = PLEX_MONO) -> float:

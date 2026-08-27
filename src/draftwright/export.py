@@ -39,12 +39,15 @@ class _PDFTextRun:
     rotation: float = 0.0
     font_path: str | None = PLEX_MONO
     font_name: str = "Arial"
+    font_style: str = "REGULAR"
     h_align: str = "left"
     v_align: str = "baseline"
 
 
-@lru_cache(maxsize=16)
-def _resolved_semantic_font_path(font_path: str | None, font_name: str) -> str:
+@lru_cache(maxsize=32)
+def _resolved_semantic_font_path(
+    font_path: str | None, font_name: str, font_style: str = "REGULAR"
+) -> str:
     """Resolve the same regular face used by build123d's text renderer.
 
     A ``None`` path is a deliberate opt-out from Draftwright's pinned font: build123d
@@ -57,8 +60,9 @@ def _resolved_semantic_font_path(font_path: str | None, font_name: str) -> str:
     from build123d import FontStyle
     from build123d.text import FONT_ASPECT, FontManager
 
-    face = FontManager().find_font(font_name, FontStyle.REGULAR)
-    return str(face.FontPath(FONT_ASPECT[FontStyle.REGULAR]).ToCString())
+    style = FontStyle[font_style]
+    face = FontManager().find_font(font_name, style)
+    return str(face.FontPath(FONT_ASPECT[style]).ToCString())
 
 
 @lru_cache(maxsize=16)
@@ -315,25 +319,33 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
             from reportlab.pdfbase.ttfonts import TTFont
 
             k = 72.0 / 25.4
+            font_choices: dict[tuple[str | None, str, str], tuple[str, str]] = {}
             for run in text_runs:
-                font_path = _resolved_semantic_font_path(run.font_path, run.font_name)
-                font_name = _semantic_font_name(font_path)
-                if font_name not in pdfmetrics.getRegisteredFontNames():
-                    try:
-                        pdfmetrics.registerFont(TTFont(font_name, font_path))
-                    except Exception:  # noqa: BLE001 - CFF/single-stroke faces are not TTFont
-                        # Geometry supports more font formats than ReportLab's TTFont
-                        # subsetter.  Keep export/search total with the bundled Unicode face;
-                        # the normal pinned TTF path above still matches visible metrics.
-                        _log.warning(
-                            "PDF semantic font %s cannot be embedded; using bundled Plex Mono",
-                            font_path,
-                            exc_info=True,
-                        )
-                        font_path = PLEX_MONO
-                        font_name = _semantic_font_name(font_path)
-                        if font_name not in pdfmetrics.getRegisteredFontNames():
+                font_key = (run.font_path, run.font_name, run.font_style)
+                choice = font_choices.get(font_key)
+                if choice is None:
+                    font_path = _resolved_semantic_font_path(*font_key)
+                    font_name = _semantic_font_name(font_path)
+                    if font_name not in pdfmetrics.getRegisteredFontNames():
+                        try:
                             pdfmetrics.registerFont(TTFont(font_name, font_path))
+                        except Exception as exc:  # noqa: BLE001 - CFF/single-stroke faces
+                            # Geometry supports more font formats than ReportLab's TTFont
+                            # subsetter. Keep export/search total with the bundled Unicode face.
+                            # Cache the choice per export so a dense drawing warns/probes once.
+                            _log.warning(
+                                "PDF semantic font %s cannot be embedded (%s); "
+                                "using bundled Plex Mono",
+                                font_path,
+                                exc,
+                            )
+                            font_path = PLEX_MONO
+                            font_name = _semantic_font_name(font_path)
+                            if font_name not in pdfmetrics.getRegisteredFontNames():
+                                pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    choice = (font_path, font_name)
+                    font_choices[font_key] = choice
+                font_path, font_name = choice
                 font_size = run.font_size * k
                 dx = 0.0
                 if run.h_align == "center":

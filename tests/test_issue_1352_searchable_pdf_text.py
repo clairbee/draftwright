@@ -14,6 +14,7 @@ from build123d_drafting import Dimension
 from PIL import Image, ImageChops
 
 from draftwright import Sheet, build_drawing
+from draftwright._core import _text_line_spacing_em
 from draftwright.drawing import Drawing
 from draftwright.export import _PDFTextRun, _render_pdf, _resolved_semantic_font_path
 from draftwright.fonts import PLEX_MONO, PLEX_SANS_CONDENSED
@@ -143,13 +144,75 @@ def test_multiline_notes_and_title_values_retain_visible_line_pitch(tmp_path):
     try:
         assert "A\r\nB\r\nC\r\nD\r\nE\r\nF\r\nG" in extracted
         assert "TOP\r\nBOTTOM" in extracted
-        expected_pitch_points = 1.3 * drawing.draft.font_size * 72.0 / 25.4
+        expected_pitch_points = (
+            _text_line_spacing_em(
+                drawing.draft.font_size,
+                drawing.draft.font_path,
+                drawing.draft.font,
+            )
+            * drawing.draft.font_size
+            * 72.0
+            / 25.4
+        )
         note_indices = [extracted.index(line) for line in tuple("ABCDEFG")]
         centres = [_character_centre(text_page, index) for index in note_indices]
         assert all(
             upper[1] - lower[1] == pytest.approx(expected_pitch_points, abs=0.15)
             for upper, lower in zip(centres, centres[1:], strict=False)
         )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_structured_multiline_note_uses_renderer_line_pitch(tmp_path):
+    part = Box(80, 50, 20)
+    top = max(part.faces(), key=lambda face: face.center().Z)
+    sheet = Sheet(part).auto_dimensions()
+    sheet.note("A\nB\nC", top, view="front", side="above")
+    drawing = sheet.build()
+
+    pdf_path = drawing.export(str(tmp_path / "structured_note"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "A\r\nB\r\nC" in extracted
+        expected_pitch_points = (
+            _text_line_spacing_em(
+                drawing.draft.font_size,
+                drawing.draft.font_path,
+                drawing.draft.font,
+            )
+            * drawing.draft.font_size
+            * 72.0
+            / 25.4
+        )
+        centres = [_character_centre(text_page, extracted.index(line)) for line in "ABC"]
+        assert all(
+            math.dist(upper, lower) == pytest.approx(expected_pitch_points, abs=0.15)
+            for upper, lower in zip(centres, centres[1:], strict=False)
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_declared_gdt_values_and_datums_are_searchable(tmp_path):
+    part = Box(80, 50, 20) - Pos(0, 0, 0) * Cylinder(6, 20)
+    top = max(part.faces(), key=lambda face: face.center().Z)
+    sheet = Sheet(part).auto_dimensions()
+    hole = sheet.hole(Pos(0, 0, 0) * Cylinder(6, 20))
+    sheet.finish("7.77", top, view="front", side="above")
+    sheet.datum("Q", top, view="front", side="above")
+    sheet.control(hole).position("0.123", to="Q", diameter=True, modifier="M")
+    drawing = sheet.build()
+
+    pdf_path = drawing.export(str(tmp_path / "gdt"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "7.77" in extracted
+        assert "Q" in extracted
+        assert "0.123" in extracted
+        assert "M" in extracted
     finally:
         text_page.close()
         pdf.close()
@@ -183,6 +246,45 @@ def test_semantic_order_tiebreak_and_basic_dimension_rotation_are_total(tmp_path
         pdf.close()
 
 
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        ((50, 10, 0), (10, 50, 0), -45.0),
+        ((20, 50, 0), (20, 10, 0), 90.0),
+    ],
+)
+def test_basic_dimension_semantic_text_is_normalised_upright(tmp_path, start, end, expected):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension(start, end, (0, 1, 0), 10, drawing.draft, label="UPRIGHT", basic=True)
+    drawing.registry.add(annotation, "upright", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / f"upright_{expected}"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert _extracted_text_angle(text_page, extracted, "UPRIGHT") == pytest.approx(
+            expected, abs=1.0
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_raw_helper_dimension_semantic_fallback_keeps_visible_units(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension((10, 10, 0), (20, 10, 0), "above", 10, drawing.draft)
+    drawing.registry.add(annotation, "raw_units", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "raw_units"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "10.0mm" in extracted
+    finally:
+        text_page.close()
+        pdf.close()
+
+
 def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):
     drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
     drawing.note("ROTATED", (100, 100), rotation=10, name="rotated")
@@ -199,12 +301,16 @@ def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):
         pdf.close()
 
 
-def test_named_font_opt_out_resolves_the_renderer_face():
-    path = Path(_resolved_semantic_font_path(None, "Arial"))
-    assert path.is_file()
+def test_named_font_opt_out_resolves_the_renderer_face_and_style():
+    regular = Path(_resolved_semantic_font_path(None, "Arial", "REGULAR"))
+    bold = Path(_resolved_semantic_font_path(None, "Arial", "BOLD"))
+    assert regular.is_file() and bold.is_file()
+    assert regular != bold
 
 
-def test_non_ttfont_semantic_face_falls_back_without_losing_text(tmp_path, monkeypatch):
+def test_non_ttfont_semantic_face_falls_back_once_without_losing_text(
+    tmp_path, monkeypatch, caplog
+):
     from reportlab.pdfbase import ttfonts
 
     svg_path = tmp_path / "blank.svg"
@@ -228,13 +334,17 @@ def test_non_ttfont_semantic_face_falls_back_without_losing_text(tmp_path, monke
     _render_pdf(
         str(svg_path),
         str(pdf_path),
-        text_runs=(_PDFTextRun("FALLBACK", 10, 10, 3, font_path=str(unsupported)),),
+        text_runs=tuple(
+            _PDFTextRun(f"FALLBACK{index}", 10, 10 + index * 5, 3, font_path=str(unsupported))
+            for index in range(3)
+        ),
     )
 
     pdf, text_page, extracted = _pdf_text(str(pdf_path))
     try:
-        assert "FALLBACK" in extracted
+        assert all(f"FALLBACK{index}" in extracted for index in range(3))
         assert Path(PLEX_MONO).is_file()
+        assert sum("cannot be embedded" in record.message for record in caplog.records) == 1
     finally:
         text_page.close()
         pdf.close()

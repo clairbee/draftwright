@@ -49,6 +49,8 @@ from draftwright._core import (
     _log,
     _table_metrics,
     _tag_sequence,
+    _text_line_spacing_em,
+    _text_size,
     _tol_suffix,
     place_annotation,
 )
@@ -2831,7 +2833,11 @@ class Drawing:
         # overlay (notably its established ⌀ -> ø compatibility substitution).
         n.pdf_text = _font_safe_text(text)
         n.pdf_text_rotation = float(rotation)
-        n.pdf_text_line_spacing = 1.3
+        n.pdf_text_line_spacing = _text_line_spacing_em(
+            self.draft.font_size,
+            getattr(self.draft, "font_path", DEFAULT_FONT_PATH),
+            getattr(self.draft, "font", "Arial"),
+        )
         if name is None:
             i = 0
             while (name := f"note{i}") in self._registry:
@@ -3642,6 +3648,7 @@ class Drawing:
         pad = self.draft.pad_around_text
         drawing_font_path = getattr(self.draft, "font_path", DEFAULT_FONT_PATH)
         drawing_font_name = getattr(self.draft, "font", "Arial")
+        drawing_font_style = getattr(getattr(self.draft, "font_style", None), "name", "REGULAR")
 
         def semantic_text(value) -> str:
             # The bundled faces do not carry the geometric counterbore,
@@ -3661,7 +3668,10 @@ class Drawing:
                 for start, end in getattr(annotation, "segments", ()):
                     dx, dy = end[0] - start[0], end[1] - start[1]
                     if math.hypot(dx, dy) > 1e-9:
-                        return math.degrees(math.atan2(dy, dx))
+                        angle = math.degrees(math.atan2(dy, dx))
+                        return (
+                            angle if -90.0 < angle <= 90.0 else angle - math.copysign(180.0, angle)
+                        )
             polygon = getattr(annotation, "label_polygon", None)
             if polygon and len(polygon) >= 2:
                 (x0, y0), (x1, y1) = polygon[:2]
@@ -3675,7 +3685,8 @@ class Drawing:
             rotation,
             font_path,
             font_name="Arial",
-            line_spacing=1.3,
+            font_style="REGULAR",
+            line_spacing=None,
         ):
             lines = semantic_text(value).splitlines()
             if not lines:
@@ -3684,6 +3695,8 @@ class Drawing:
             cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
             angle = math.radians(rotation)
             sin_angle, cos_angle = math.sin(angle), math.cos(angle)
+            if line_spacing is None:
+                line_spacing = _text_line_spacing_em(font_size, font_path, font_name)
             runs = []
             for index, line in enumerate(lines):
                 if not line:
@@ -3695,11 +3708,12 @@ class Drawing:
                         cx - sin_angle * local_y,
                         cy + cos_angle * local_y,
                         font_size,
-                        rotation,
-                        font_path,
-                        font_name,
-                        "center",
-                        "middle",
+                        rotation=rotation,
+                        font_path=font_path,
+                        font_name=font_name,
+                        font_style=font_style,
+                        h_align="center",
+                        v_align="middle",
                     )
                 )
             return runs
@@ -3737,7 +3751,7 @@ class Drawing:
                     angle = math.radians(rotation)
                     cos_angle, sin_angle = math.cos(angle), math.sin(angle)
                     for spec in specs:
-                        value, rx, ry, size, path, name, *align = spec
+                        value, rx, ry, size, path, name, style, *align = spec
                         h_align, v_align = align or ("center", "middle")
                         runs.append(
                             _PDFTextRun(
@@ -3745,11 +3759,12 @@ class Drawing:
                                 cx + cos_angle * rx - sin_angle * ry,
                                 cy + sin_angle * rx + cos_angle * ry,
                                 size,
-                                rotation,
-                                path,
-                                name,
-                                h_align,
-                                v_align,
+                                rotation=rotation,
+                                font_path=path,
+                                font_name=name,
+                                font_style=style,
+                                h_align=h_align,
+                                v_align=v_align,
                             )
                         )
             else:
@@ -3758,6 +3773,38 @@ class Drawing:
                     value = getattr(annotation, "label", None)
                 label_box = getattr(annotation, "label_bbox", None)
                 if value and label_box:
+                    # A raw helper Dimension with label=None visibly renders units while its
+                    # compatibility metadata remains unitless.  Sanctioned Draftwright verbs
+                    # supply explicit labels; this width check preserves the deprecated raw-add
+                    # case without changing an explicit custom label.
+                    if (
+                        hasattr(annotation, "measured_length")
+                        and not getattr(annotation, "is_basic", False)
+                        and (polygon := getattr(annotation, "label_polygon", None))
+                    ):
+                        rendered = self.draft._number_with_units(annotation.measured_length)
+                        visible_width = math.dist(polygon[0], polygon[1])
+                        value_width = _text_size(
+                            value,
+                            fs,
+                            drawing_font_path,
+                            drawing_font_name,
+                            self.draft.font_style,
+                        )[0]
+                        rendered_width = _text_size(
+                            rendered,
+                            fs,
+                            drawing_font_path,
+                            drawing_font_name,
+                            self.draft.font_style,
+                        )[0]
+                        if abs(rendered_width - visible_width) < abs(value_width - visible_width):
+                            value = rendered
+                    font_style = (
+                        drawing_font_style
+                        if hasattr(annotation, "measured_length")
+                        else getattr(annotation, "pdf_text_font_style", "REGULAR")
+                    )
                     runs.extend(
                         centred_runs(
                             value,
@@ -3766,7 +3813,8 @@ class Drawing:
                             text_rotation(annotation),
                             drawing_font_path,
                             drawing_font_name,
-                            getattr(annotation, "pdf_text_line_spacing", 1.3),
+                            font_style,
+                            getattr(annotation, "pdf_text_line_spacing", None),
                         )
                     )
             if runs:
