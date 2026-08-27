@@ -2660,14 +2660,18 @@ def place_strip_candidates(
     for name, dim in solved:
         # Record feature provenance (ADR 0010): the drain-time seam for corridor-placed
         # dims — `features` maps this batch's names to their source IR feature.
-        ctx.place(
-            dim,
-            name,
-            view=view,
-            feature=(features or {}).get(name),
-            measurement=(measurements or {}).get(name),
-            satisfaction=(satisfactions or {}).get(name),
-        )
+        placement = {
+            "view": view,
+            "feature": (features or {}).get(name),
+            "measurement": (measurements or {}).get(name),
+        }
+        # Preserve the established duck-typed ``ctx.place`` contract for callers that do
+        # not participate in structured-note authority. Only a candidate carrying the new
+        # provenance axis receives the keyword (#1351).
+        satisfaction = (satisfactions or {}).get(name)
+        if satisfaction is not None:
+            placement["satisfaction"] = satisfaction
+        ctx.place(dim, name, **placement)
     if tp is not None:
         tp["unplaced"] = [n for n, _ in todo]
         trace.end_pass(tp)  # folds a standalone pass's items; no-op when corridor-nested

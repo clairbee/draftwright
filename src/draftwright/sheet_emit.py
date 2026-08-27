@@ -1071,7 +1071,9 @@ def _binding(f, line: str, counts: dict[str, int]) -> str | None:
     ``None`` for a kind with no declarative verb: its "line" is a comment, and
     ``rotational1 = # …`` does not parse.
     """
-    if line.lstrip().startswith("#"):
+    # Fluent ``handle.note(...)`` returns the origin handle, not the appended Note. Binding
+    # that expression as ``note1`` would therefore lie about which feature the name denotes.
+    if f.kind == "note" or line.lstrip().startswith("#"):
         return None
     counts[f.kind] = counts.get(f.kind, 0) + 1
     return f"{f.kind}{counts[f.kind]}"
@@ -1389,11 +1391,18 @@ def _feature_block(
     the wrong hole, which still runs.
 
     Lines are grouped under section sub-headers (with a repeat tally) and each carries a
-    trailing describing comment. Runs are CONSECUTIVE in the given order — no reorder.
+    trailing describing comment. Geometric features retain their consecutive order. Notes
+    are dependent aspect statements, so they are emitted after the independently bindable
+    features; this lets an identity-preserving public reorder put a note before its origin
+    without making the generated relationship impossible to spell (#1351).
     """
     if not features:
         return ["# ── Features: none detected ──"], {}
-    out = [f"# ── Features ({len(features)}): {_manifest(features)} ──"]
+    source_features = tuple(features)
+    out = [f"# ── Features ({len(source_features)}): {_manifest(source_features)} ──"]
+    features = tuple(f for f in source_features if f.kind != "note") + tuple(
+        f for f in source_features if f.kind == "note"
+    )
     counts: dict[str, int] = {}
     names: dict[int, str] = {}
     i = 0
@@ -1410,6 +1419,7 @@ def _feature_block(
             origin_ref = names.get(id(f.origin)) if gdt_with_origin else None
             if (
                 gdt_with_origin
+                and (f.kind != "note" or bool(f.satisfies))
                 and f.origin is not None
                 and getattr(f.origin, "kind", None) != "pmi"
                 and origin_ref is None

@@ -57,6 +57,7 @@ from draftwright.model.ir import (
     EnvelopeFeature,
     Feature,
     HoleFeature,
+    Note,
     PartModel,
     PatternFeature,
     PocketFeature,
@@ -1434,6 +1435,20 @@ def compile_dimensions(
     must plan for itself.  Callers supplying *groups* have already resolved that constraint;
     the exact model/groups identity check below prevents substituting another plan.
     """
+    # PartModel.features is intentionally editable public IR, so construction-time validation
+    # alone cannot protect a model mutated afterward. Recheck at the compiler boundary before
+    # any structured-note authority can reach placement or critique (#1351).
+    model._validate_structured_note_origins()
+    for feature in model.features:
+        if (
+            isinstance(feature, Note)
+            and "location" in feature.satisfies
+            and location_datum(feature.origin) is None
+        ):
+            raise ValueError(
+                "structured note satisfies='location' targets a feature with no planned "
+                "location measurement"
+            )
     planned = (
         tuple(groups)
         if groups is not None

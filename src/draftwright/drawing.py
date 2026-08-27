@@ -3302,6 +3302,7 @@ class Drawing:
                 self.part,
                 self,
                 assembly=self.assembly,
+                recognition=recognition,
                 **prof_kw,
             )
             model = self._part_model
@@ -3366,6 +3367,8 @@ class Drawing:
                 self.part,
                 self.items,
                 recognition=recognition,
+                features=getattr(model, "features", ()) if model is not None else (),
+                registry=self._registry,
                 dropped_profiles=self._coverage.dropped_profiles,
                 assembly=self.assembly,
             )

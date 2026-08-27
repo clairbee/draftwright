@@ -1831,7 +1831,7 @@ class Note:
     # carries (#1351). Kept separate from ``parameters()``: the note does not become a
     # dimension, and coverage can distinguish a drawn measurement from an authored semantic
     # assertion instead of parsing prose.
-    satisfies: tuple[str, ...] = ()
+    satisfies: tuple[DimensionParameterId, ...] = ()
     kind: ClassVar[str] = "note"
 
     def __post_init__(self) -> None:
@@ -1846,6 +1846,11 @@ class Note:
         if not isinstance(self.origin, Feature):
             raise ValueError("a note with satisfies= must target a dimensionable feature")
         available = {parameter.parameter_id for parameter in self.origin.parameters()}
+        # ``location`` is the one addressable dimension with no DimParameter. IR can validate
+        # its spelling here; the Sheet/compiler boundaries validate planner-owned eligibility
+        # without reversing the IR -> planner dependency (ADR 0015).
+        if "location" in self.satisfies:
+            available.add("location")
         invalid = sorted(set(self.satisfies) - available)
         if invalid:
             raise ValueError(
@@ -1935,3 +1940,21 @@ class PartModel:
     # authored set is planned with ``suppressed=True`` and keeps its value, so the group
     # retains its engineering data and a later pass can still see what was left out.
     authored_dimensions: tuple[RequestedDimension, ...] | None = None
+
+    def __post_init__(self) -> None:
+        self._validate_structured_note_origins()
+
+    def _validate_structured_note_origins(self) -> None:
+        """Require every authority-bearing note to target this exact mutable inventory."""
+        # Structured authority must terminate at a feature in this exact IR inventory. Value
+        # equality is unsafe when two identical holes are distinct physical requirements, and
+        # an external origin cannot round-trip or join recognition evidence (#1351).
+        for feature in self.features:
+            if (
+                isinstance(feature, Note)
+                and feature.satisfies
+                and not any(candidate is feature.origin for candidate in self.features)
+            ):
+                raise ValueError(
+                    "structured note origin must be the identical feature in PartModel.features"
+                )

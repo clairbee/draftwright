@@ -45,6 +45,7 @@ from draftwright.model.ir import (
     ControlFrame,
     CylindricalReference,
     DatumRef,
+    DimensionParameterId,
     EnvelopeFeature,
     ExternalSpurGearFeature,
     Feature,
@@ -2019,11 +2020,21 @@ def finish(ra, ref, part=None, *, view=None, side=None) -> Finish:
     return Finish(frame=Frame(site, axis), ra=ra, view=v, side=s, origin=origin)
 
 
-def note(text, ref, part=None, *, view=None, side=None, satisfies: tuple[str, ...] = ()) -> Note:
+def note(
+    text,
+    ref,
+    part=None,
+    *,
+    view=None,
+    side=None,
+    satisfies: tuple[DimensionParameterId, ...] = (),
+) -> Note:
     """A free-text manufacturing note (#488) on a leader to *ref* — a feature or a planar face
     (ADR 0011 P2c). The shop callouts detection can't infer: thread specs (``M3x0.5 TAP``),
     ``DEBURR``, chip-relief, knurl. Placed like the GD&T items (a first-class ADR 0009 corridor
-    candidate), not the dimension planner."""
+    candidate), not the dimension planner. ``satisfies`` explicitly names canonical
+    measurement roles that this note carries; the claim takes effect only if the note is
+    placed, and is never inferred by parsing its prose (#1351)."""
     text = str(text).strip()
     if not text:
         raise ValueError("note needs text (e.g. 'M3x0.5 TAP')")

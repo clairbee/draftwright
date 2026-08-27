@@ -502,6 +502,22 @@ def _evidence_parameter(parameter: str) -> str:
     return parameter
 
 
+def _satisfaction_parameter(parameter: str) -> str | None:
+    """The exact public claim that may satisfy one physical ledger requirement.
+
+    Placed compound callouts legitimately let one diameter mark prove THRU/count and let one
+    location unit prove its component axes. Structured authority is narrower: synthetic
+    THRU/count facts are not addressable claims, while the public ``location`` unit is (#1351).
+    """
+    if parameter in {"bore.through", "grouping.count"}:
+        return None
+    if parameter.startswith(
+        ("location.location.", "location_pattern.location.", "location_off_axis.")
+    ):
+        return "location"
+    return parameter
+
+
 def _location_members(feature, parameter: str):
     return _members(feature)
 
@@ -712,9 +728,13 @@ def _state(features, parameter, *, member_count, evidence_index, suppressed, tur
         # requirement needs every separately declared physical member tied to the mark.
         if all(per_feature) if "location" in parameter else any(per_feature):
             return "placed"
-    satisfied = [(feature, evidence_parameter) in evidence_index.satisfied for feature in features]
-    if all(satisfied) if "location" in parameter else any(satisfied):
-        return "satisfied_by_structured_note"
+    satisfaction_parameter = _satisfaction_parameter(parameter)
+    if satisfaction_parameter is not None:
+        satisfied = [
+            (feature, satisfaction_parameter) in evidence_index.satisfied for feature in features
+        ]
+        if all(satisfied) if "location" in parameter else any(satisfied):
+            return "satisfied_by_structured_note"
     if all((feature, evidence_parameter) in suppressed for feature in features):
         return "suppressed"
     drop_parameter = (

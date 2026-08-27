@@ -58,6 +58,8 @@ def lint_profiled_bore_coverage(
     annotations,
     *,
     recognition: RecognitionResult | None,
+    features=(),
+    registry=None,
     dropped_profiles=(),
     assembly=None,
 ) -> list[LintIssue]:
@@ -95,6 +97,32 @@ def lint_profiled_bore_coverage(
             annotation, "covers_profiles", ()
         ):
             provided[profiled_bore_key(profile, axis, through, major, across, direction)] += count
+
+    # A placed structured note may carry the two addressable dimensional requirements of a
+    # double-D profile. Join them back to the recognition-owned physical key; neither prose nor
+    # mere IR presence contributes. Pattern owners retain their physical member count (#1351).
+    if registry is not None:
+        satisfied: dict[object, set[str]] = {}
+        for name in registry.names():
+            for identity in registry.satisfaction_of(name):
+                satisfied.setdefault(identity.feature, set()).add(identity.parameter)
+        required_parameters = {"bore.diameter", "profile_across_flats.length"}
+        for feature in features:
+            if not required_parameters <= satisfied.get(feature, set()):
+                continue
+            bore = getattr(feature, "member", feature)
+            if getattr(bore, "profile", None) != "double_d":
+                continue
+            provided[
+                profiled_bore_key(
+                    "double_d",
+                    feature.frame.axis,
+                    bore.through,
+                    bore.diameter,
+                    bore.across_flats,
+                    bore.profile_direction,
+                )
+            ] += int(getattr(feature, "count", 1) or 1)
 
     dropped = Counter(
         profiled_bore_key(profile, axis, through, major, across, direction)

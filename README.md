@@ -135,10 +135,11 @@ hole.note(
 )
 ```
 
-Each id remains an independent requirement in lint output, reported as
-`satisfied_by_structured_note`; the assertion counts only if the normal placement solve places
-the note. Generated Sheet scripts preserve the structured claim. Invalid, duplicate, ambiguous,
-or face-only claims fail at declaration time.
+Each id remains independent provenance in `drawing.registry.satisfaction_of(annotation_name)`;
+the semantic family outcomes report `satisfied_by_structured_note`, while
+`drawing.lint_summary()["quality"]["completeness"]` aggregates the count. The assertion counts
+only if the normal placement solve places the note. Generated Sheet scripts preserve the
+structured claim. Invalid, duplicate, ambiguous, or face-only claims fail at declaration time.
 
 ### From a part to an object-referenced script
 
