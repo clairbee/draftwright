@@ -336,6 +336,8 @@ def test_basic_dimension_semantic_text_is_normalised_upright(tmp_path, start, en
             20,
             130.0,
         ),
+        ((50, 50, 0), (90, 50, 0), "UPRIGHT", 0, 220, 0, -140.0),
+        ((50, 50, 0), (90, 50, 0), "UPRIGHT", 0, 400, 0, 40.0),
     ],
 )
 def test_raw_basic_dimension_rotation_survives_missing_or_mixed_spans(
@@ -453,6 +455,31 @@ def test_raw_asymmetric_limits_keep_visible_order_without_units(tmp_path):
     try:
         assert "10.0 +0.1 -0.2" in extracted
         assert "10.0 +0.2 -0.1" not in extracted
+        assert "10.0 +0.1 -0.2mm" not in extracted
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_raw_custom_limit_lookalike_is_not_rewritten(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension(
+        (10, 10, 0),
+        (20, 10, 0),
+        "above",
+        10,
+        drawing.draft,
+        label="10.0 +0.2 -0.1",
+    )
+    drawing.registry.add(annotation, "custom_limits", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "custom_limits"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "10.0 +0.2 -0.1" in extracted
+        assert "10.0 +0.1 -0.2" not in extracted
+        assert "10.0 +0.2 -0.1mm" not in extracted
     finally:
         text_page.close()
         pdf.close()

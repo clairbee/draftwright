@@ -32,10 +32,13 @@ else:
 
 from b123d_recognisers import analyse_cylinders
 from build123d import (
+    Align,
     Color,
     ExportSVG,
     LineType,
     Location,
+    Mode,
+    Text,
 )
 from build123d_drafting.helpers import DEFAULT_FONT_PATH
 
@@ -3649,6 +3652,7 @@ class Drawing:
         drawing_font_path = getattr(self.draft, "font_path", DEFAULT_FONT_PATH)
         drawing_font_name = getattr(self.draft, "font", "Arial")
         drawing_font_style = getattr(getattr(self.draft, "font_style", None), "name", "REGULAR")
+        raw_basic_matches: dict[int, tuple[str, float]] = {}
 
         def semantic_text(value) -> str:
             # The bundled faces do not carry the geometric counterbore,
@@ -3661,7 +3665,7 @@ class Drawing:
             """Possible visible labels when an external helper discarded constructor args."""
             bare_zero = draft._number_with_units(0.0, display_units=False)
             unit_zero = draft._number_with_units(0.0, display_units=True)
-            unit_suffix = unit_zero.removeprefix(bare_zero)
+            unit_suffix = unit_zero.removeprefix(bare_zero) if draft.display_units else ""
             candidates = [value, draft._number_with_units(annotation.measured_length)]
             if unit_suffix and not value.endswith(unit_suffix):
                 candidates.append(value + unit_suffix)
@@ -3670,16 +3674,17 @@ class Drawing:
             upper, minus, lower = limits.partition(" -")
             if separator and minus and prefix == bare_value:
                 # Helper compatibility metadata reverses asymmetric tuple limits relative
-                # to the visible string. This grammar is authoritative: proportional ink
-                # bounds cannot reliably break the equal-advance ordering tie.
-                return [f"{prefix} +{lower} -{upper}{unit_suffix}"]
+                # to the visible auto-generated string. Keep the authored candidate too;
+                # exact live ink bounds distinguish an explicit lookalike label.
+                candidates.insert(0, f"{prefix} +{lower} -{upper}{unit_suffix}")
             return list(dict.fromkeys(candidates))
 
         def text_rotation(annotation) -> float:
             def upright(angle: float) -> float:
-                if math.isclose(abs(angle), 90.0, abs_tol=1e-6):
+                angle = (angle + 90.0) % 180.0 - 90.0
+                if math.isclose(angle, -90.0, abs_tol=1e-6):
                     return 90.0
-                return angle if -90.0 < angle <= 90.0 else angle - math.copysign(180.0, angle)
+                return angle
 
             live_rotation = float(getattr(annotation.location.orientation, "Z", 0.0))
             explicit = getattr(annotation, "pdf_text_rotation", None)
@@ -3698,6 +3703,8 @@ class Drawing:
                         + live_rotation
                     )
             if getattr(annotation, "is_basic", False):
+                if match := raw_basic_matches.get(id(annotation)):
+                    return match[1]
                 # Raw helper geometry has already absorbed its constructor rotation; live
                 # location transforms are reflected by ``segments`` too. Match the helper's
                 # operation order: upright the pre-transform axis, then reapply both.
@@ -3734,6 +3741,8 @@ class Drawing:
                     x0, y0, x1, y1 = label_box
                     inset = 0.05 * fs
                     centres = []
+                    glyph_faces = []
+                    glyph_boxes = []
                     for face in annotation.faces():
                         face_box = face.bounding_box()
                         if (
@@ -3746,13 +3755,79 @@ class Drawing:
                         ):
                             centre = face.center()
                             centres.append((centre.X, centre.Y))
+                            glyph_faces.append(face)
+                            glyph_boxes.append(face_box)
+                    shape_matches = []
+                    for candidate in raw_dimension_candidates(
+                        annotation, getattr(annotation, "label", ""), self.draft
+                    ):
+                        source_faces = Text(
+                            txt=candidate,
+                            font_size=fs,
+                            font=drawing_font_name,
+                            font_style=self.draft.font_style,
+                            font_path=drawing_font_path,
+                            align=(Align.CENTER, Align.CENTER),
+                            mode=Mode.PRIVATE,
+                        ).faces()
+                        if len(source_faces) != len(glyph_faces) or len(source_faces) < 2:
+                            continue
+                        source_centres = [face.center() for face in source_faces]
+                        source_mean = (
+                            sum(point.X for point in source_centres) / len(source_centres),
+                            sum(point.Y for point in source_centres) / len(source_centres),
+                        )
+                        target_mean = (
+                            sum(point[0] for point in centres) / len(centres),
+                            sum(point[1] for point in centres) / len(centres),
+                        )
+                        dot = cross = 0.0
+                        for source, target in zip(source_centres, centres, strict=True):
+                            sx, sy = source.X - source_mean[0], source.Y - source_mean[1]
+                            tx, ty = target[0] - target_mean[0], target[1] - target_mean[1]
+                            dot += sx * tx + sy * ty
+                            cross += sx * ty - sy * tx
+                        if math.hypot(dot, cross) < 1e-9:
+                            continue
+                        angle = math.atan2(cross, dot)
+                        cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+                        error = 0.0
+                        for source, source_face, target, target_face in zip(
+                            source_centres,
+                            source_faces,
+                            centres,
+                            glyph_faces,
+                            strict=True,
+                        ):
+                            sx, sy = source.X - source_mean[0], source.Y - source_mean[1]
+                            predicted = (
+                                target_mean[0] + cos_angle * sx - sin_angle * sy,
+                                target_mean[1] + sin_angle * sx + cos_angle * sy,
+                            )
+                            error += math.dist(predicted, target) ** 2
+                            error += (source_face.area - target_face.area) ** 2
+                        shape_matches.append((error, candidate, math.degrees(angle)))
+                    if shape_matches:
+                        _error, matched_text, matched_angle = min(shape_matches)
+                        raw_basic_matches[id(annotation)] = (matched_text, matched_angle)
+                        return matched_angle
                     xy = 0.0
                     if centres:
                         mx = sum(point[0] for point in centres) / len(centres)
                         my = sum(point[1] for point in centres) / len(centres)
                         xy = sum((point[0] - mx) * (point[1] - my) for point in centres)
-                    actual_w = x1 - x0 - 0.8 * fs
-                    actual_h = y1 - y0 - 0.8 * fs
+                    actual_w = (
+                        max(box.max.X for box in glyph_boxes)
+                        - min(box.min.X for box in glyph_boxes)
+                        if glyph_boxes
+                        else x1 - x0 - 0.8 * fs
+                    )
+                    actual_h = (
+                        max(box.max.Y for box in glyph_boxes)
+                        - min(box.min.Y for box in glyph_boxes)
+                        if glyph_boxes
+                        else y1 - y0 - 0.8 * fs
+                    )
                     matches = []
                     for candidate in raw_dimension_candidates(
                         annotation, getattr(annotation, "label", ""), self.draft
@@ -3922,7 +3997,11 @@ class Drawing:
                             if getattr(annotation, "is_basic", False):
                                 x0, y0, x1, y1 = label_box
                                 actual = (x1 - x0, y1 - y0)
-                                angle = math.radians(rotation)
+                                transform = math.radians(
+                                    float(getattr(annotation, "_init_rot", 0.0))
+                                    + float(getattr(annotation.location.orientation, "Z", 0.0))
+                                )
+                                base_angle = math.radians(rotation) - transform
 
                                 def geometry_error(candidate):
                                     width, height = _text_size(
@@ -3932,13 +4011,21 @@ class Drawing:
                                         run_font_name,
                                         run_font_style_enum,
                                     )
+                                    frame_width = (
+                                        abs(width * math.cos(base_angle))
+                                        + abs(height * math.sin(base_angle))
+                                        + 0.8 * run_font_size
+                                    )
+                                    frame_height = (
+                                        abs(width * math.sin(base_angle))
+                                        + abs(height * math.cos(base_angle))
+                                        + 0.8 * run_font_size
+                                    )
                                     predicted = (
-                                        abs(width * math.cos(angle))
-                                        + abs(height * math.sin(angle))
-                                        + 0.8 * run_font_size,
-                                        abs(width * math.sin(angle))
-                                        + abs(height * math.cos(angle))
-                                        + 0.8 * run_font_size,
+                                        abs(frame_width * math.cos(transform))
+                                        + abs(frame_height * math.sin(transform)),
+                                        abs(frame_width * math.sin(transform))
+                                        + abs(frame_height * math.cos(transform)),
                                     )
                                     return math.dist(actual, predicted)
 
@@ -3960,7 +4047,12 @@ class Drawing:
                                     )[0]
                                     return abs(width - visible_width)
 
-                            value = min(candidates, key=geometry_error)
+                            match = raw_basic_matches.get(id(annotation))
+                            value = (
+                                match[0]
+                                if match is not None and match[0] in candidates
+                                else min(candidates, key=geometry_error)
+                            )
                     if not hasattr(annotation, "measured_length"):
                         run_font_style = getattr(annotation, "pdf_text_font_style", "REGULAR")
                     runs.extend(
