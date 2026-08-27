@@ -16,6 +16,7 @@ from b123d_recognisers import HoleSpec, RecognitionResult, countersink_matches_h
 
 from draftwright._core import _decode_hole_location_fact
 from draftwright._geometry import _END_ON, _is_principal_axis
+from draftwright.linting._registry import satisfaction_ids
 from draftwright.linting.issues import LintIssue, is_placement_drop
 
 HoleRequirementState = Literal[
@@ -545,12 +546,11 @@ def _normalised_location(feature, point) -> tuple[float, float, float]:
 def _index_hole_evidence(registry) -> _HoleEvidence:
     placed = set()
     satisfied: set[tuple[object, str]] = set()
-    for name in registry.names():
-        for identity in registry.satisfaction_of(name):
-            feature = getattr(identity, "feature", None)
-            parameter = getattr(identity, "parameter", None)
-            if feature is not None and isinstance(parameter, str):
-                satisfied.add((feature, parameter))
+    for identity in satisfaction_ids(registry):
+        feature = getattr(identity, "feature", None)
+        parameter = getattr(identity, "parameter", None)
+        if feature is not None and isinstance(parameter, str):
+            satisfied.add((feature, parameter))
     requirement_counts: dict[tuple[object, str], set[int]] = defaultdict(set)
     locations: dict[tuple[object, str], set[tuple[float, float, float]]] = defaultdict(set)
     centers: dict[object, set[tuple[tuple[float, float, float], str]]] = defaultdict(set)

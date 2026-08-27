@@ -7,6 +7,7 @@ from typing import Literal
 
 from b123d_recognisers import RecognitionResult, has_multi_axis_plates
 
+from draftwright.linting._registry import satisfaction_ids, satisfaction_of
 from draftwright.linting.issues import LintIssue
 
 ChannelRequirementState = Literal[
@@ -70,7 +71,7 @@ def _state(feature, parameter, *, placed, satisfied, suppressed, dropped, regist
         return "dropped"
     associated = registry.names_for_feature(feature)
     if any(
-        not registry.measurement_of(name) and not registry.satisfaction_of(name)
+        not registry.measurement_of(name) and not satisfaction_of(registry, name)
         for name in associated
     ):
         return "unverifiable"
@@ -106,9 +107,7 @@ def channel_requirement_outcomes(
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
-    satisfied = {
-        identity for name in registry.names() for identity in registry.satisfaction_of(name)
-    }
+    satisfied = satisfaction_ids(registry)
     suppressed = {
         (omission.feature, omission.parameter_id)
         for omission in omissions

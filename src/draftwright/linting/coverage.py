@@ -55,6 +55,7 @@ from draftwright._core import (
     _fmt,
     _xyz,
 )
+from draftwright.linting._registry import annotation_owner, satisfaction_ids
 from draftwright.linting.issues import LintIssue
 from draftwright.linting.profiled_bore_coverage import profiled_bore_key
 from draftwright.view_plan import VIEW_AXES
@@ -67,14 +68,6 @@ _UNSET = object()  # sentinel: distinguishes "not supplied" from a valid prof=No
 _RECON_DIA_TOL = 0.2
 _RECON_POS_TOL = 0.5
 _LOCATION_AXIS_TOL = 1.0
-
-
-def _registry_satisfactions(registry) -> set:
-    """Return placed structured authority from old or current registry-shaped objects."""
-    satisfaction_of = getattr(registry, "satisfaction_of", None)
-    if registry is None or not callable(satisfaction_of):
-        return set()
-    return {identity for name in registry.names() for identity in satisfaction_of(name)}
 
 
 def _location_ref(owner, point) -> HoleRef:
@@ -177,6 +170,10 @@ class CoverageState:
         # Exact profiled-bore specifications dropped with those callouts. Diameter alone
         # cannot distinguish equal-major profiles with different A/F or orientation (#1061).
         self._dropped_profiles: list[tuple] = []
+        # The same events with their compiler-owned feature when available. The legacy
+        # spec-only list remains for compatibility; critique uses this richer identity to
+        # avoid combining a drop on A with placed authority on A to certify B (#1351).
+        self._dropped_profile_evidence: list[tuple[tuple, object | None]] = []
 
     # -- pattern coverage -----------------------------------------------------
 
@@ -211,14 +208,16 @@ class CoverageState:
         """Clear dropped-diameter tracking (top of _auto_annotate)."""
         self._dropped_callout_diams = []
         self._dropped_profiles = []
+        self._dropped_profile_evidence = []
 
     def drop_diam(self, diam) -> None:
         """Record a diameter dropped by the per-view callout cap."""
         self._dropped_callout_diams.append(diam)
 
-    def drop_profile(self, profile: tuple) -> None:
+    def drop_profile(self, profile: tuple, owner=None) -> None:
         """Record an exact profiled-bore specification whose callout was dropped."""
         self._dropped_profiles.append(profile)
+        self._dropped_profile_evidence.append((profile, owner))
 
     @property
     def dropped_diams(self) -> list:
@@ -229,6 +228,11 @@ class CoverageState:
     def dropped_profiles(self) -> list[tuple]:
         """Profile specifications already reported by ``callout_dropped``."""
         return self._dropped_profiles
+
+    @property
+    def dropped_profile_evidence(self) -> list[tuple[tuple, object | None]]:
+        """Dropped profile specifications paired with their exact IR owner when known."""
+        return self._dropped_profile_evidence
 
     # -- transactional snapshot (#647) ----------------------------------------
 
@@ -242,16 +246,18 @@ class CoverageState:
             set(self._scattered_hole_docs),
             list(self._dropped_callout_diams),
             list(self._dropped_profiles),
+            list(self._dropped_profile_evidence),
         )
 
     def restore(self, snap: tuple) -> None:
         """Restore the collections captured by :meth:`snapshot`."""
-        pc, ph, shd, dropped, dropped_profiles = snap
+        pc, ph, shd, dropped, dropped_profiles, dropped_profile_evidence = snap
         self._pattern_callouts = set(pc)
         self._patterned_holes = set(ph)
         self._scattered_hole_docs = set(shd)
         self._dropped_callout_diams = list(dropped)
         self._dropped_profiles = list(dropped_profiles)
+        self._dropped_profile_evidence = list(dropped_profile_evidence)
 
 
 def lint_feature_coverage(
@@ -327,12 +333,27 @@ def lint_feature_coverage(
 
     mentioned: set[float] = set()
     text_mentioned: set[float] = set()
-    provided: dict[float, int] = {}
+    # One physical owner can carry the same requirement in several representations (for
+    # example, both a callout and a manufacturing note). Union those authorities by exact
+    # owner/value before counting them; summing annotations lets one documented bore certify
+    # an identical undocumented sibling (#1351 review).
+    owned_provided: dict[tuple[int, float], int] = {}
+    unowned_provided: dict[float, int] = {}
+
+    def provide(value, count, owner=None) -> None:
+        value = float(value)
+        count = int(count or 1)
+        if owner is None:
+            unowned_provided[value] = unowned_provided.get(value, 0) + count
+            return
+        key = (id(owner), value)
+        owned_provided[key] = max(owned_provided.get(key, 0), count)
+
     if registry is not None:
         # Structured note authority is a semantic assertion, not prose parsing. Resolve only
         # canonical diameter parameters on the exact feature carried by each DimensionId;
         # malformed identities contribute nothing rather than guessing (#1351).
-        identities = _registry_satisfactions(registry)
+        identities = satisfaction_ids(registry)
         for identity in identities:
             feature = getattr(identity, "feature", None)
             parameter_id = getattr(identity, "parameter", None)
@@ -348,7 +369,7 @@ def lint_feature_coverage(
                 continue
             value = float(parameter.value)
             mentioned.add(value)
-            provided[value] = provided.get(value, 0) + int(getattr(feature, "count", 1) or 1)
+            provide(value, getattr(feature, "count", 1), feature)
     for ann in annotations:
         if isinstance(ann, TitleBlock):
             continue
@@ -361,7 +382,11 @@ def lint_feature_coverage(
         count = getattr(ann, "covers_count", 1)
         for v in structured_diameters:
             mentioned.add(v)
-            provided[v] = provided.get(v, 0) + count
+            provide(v, count, annotation_owner(registry, ann))
+
+    provided: dict[float, int] = dict(unowned_provided)
+    for (_owner_id, value), count in owned_provided.items():
+        provided[value] = provided.get(value, 0) + count
 
     exclude = exclude or ()
     issues = [
@@ -452,7 +477,7 @@ def lint_location_coverage(
     registry = getattr(dwg, "registry", None)
     satisfied_locations = {
         identity.feature
-        for identity in _registry_satisfactions(registry)
+        for identity in satisfaction_ids(registry)
         if getattr(identity, "parameter", None) == "location"
     }
     for name, ann in dwg.iter_annotations():
@@ -949,7 +974,7 @@ def lint_prismatic_coverage(
     severity: Literal["info", "warning"] = "info" if assembly else "warning"
     pairs_by_view: dict[str, list] = {}
     registry = getattr(dwg, "registry", None)
-    satisfied_ids = _registry_satisfactions(registry)
+    satisfied_ids = satisfaction_ids(registry)
 
     def satisfied(feature, parameter: str) -> bool:
         return any(
@@ -1389,7 +1414,7 @@ def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET, recognition=None)
         if registry is not None
         else set()
     )
-    satisfied_ids = _registry_satisfactions(registry)
+    satisfied_ids = satisfaction_ids(registry)
     # Match structured step-length authority back to the recognition-owned physical band by
     # its axial span. This preserves the denominator and prevents an unrelated declared step
     # from certifying one merely because both share the same role (#1351, ADR 0017).
@@ -1507,7 +1532,7 @@ def lint_boss_height_coverage(part, dwg, features, assembly=None, omissions=()) 
         if registry is not None
         else set()
     )
-    satisfied = _registry_satisfactions(registry)
+    satisfied = satisfaction_ids(registry)
     conveyed = {
         omission.feature
         for omission in omissions

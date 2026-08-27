@@ -7,6 +7,7 @@ from typing import Literal
 
 from b123d_recognisers import RecognitionResult
 
+from draftwright.linting._registry import satisfaction_ids
 from draftwright.linting.issues import LintIssue
 
 PolygonalStockState = Literal[
@@ -62,9 +63,7 @@ def polygonal_stock_outcomes(recognition, features, registry, omissions=()):
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
-    satisfied = {
-        identity for name in registry.names() for identity in registry.satisfaction_of(name)
-    }
+    satisfied = satisfaction_ids(registry)
     suppressed = {
         (omission.feature, omission.parameter_id)
         for omission in omissions

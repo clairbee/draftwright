@@ -14,6 +14,7 @@ from typing import Literal
 from b123d_recognisers import RecognitionResult
 
 from draftwright._geometry import _canonical_axis_direction
+from draftwright.linting._registry import satisfaction_ids, satisfaction_of
 from draftwright.linting.issues import LintIssue
 
 FlatRequirementState = Literal[
@@ -120,9 +121,7 @@ def flat_requirement_outcomes(
     placed = {
         measurement for name in registry.names() for measurement in registry.measurement_of(name)
     }
-    satisfied = {
-        identity for name in registry.names() for identity in registry.satisfaction_of(name)
-    }
+    satisfied = satisfaction_ids(registry)
     authored_suppressions = {
         (omission.feature, omission.parameter_id)
         for omission in omissions
@@ -169,7 +168,7 @@ def flat_requirement_outcomes(
                 state = (
                     "unverifiable"
                     if any(
-                        not registry.measurement_of(name) and not registry.satisfaction_of(name)
+                        not registry.measurement_of(name) and not satisfaction_of(registry, name)
                         for name in associated_names
                     )
                     else "missing"

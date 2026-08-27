@@ -11,6 +11,8 @@ from build123d import Align, Box, Cylinder, Pos
 
 from draftwright import Sheet
 from draftwright.linting.hole_coverage import hole_requirement_outcomes
+from draftwright.linting.profiled_bore_coverage import lint_profiled_bore_coverage
+from draftwright.linting.quality import quality_components
 from draftwright.linting.slot_coverage import slot_requirement_outcomes
 from draftwright.model import DimensionParameterId, PartModel, pocket
 from draftwright.model.compiled import compile_dimensions
@@ -467,6 +469,153 @@ def test_compound_profiled_bore_note_covers_both_exact_profile_requirements():
     )
     drawing.remove(note_name)
     assert any(issue.code == "profiled_bore_not_dimensioned" for issue in drawing.lint())
+
+
+def test_callout_and_note_on_one_profile_do_not_cover_an_identical_sibling():
+    center = (Align.CENTER, Align.CENTER, Align.CENTER)
+    cutter = Cylinder(5, 20, align=center) & Box(7.2, 20, 30, align=center)
+    part = Box(60, 30, 10, align=center) - Pos(-15, 0, 0) * cutter - Pos(15, 0, 0) * cutter
+    sheet = Sheet.from_part(part).take_over(
+        dimensions="authored", principal_views="automatic", derived_views="authored"
+    )
+    bores = [feature for feature in sheet.features if feature.kind == "hole"]
+    first = min(bores, key=lambda feature: feature.frame.origin[0])
+    sheet.dimension(first, "bore.diameter")
+    sheet.dimension(first, "profile_across_flats.length")
+    sheet.of(first).note(
+        "DOUBLE-D PROFILE",
+        satisfies=("bore.diameter", "profile_across_flats.length"),
+    )
+
+    drawing = sheet.build()
+    issues = drawing.lint()
+    warning = next(issue for issue in issues if issue.code == "profiled_bore_not_dimensioned")
+    assert "document 1" in warning.message
+
+    bore = drawing.recognition().double_d_bores[0]
+    dropped = (
+        "double_d",
+        bore.axis,
+        bore.through,
+        bore.major_diameter,
+        bore.across_flats,
+        bore.flat_direction,
+    )
+    drop_reconciled = lint_profiled_bore_coverage(
+        part,
+        drawing.items,
+        recognition=drawing.recognition(),
+        features=drawing.model().features,
+        registry=drawing.registry,
+        dropped_profiles=(dropped,),
+    )
+    assert any(issue.code == "profiled_bore_not_dimensioned" for issue in drop_reconciled)
+
+    same_owner_drop = lint_profiled_bore_coverage(
+        part,
+        drawing.items,
+        recognition=drawing.recognition(),
+        features=drawing.model().features,
+        registry=drawing.registry,
+        dropped_profile_evidence=((dropped, first),),
+    )
+    assert any(issue.code == "profiled_bore_not_dimensioned" for issue in same_owner_drop)
+
+    second = max(bores, key=lambda feature: feature.frame.origin[0])
+    sibling_drop = lint_profiled_bore_coverage(
+        part,
+        drawing.items,
+        recognition=drawing.recognition(),
+        features=drawing.model().features,
+        registry=drawing.registry,
+        dropped_profile_evidence=((dropped, second),),
+    )
+    assert not sibling_drop
+
+
+def test_profile_note_must_match_the_recognised_physical_site():
+    center = (Align.CENTER, Align.CENTER, Align.CENTER)
+    cutter = Cylinder(5, 20, align=center) & Box(7.2, 20, 30, align=center)
+    part = Box(30, 30, 10, align=center) - cutter
+    sheet = Sheet(part)
+    phantom = sheet.double_d_bore(
+        major_diameter=10,
+        across_flats=7.2,
+        at=(8, 0, 5),
+        axis="z",
+        depth=10,
+        profile_direction=(1, 0, 0),
+    )
+    sheet.authored_dimensions()
+    phantom.note(
+        "DOUBLE-D PROFILE",
+        satisfies=("bore.diameter", "profile_across_flats.length"),
+    )
+
+    codes = {issue.code for issue in sheet.build().lint()}
+    assert "profiled_bore_not_dimensioned" in codes
+    assert "declared_feature_absent" in codes
+
+
+def test_callout_and_note_on_one_diameter_do_not_cover_an_identical_sibling():
+    center = (Align.CENTER, Align.CENTER, Align.CENTER)
+    part = (
+        Box(60, 30, 10, align=center)
+        - Pos(-15, 0, 0) * Cylinder(3, 20, align=center)
+        - Pos(15, 0, 2.5) * Cylinder(3, 5, align=center)
+    )
+    sheet = Sheet.from_part(part).take_over(
+        dimensions="authored", principal_views="automatic", derived_views="authored"
+    )
+    holes = [feature for feature in sheet.features if feature.kind == "hole"]
+    first = min(holes, key=lambda feature: feature.frame.origin[0])
+    sheet.dimension(first, "bore.diameter")
+    sheet.of(first).note("DIAMETER 6", satisfies=("bore.diameter",))
+
+    warning = next(
+        issue for issue in sheet.build().lint() if issue.code == "feature_count_mismatch"
+    )
+    assert "account for 1" in warning.message
+
+
+def test_pre_satisfaction_registry_shape_remains_a_valid_consumer_boundary():
+    drawing = _sheet(note=True, satisfies=_SATISFIES).build()
+    drawing.lint()  # declared builds acquire critique recognition lazily
+
+    class LegacyRegistry:
+        """The public reads available before structured satisfaction provenance."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.issues = inner.issues
+
+        def names(self):
+            return self._inner.names()
+
+        def named(self, name):
+            return self._inner.named(name)
+
+        def measurement_of(self, name):
+            return self._inner.measurement_of(name)
+
+    legacy = LegacyRegistry(drawing.registry)
+    recognition = drawing.recognition()
+    features = drawing.model().features
+    omissions = compile_dimensions(drawing.model()).diagnostics
+
+    outcomes = hole_requirement_outcomes(recognition, features, legacy, omissions)
+    assert outcomes
+    quality = quality_components(
+        recognition=recognition,
+        features=features,
+        registry=legacy,
+        omissions=omissions,
+        issues=[],
+        error_penalty=0.2,
+        warning_penalty=0.1,
+        has_asserted_content=True,
+    )
+    assert quality["completeness"]["available"] is True
 
 
 def test_structured_note_authority_is_shared_by_non_hole_requirement_ledgers():

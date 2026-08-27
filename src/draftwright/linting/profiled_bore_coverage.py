@@ -14,7 +14,10 @@ from typing import Literal
 from b123d_recognisers import RecognitionResult
 
 from draftwright._geometry import _fmt
+from draftwright.linting._registry import annotation_owner, satisfaction_ids
 from draftwright.linting.issues import LintIssue
+
+_SITE_TOL = 0.5
 
 
 def _axis_letter(value) -> str:
@@ -53,6 +56,23 @@ def profiled_bore_key(profile, axis, through, major, across, direction) -> tuple
     )
 
 
+def _site(point, axis) -> tuple[float, float, float]:
+    """Physical profile site with the through-axis coordinate made irrelevant."""
+    result = [round(float(component), 3) for component in point]
+    result["xyz".index(_axis_letter(axis))] = 0.0
+    return (result[0], result[1], result[2])
+
+
+def _feature_sites(feature) -> tuple[tuple[float, float, float], ...]:
+    members = tuple(getattr(feature, "members", ()) or ())
+    points = members or (feature.frame.origin,)
+    return tuple(_site(point, feature.frame.axis) for point in points)
+
+
+def _same_site(first, second) -> bool:
+    return all(abs(a - b) <= _SITE_TOL for a, b in zip(first, second, strict=True))
+
+
 def lint_profiled_bore_coverage(
     part,
     annotations,
@@ -61,6 +81,7 @@ def lint_profiled_bore_coverage(
     features=(),
     registry=None,
     dropped_profiles=(),
+    dropped_profile_evidence=None,
     assembly=None,
 ) -> list[LintIssue]:
     """Report physical double-D requirements not documented by placed callouts.
@@ -76,36 +97,67 @@ def lint_profiled_bore_coverage(
             "lint_profiled_bore_coverage() requires the run's RecognitionResult; "
             f"got {type(recognition).__name__}"
         )
-    required = Counter(
-        profiled_bore_key(
-            "double_d",
-            bore.axis,
-            bore.through,
-            bore.major_diameter,
-            bore.across_flats,
-            bore.flat_direction,
+    physical = tuple(
+        (
+            profiled_bore_key(
+                "double_d",
+                bore.axis,
+                bore.through,
+                bore.major_diameter,
+                bore.across_flats,
+                bore.flat_direction,
+            ),
+            _site(bore.location, bore.axis),
         )
         for bore in recognition.double_d_bores
     )
+    required = Counter(key for key, _site_key in physical)
     if not required:
         return []
 
-    provided: Counter = Counter()
+    covered: set[int] = set()
+    unowned: Counter = Counter()
+
+    def cover_owner(owner, key, count) -> None:
+        if owner is None:
+            unowned[key] += int(count or 1)
+            return
+        remaining = int(count or 1)
+        for owner_site in _feature_sites(owner):
+            match = next(
+                (
+                    index
+                    for index, (physical_key, physical_site) in enumerate(physical)
+                    if index not in covered
+                    and physical_key == key
+                    and _same_site(owner_site, physical_site)
+                ),
+                None,
+            )
+            if match is not None:
+                covered.add(match)
+                remaining -= 1
+                if remaining <= 0:
+                    break
+
     for annotation in annotations:
         count = int(getattr(annotation, "covers_count", 1) or 1)
         for profile, axis, through, major, across, direction in getattr(
             annotation, "covers_profiles", ()
         ):
-            provided[profiled_bore_key(profile, axis, through, major, across, direction)] += count
+            cover_owner(
+                annotation_owner(registry, annotation),
+                profiled_bore_key(profile, axis, through, major, across, direction),
+                count,
+            )
 
     # A placed structured note may carry the two addressable dimensional requirements of a
     # double-D profile. Join them back to the recognition-owned physical key; neither prose nor
     # mere IR presence contributes. Pattern owners retain their physical member count (#1351).
     if registry is not None:
         satisfied: dict[object, set[str]] = {}
-        for name in registry.names():
-            for identity in registry.satisfaction_of(name):
-                satisfied.setdefault(identity.feature, set()).add(identity.parameter)
+        for identity in satisfaction_ids(registry):
+            satisfied.setdefault(identity.feature, set()).add(identity.parameter)
         required_parameters = {"bore.diameter", "profile_across_flats.length"}
         for feature in features:
             if not required_parameters <= satisfied.get(feature, set()):
@@ -113,7 +165,8 @@ def lint_profiled_bore_coverage(
             bore = getattr(feature, "member", feature)
             if getattr(bore, "profile", None) != "double_d":
                 continue
-            provided[
+            cover_owner(
+                feature,
                 profiled_bore_key(
                     "double_d",
                     feature.frame.axis,
@@ -121,13 +174,43 @@ def lint_profiled_bore_coverage(
                     bore.diameter,
                     bore.across_flats,
                     bore.profile_direction,
-                )
-            ] += int(getattr(feature, "count", 1) or 1)
+                ),
+                getattr(feature, "count", 1),
+            )
 
-    dropped = Counter(
-        profiled_bore_key(profile, axis, through, major, across, direction)
-        for profile, axis, through, major, across, direction in dropped_profiles
+    provided = Counter(unowned)
+    provided.update(physical[index][0] for index in covered)
+
+    dropped_covered: set[int] = set()
+    unowned_dropped: Counter = Counter()
+    evidence = (
+        tuple(dropped_profile_evidence)
+        if dropped_profile_evidence is not None
+        else tuple((profile, None) for profile in dropped_profiles)
     )
+    for profile, owner in evidence:
+        profile_name, axis, through, major, across, direction = profile
+        key = profiled_bore_key(profile_name, axis, through, major, across, direction)
+        if owner is None:
+            unowned_dropped[key] += 1
+            continue
+        for owner_site in _feature_sites(owner):
+            match = next(
+                (
+                    index
+                    for index, (physical_key, physical_site) in enumerate(physical)
+                    if index not in covered
+                    and index not in dropped_covered
+                    and physical_key == key
+                    and _same_site(owner_site, physical_site)
+                ),
+                None,
+            )
+            if match is not None:
+                dropped_covered.add(match)
+                break
+    dropped = Counter(unowned_dropped)
+    dropped.update(physical[index][0] for index in dropped_covered)
     if assembly is None:
         assembly = len(part.solids()) > 1
     severity: Literal["info", "warning"] = "info" if assembly else "warning"
@@ -135,7 +218,11 @@ def lint_profiled_bore_coverage(
     for key, need in sorted(required.items()):
         _profile, axis, _through, major, across, direction = key
         have = provided[key]
-        if have + dropped[key] >= need:
+        # Legacy callers may still supply specification-only drops. They can suppress a
+        # duplicate report when nothing landed, but cannot safely combine with owner-resolved
+        # authority. Run-owned evidence carries exact owner/site and may combine normally.
+        drop_credit = dropped[key] if dropped_profile_evidence is not None or have == 0 else 0
+        if have + drop_credit >= need:
             continue
         issues.append(
             LintIssue(
