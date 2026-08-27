@@ -364,9 +364,12 @@ def test_raw_basic_dimension_rotation_survives_missing_or_mixed_spans(
     pdf, text_page, extracted = _pdf_text(pdf_path)
     try:
         assert label in extracted
-        assert _extracted_text_angle(text_page, extracted, label) == pytest.approx(
-            expected, abs=1.0
-        )
+        if math.cos(math.radians(expected)) < -1e-9:
+            _assert_first_character_overlaps_annotation(text_page, extracted, label, annotation)
+        else:
+            assert _extracted_text_angle(text_page, extracted, label) == pytest.approx(
+                expected, abs=1.0
+            )
     finally:
         text_page.close()
         pdf.close()
@@ -393,9 +396,13 @@ def test_engine_dimension_keeps_its_construction_draft_and_rotation(tmp_path, ro
     pdf_path = drawing.export(str(tmp_path / f"tagged_{rotation}"), formats=("pdf",))["pdf"]
     pdf, text_page, extracted = _pdf_text(pdf_path)
     try:
-        assert _extracted_text_angle(text_page, extracted, "TAGGED") == pytest.approx(
-            rotation, abs=1.0
-        )
+        if math.cos(math.radians(rotation)) < -1e-9:
+            annotation = drawing.get_annotation("tagged")
+            _assert_first_character_overlaps_annotation(text_page, extracted, "TAGGED", annotation)
+        else:
+            assert _extracted_text_angle(text_page, extracted, "TAGGED") == pytest.approx(
+                rotation, abs=1.0
+            )
     finally:
         text_page.close()
         pdf.close()
@@ -481,6 +488,33 @@ def test_raw_custom_limit_lookalike_is_not_rewritten(tmp_path):
         assert "10.0 +0.2 -0.1" in extracted
         assert "10.0 +0.1 -0.2" not in extracted
         assert "10.0 +0.2 -0.1mm" not in extracted
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_raw_numeric_freeform_label_keeps_authored_spelling(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension(
+        (10, 10, 0),
+        (11, 10, 0),
+        "above",
+        10,
+        drawing.draft,
+        label="1",
+    )
+    drawing.registry.add(annotation, "raw_numeric_label", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "raw_numeric_label"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    page = text_page.parent
+    try:
+        assert any(
+            isinstance(item, pdfium.PdfTextObj) and item.extract() == "1"
+            for item in page.get_objects(textpage=text_page)
+        )
+        assert "1.0mm" not in extracted
     finally:
         text_page.close()
         pdf.close()
@@ -576,15 +610,26 @@ def test_poppler_keeps_a_term_whole_when_its_baseline_points_left(tmp_path):
     )
     drawing.registry.add(annotation, "leftward_text", view=None)
     drawing.items.append(annotation)
+    drawing.note("LEFTWARD", (150, 150), rotation=110, name="leftward_note")
+    note = drawing.get_annotation("leftward_note")
+    box = note.bounding_box()
+    note.location = Location(
+        (150 - (box.min.X + box.max.X) / 2, 150 - (box.min.Y + box.max.Y) / 2, 0)
+    )
 
     pdf_path = drawing.export(str(tmp_path / "poppler_rotation"), formats=("pdf",))["pdf"]
-    extracted = subprocess.run(
-        [executable, pdf_path, "-"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert "ANGLE" in extracted
+    for options in ((), ("-raw",), ("-layout",)):
+        extracted = subprocess.run(
+            [executable, *options, pdf_path, "-"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        lines = [line.strip() for line in extracted.splitlines() if line.strip()]
+        assert lines.count("ANGLE") == 1
+        assert lines.count("LEFTWARD") == 1
+        assert all("ANGLE" not in line or line == "ANGLE" for line in lines)
+        assert all("LEFTWARD" not in line or line == "LEFTWARD" for line in lines)
 
 
 def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):

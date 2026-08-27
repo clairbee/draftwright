@@ -380,27 +380,16 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
                 else:
                     text.setTextOrigin(origin_x, origin_y)
                 text.textOut(run.text)
-                canvas.drawText(text)
                 if cos_angle < -1e-9:
-                    # Poppler can reorder a leftward run even though its physical text boxes
-                    # are correct. Keep that aligned run for selection, then add a logical
-                    # companion so exact term search remains portable across PDF readers.
+                    # Poppler can reorder a leftward run even though its geometry is correct.
+                    # ActualText is the PDF-standard logical representation for extraction;
+                    # its marked content retains the run's overall positioned ink bounds.
                     actual_text = "FEFF" + run.text.encode("utf-16-be").hex().upper()
-                    logical = canvas.beginText()
-                    logical.setTextRenderMode(3)
-                    logical.setFont(font_name, font_size)
-                    logical.setTextTransform(
-                        cos_angle,
-                        sin_angle,
-                        -sin_angle,
-                        cos_angle,
-                        origin_x,
-                        origin_y,
-                    )
-                    logical.textOut(" ")
                     canvas.addLiteral(f"/Span << /ActualText <{actual_text}> >> BDC")
-                    canvas.drawText(logical)
+                    canvas.drawText(text)
                     canvas.addLiteral("EMC")
+                else:
+                    canvas.drawText(text)
         if link_rect is not None:
             k = 72.0 / 25.4
             x0, y0, x1, y1 = link_rect

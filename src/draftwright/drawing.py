@@ -3679,14 +3679,24 @@ class Drawing:
                 candidates.insert(0, f"{prefix} +{lower} -{upper}{unit_suffix}")
             return list(dict.fromkeys(candidates))
 
-        def raw_dimension_label_is_freeform(annotation, value):
+        def raw_dimension_label_is_freeform(annotation, value, draft):
             """Whether retained helper metadata can only have come from ``label=``."""
             numeric_prefix = value.split(" ±", 1)[0].split(" +", 1)[0]
             try:
-                return not math.isclose(
+                measured_value = float(annotation.measured_length)
+                if not math.isclose(
                     float(numeric_prefix),
-                    float(annotation.measured_length),
+                    measured_value,
                     abs_tol=1e-9,
+                ):
+                    return True
+                # A numerically equivalent label can still be authored text (for
+                # example ``label="1"`` when the active draft would render ``1.0``).
+                # Raw helpers discard that constructor provenance, so preserve the
+                # spelling whenever it differs from this drawing's automatic form.
+                return value == numeric_prefix and value != draft._number_with_units(
+                    measured_value,
+                    display_units=False,
                 )
             except ValueError:
                 return True
@@ -3765,6 +3775,10 @@ class Drawing:
                             centre = face.center()
                             centres.append((centre.X, centre.Y))
                             glyph_faces.append(face)
+                    if glyph_faces:
+                        min_area = max(face.area for face in glyph_faces) * 0.01
+                        glyph_faces = [face for face in glyph_faces if face.area >= min_area]
+                        centres = [(face.center().X, face.center().Y) for face in glyph_faces]
                     shape_matches: list[tuple[float, str, float]] = []
                     for candidate in raw_dimension_candidates(
                         annotation, getattr(annotation, "label", ""), self.draft
@@ -3929,6 +3943,7 @@ class Drawing:
                         shape_matches.append((error, candidate, math.degrees(angle)))
                     if shape_matches:
                         _error, matched_text, matched_angle = min(shape_matches)
+                        matched_angle = raw_basic_text_angle(matched_angle)
                         raw_basic_matches[id(annotation)] = (matched_text, matched_angle)
                         return matched_angle
             polygon = getattr(annotation, "label_polygon", None)
@@ -4058,7 +4073,11 @@ class Drawing:
                             # External raw helpers retain no label/tolerance constructor args.
                             # Compare the few possible unit renderings to the live label geometry;
                             # this also preserves explicit custom labels (their own width wins).
-                            raw_freeform = raw_dimension_label_is_freeform(annotation, value)
+                            raw_freeform = raw_dimension_label_is_freeform(
+                                annotation,
+                                value,
+                                dimension_draft,
+                            )
                             candidates = (
                                 [value]
                                 if raw_freeform
