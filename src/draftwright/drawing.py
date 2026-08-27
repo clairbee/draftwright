@@ -3674,6 +3674,8 @@ class Drawing:
         drawing_font_name = getattr(self.draft, "font", "Arial")
         drawing_font_style = getattr(getattr(self.draft, "font_style", None), "name", "REGULAR")
         raw_basic_matches: dict[int, tuple[str, float]] = {}
+        raw_basic_exact_matches: set[int] = set()
+        raw_basic_unresolved: set[int] = set()
 
         def semantic_text(value) -> str:
             # The bundled faces do not carry the geometric counterbore,
@@ -3833,16 +3835,23 @@ class Drawing:
                             source_face_options.append((font_error, faces))
                         if not source_face_options:
                             continue
+                        if len(glyph_faces) == 1:
+                            for _font_error, exact_faces in source_face_options:
+                                exact_rotation = _exact_vertex_rotation(
+                                    exact_faces[0].vertices(), glyph_faces[0].vertices()
+                                )
+                                if exact_rotation is not None:
+                                    raw_basic_exact_matches.add(id(annotation))
+                                    shape_matches.append((0.0, candidate, exact_rotation))
+                                    break
+                            else:
+                                exact_rotation = None
+                            if exact_rotation is not None:
+                                continue
                         _font_error, source_faces = min(
                             source_face_options, key=lambda item: item[0]
                         )
                         if len(source_faces) == 1:
-                            exact_rotation = _exact_vertex_rotation(
-                                source_faces[0].vertices(), glyph_faces[0].vertices()
-                            )
-                            if exact_rotation is not None:
-                                shape_matches.append((0.0, candidate, exact_rotation))
-                                continue
 
                             def line_directions(face):
                                 directions = []
@@ -3989,6 +3998,12 @@ class Drawing:
                         ):
                             error += (source_face.area - target_face.area) ** 2
                         shape_matches.append((error, candidate, math.degrees(angle)))
+                    if len(glyph_faces) == 1 and id(annotation) not in raw_basic_exact_matches:
+                        # External helpers discard their construction Draft.  A guessed
+                        # face can put selectable text far from custom-font ink, so retain
+                        # the helper's visible vector glyph unless its outline proves the
+                        # semantic face and rotation exactly.
+                        raw_basic_unresolved.add(id(annotation))
                     if shape_matches:
                         _error, matched_text, matched_angle = min(shape_matches)
                         matched_angle = raw_basic_text_angle(matched_angle)
@@ -4132,6 +4147,8 @@ class Drawing:
                                 else raw_dimension_candidates(annotation, value, dimension_draft)
                             )
                             rotation = text_rotation(annotation)
+                            if id(annotation) in raw_basic_unresolved:
+                                continue
                             if getattr(annotation, "is_basic", False):
                                 x0, y0, x1, y1 = label_box
                                 actual = (x1 - x0, y1 - y0)

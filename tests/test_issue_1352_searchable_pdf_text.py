@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pypdfium2 as pdfium
 import pytest
@@ -17,7 +18,7 @@ from PIL import Image, ImageChops
 
 from draftwright import Sheet, build_drawing
 from draftwright._core import _text_line_spacing_em
-from draftwright.drawing import Drawing
+from draftwright.drawing import Drawing, _exact_vertex_rotation
 from draftwright.export import _PDFTextRun, _render_pdf, _resolved_semantic_font_path
 from draftwright.fonts import PLEX_MONO, PLEX_SANS_CONDENSED
 
@@ -162,6 +163,27 @@ def _extracted_text_angle(text_page, extracted, value):
     x0, y0 = _character_centre(text_page, start)
     x1, y1 = _character_centre(text_page, start + len(value) - 1)
     return math.degrees(math.atan2(y1 - y0, x1 - x0))
+
+
+def test_exact_vertex_rotation_rejects_non_similarity():
+    def point(x, y):
+        return SimpleNamespace(X=x, Y=y)
+
+    assert _exact_vertex_rotation([], []) is None
+    assert (
+        _exact_vertex_rotation(
+            [point(0, 0), point(0, 0)],
+            [point(1, 1), point(1, 1)],
+        )
+        is None
+    )
+    assert (
+        _exact_vertex_rotation(
+            [point(0, 0), point(1, 0), point(0, 1)],
+            [point(0, 0), point(2, 0), point(0, 1)],
+        )
+        is None
+    )
 
 
 def test_multiline_notes_and_title_values_retain_visible_line_pitch(tmp_path):
@@ -692,6 +714,71 @@ def test_raw_drawing_font_single_curved_glyph_keeps_exact_rotation(
         )
         a, b, _c, _d, _e, _f = text_object.get_matrix().get()
         assert math.degrees(math.atan2(b, a)) == pytest.approx(expected, abs=1.0)
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+@pytest.mark.parametrize(("axis", "expected"), [(45, 45.0), (-45, -45.0)])
+def test_raw_drawing_font_single_stroke_glyph_prefers_exact_face(tmp_path, axis, expected):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    angle = math.radians(axis)
+    annotation = Dimension(
+        (50, 50, 0),
+        (50 + math.cos(angle), 50 + math.sin(angle), 0),
+        "above",
+        1,
+        drawing.draft,
+        label="1",
+        basic=True,
+    )
+    drawing.registry.add(annotation, "raw_single_stroke", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / f"raw_single_stroke_{axis}"), formats=("pdf",))["pdf"]
+    pdf, text_page, _extracted = _pdf_text(pdf_path)
+    try:
+        text_object = next(
+            item
+            for item in text_page.parent.get_objects(textpage=text_page)
+            if isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == "1"
+        )
+        a, b, _c, _d, _e, _f = text_object.get_matrix().get()
+        assert math.degrees(math.atan2(b, a)) == pytest.approx(expected, abs=1.0)
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    drawing.draft.font_size = 20
+    custom = Draft(font_size=20)
+    custom.font_path = PLEX_SANS_CONDENSED
+    angle = math.radians(-170)
+    annotation = Dimension(
+        (50, 50, 0),
+        (50 + math.cos(angle), 50 + math.sin(angle), 0),
+        "above",
+        10,
+        custom,
+        label="C",
+        basic=True,
+    )
+    box = annotation.bounding_box()
+    annotation.location = Location(
+        (100 - (box.min.X + box.max.X) / 2, 100 - (box.min.Y + box.max.Y) / 2, 0)
+    )
+    drawing.registry.add(annotation, "raw_custom_glyph", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "raw_custom_glyph"), formats=("pdf",))["pdf"]
+    pdf, text_page, _extracted = _pdf_text(pdf_path)
+    try:
+        assert not any(
+            isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == "C"
+            for item in text_page.parent.get_objects(textpage=text_page)
+        )
     finally:
         text_page.close()
         pdf.close()
