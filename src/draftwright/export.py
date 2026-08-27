@@ -11,6 +11,7 @@ shapes), so it sits below `make_drawing` in the import DAG and depends only on
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import re
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import ezdxf
 from build123d import ExportDXF, ExportSVG
+from ezdxf.document import CONST_MARKER_STRING, CREATED_BY_EZDXF
 from OCP.GeomConvert import GeomConvert
 
 from draftwright._core import _DRAFTWRIGHT_URL
@@ -114,18 +116,21 @@ def canonicalize_svg(svg_path: str) -> None:
     """Emit the elements of each layer in an order that does not depend on the run.
 
     ExportSVG writes one element per face, in the order build123d hands them
-    over - and that order follows the interpreter's hash seed, which is
-    randomized per process. Two faces of one glyph (the stem and the dot over
-    an 'i') change places between runs, so two exports of one drawing differ in
-    bytes while being the same picture. That is enough to make a drawing useless
-    as something to check in and diff, which is how a caller notices that its
-    output has changed.
+    over - and that order is not stable between runs. Two faces of one glyph
+    (the stem and the dot over an 'i') change places, so two exports of one
+    drawing differ in bytes while being the same picture. That is enough to make
+    a drawing useless as something to check in and diff, which is how a caller
+    notices that its output has changed.
 
-    Sorting each layer's children by their serialized form settles it. The
-    layers keep their order, so what paints over what is unchanged; within a
-    layer these are disjoint outlines with one style, where order is not
-    something the drawing means. Only groups whose children are all leaves are
-    touched, so a nested group is never flattened or reordered.
+    It is not simply PYTHONHASHSEED: holding the seed fixed does not hold the
+    order, so a caller cannot pin this from the environment and the file has to
+    be settled here.
+
+    Sorting each layer's children by what they *are* settles it. The layers keep
+    their order, so what paints over what is unchanged; within a layer these are
+    disjoint outlines with one style, where order is not something the drawing
+    means. Only groups whose children are all leaves are touched, so a nested
+    group is never flattened or reordered.
     """
     # Round-tripping through ElementTree drops the default namespace unless it
     # is registered, and an SVG without its xmlns is one nothing downstream can
@@ -137,9 +142,30 @@ def canonicalize_svg(svg_path: str) -> None:
         children = list(group)
         if len(children) < 2 or any(len(child) for child in children):
             continue
-        children.sort(key=lambda e: ET.tostring(e, encoding="unicode"))
+        # `tail` is the whitespace ExportSVG writes *after* an element, so it
+        # belongs to the slot rather than to the element: the last child of a
+        # group carries a shorter indent than its siblings. Leave the tails
+        # where they are and move only the elements through them, or the last
+        # slot's indent rides along with whichever element happened to land
+        # there and two runs that agree on the order still differ in bytes.
+        tails = [child.tail for child in children]
+        children.sort(key=_leaf_key)
+        for child, tail in zip(children, tails):
+            child.tail = tail
         group[:] = children
     tree.write(svg_path, encoding="utf-8", xml_declaration=True)
+
+
+def _leaf_key(element):
+    """A run-independent total order over leaf elements: what the element is.
+
+    ``tail`` is deliberately absent - the caller keeps tails with slots rather
+    than with elements, which is what actually settles the bytes - so this is
+    the element's identity alone, and cheaper than serializing each one to
+    compare it. Elements that tie here are byte-identical, so their relative
+    order cannot reach the file either way.
+    """
+    return (element.tag, tuple(sorted(element.attrib.items())), element.text or "")
 
 
 def fix_svg_page_size(svg_path: str, page_w: float, page_h: float) -> None:
@@ -243,7 +269,7 @@ def set_dxf_metadata(dxf) -> None:
         pass
 
 
-def write_dxf(dxf, path: str, page_w: float, page_h: float, reproducible: bool = True) -> None:
+def write_dxf(dxf, path: str, page_w: float, page_h: float, reproducible: bool = False) -> None:
     """Write *dxf* with the viewport zoomed to the known page window.
 
     ``ExportDXF.write`` resets the viewport via ``ezdxf.zoom.extents`` — a
@@ -268,20 +294,32 @@ def write_dxf(dxf, path: str, page_w: float, page_h: float, reproducible: bool =
         dxf.write(path)
         return
     if reproducible:
-        _make_dxf_reproducible(doc)
-    doc.saveas(path, fmt="asc")
+        with _reproducible_dxf(doc):
+            doc.saveas(path, fmt="asc")
+    else:
+        doc.saveas(path, fmt="asc")
 
 
-def _make_dxf_reproducible(doc) -> None:
+@contextlib.contextmanager
+def _reproducible_dxf(doc):
     """Take the clock and the hash seed out of what ezdxf is about to write.
 
     Every save stamps the time it happened ($TDCREATE/$TDUPDATE and their UTC
-    twins), a freshly generated $VERSIONGUID/$FINGERPRINTGUID pair, and a marker
-    string carrying another timestamp. ezdxf writes fixed values for all of them
-    behind one option - a fixed date, the all-zero GUID a new document starts
-    with, and a constant marker.
+    twins), a freshly generated $VERSIONGUID/$FINGERPRINTGUID pair, and a
+    "written by" marker carrying another timestamp. ezdxf writes fixed values
+    for those behind one option - a fixed date, the all-zero GUID a new document
+    starts with, and a constant marker.
 
-    The CLASSES section is the other half. ezdxf registers a class entry for
+    That option is process-wide state belonging to whoever set it, so it is put
+    back afterwards: a draftwright export must not decide what some other ezdxf
+    user in the same interpreter writes.
+
+    It also does not reach the *creation* marker, which is stamped when the
+    document is built - inside ``_DraftwrightDXF()``, long before an export asks
+    for anything - so that one is overwritten here with the same constant ezdxf
+    would have used.
+
+    The CLASSES section is the last part. ezdxf registers a class entry for
     every DXF type the document uses and finds them by iterating a set of type
     names, whose order over strings follows the interpreter's hash seed. A
     caller cannot pin that seed from the environment in every host (a sandbox
@@ -289,13 +327,19 @@ def _make_dxf_reproducible(doc) -> None:
     registered here first, sorted: 'add_class()' keeps the first entry for a key,
     and ezdxf's own pass during the save then adds only what is left.
     """
+    previous = ezdxf.options.write_fixed_meta_data_for_testing
+    ezdxf.options.write_fixed_meta_data_for_testing = True
     try:
-        ezdxf.options.write_fixed_meta_data_for_testing = True
-        for dxftype in sorted(doc.entitydb.dxf_types_in_use()):
-            doc.classes.add_class(dxftype)
-    except Exception:
-        # Reproducibility is not worth failing an export over.
-        _log.debug("could not pin the DXF metadata", exc_info=True)
+        try:
+            doc.ezdxf_metadata()[CREATED_BY_EZDXF] = CONST_MARKER_STRING
+            for dxftype in sorted(doc.entitydb.dxf_types_in_use()):
+                doc.classes.add_class(dxftype)
+        except Exception:
+            # Reproducibility is not worth failing an export over.
+            _log.debug("could not pin the DXF metadata", exc_info=True)
+        yield
+    finally:
+        ezdxf.options.write_fixed_meta_data_for_testing = previous
 
 
 class _DraftwrightDXF(ExportDXF):
@@ -385,7 +429,7 @@ def _render_pdf(
     pdf_path: str,
     link_rect=None,
     text_runs=(),
-    reproducible: bool = True,
+    reproducible: bool = False,
 ) -> None:
     """Render *svg_path* to *pdf_path* via svglib + reportlab, adding draftwright
     metadata and — when *link_rect* (drawing page coords, Y up) is given — a
@@ -542,16 +586,71 @@ def _render_png(pdf_path: str, png_path: str, *, dpi: int = 150) -> None:
         pdf.close()
 
 
-def _elements(shape):
-    """Decompose *shape* for export retry: faces plus any loose edges."""
+def _geometry_key(part):
+    """Where a part sits and which way it runs - a sort key, to the precision an
+    exporter writes.
+
+    The box alone does not separate parts: hidden-line removal emits the same
+    segment twice where two silhouettes project onto each other, once each way
+    round, and the pair shares a box, a length and a vertex set. Only the
+    *directed* ends tell them apart - and the direction is itself what the
+    exporter writes out, so leaving them tied would let two runs swap a pair and
+    change the file. Parts with no direction to ask for (faces) fall back to the
+    box and their edge count; faces and loose edges are sorted in separate
+    blocks, so the two never compare against each other.
+    """
+    box = part.bounding_box()
+    key = (
+        round(box.min.X, 9),
+        round(box.min.Y, 9),
+        round(box.min.Z, 9),
+        round(box.max.X, 9),
+        round(box.max.Y, 9),
+        round(box.max.Z, 9),
+        str(part.geom_type),
+        len(part.edges()),
+    )
+    try:
+        start, end = part.start_point(), part.end_point()
+    except Exception:
+        return key
+    return key + tuple(round(v, 9) for v in (start.X, start.Y, start.Z, end.X, end.Y, end.Z))
+
+
+def _elements(shape, *, ordered: bool = False):
+    """Decompose *shape* for export retry: faces plus any loose edges.
+
+    With *ordered*, the two blocks come back sorted by where their parts sit
+    rather than in the order the kernel happened to hand them over. That order
+    matters beyond the retry this was written for: ``ExportDXF`` writes one
+    entity per element as it converts, so it is the order a DXF's entities and
+    their handles come out in, and left alone it varies between runs - enough to
+    make a drawing useless as something to check in and diff. (The SVG settles
+    the same question after the fact in :func:`canonicalize_svg`, where the
+    elements are already in the file and cost nothing to reorder.)
+
+    **Ordering is the expensive half of a reproducible export** - one
+    ``bounding_box()`` and one ``edges()`` per part, measured at about a third
+    of DXF export time again on a 358-part sheet (0.40 s -> 0.54 s, interleaved
+    over 9 runs) - so it is opt-in, and off costs exactly what it did before the
+    option existed. The metadata pinning in :func:`write_dxf` is the cheap half
+    (~1 ms); both hang off the one ``reproducible`` flag a caller sets, because
+    a caller asking for a file that does not change between runs wants both and
+    should not have to know which one costs. This sits on the hot path #602
+    cleared: measure, do not predict.
+    """
     faces = list(shape.faces())
     if not faces:
-        return list(shape.edges())
+        edges = list(shape.edges())
+        return sorted(edges, key=_geometry_key) if ordered else edges
     owned = {e for f in faces for e in f.edges()}
-    return faces + [e for e in shape.edges() if e not in owned]
+    loose = [e for e in shape.edges() if e not in owned]
+    if not ordered:
+        return faces + loose
+    return sorted(faces, key=_geometry_key) + sorted(loose, key=_geometry_key)
 
 
-def _export_shape(exporter, shape, layer, ctx):
+def _export_shape(exporter, shape, layer, ctx, *, ordered: bool = False):
     """Add *shape* to *exporter*, degrading element-by-element on failure.
 
     build123d's exporters abort the whole export on the first edge whose
@@ -578,7 +677,7 @@ def _export_shape(exporter, shape, layer, ctx):
                 layer,
                 exc,
             )
-    elements = _elements(shape)
+    elements = _elements(shape, ordered=ordered)
     skipped = 0
     for element in elements:
         try:
