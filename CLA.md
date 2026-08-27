@@ -15,7 +15,7 @@ your Contributions** — you are granting a licence, not assigning ownership.
 
 In this Agreement:
 
-- **"Project Owner"** means Paul Fremantle (pzfreo@gmail.com), the copyright
+- **"Project Owner"** means Paul Fremantle (paul@fremantle.org), the copyright
   holder and maintainer of draftwright.
 - **"You"** / **"Your"** means the individual or legal entity agreeing to this
   Agreement.
@@ -116,7 +116,7 @@ submission.
 
 If You are contributing on behalf of an organisation that wishes to record its
 agreement explicitly, or if You need an entity-level CLA covering employees,
-contact the Project Owner at pzfreo@gmail.com.
+contact the Project Owner at paul@fremantle.org.
 
 ---
 

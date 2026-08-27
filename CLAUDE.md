@@ -256,4 +256,4 @@ failure read as a pass.
 ## License
 
 AGPL-3.0. Anyone running draftwright as a network service must provide their
-application's source code. Contact pzfreo@gmail.com for a commercial licence.
+application's source code. Contact paul@fremantle.org for a commercial licence.
