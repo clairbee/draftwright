@@ -213,6 +213,24 @@ def test_declared_gdt_values_and_datums_are_searchable(tmp_path):
         assert "Q" in extracted
         assert "0.123" in extracted
         assert "M" in extracted
+        control = next(
+            drawing.get_annotation(name)
+            for name in drawing.annotations()
+            if any(
+                spec[0] == "0.123"
+                for spec in getattr(drawing.get_annotation(name), "pdf_text_relative_specs", ())
+            )
+        )
+        finish = next(
+            drawing.get_annotation(name)
+            for name in drawing.annotations()
+            if any(
+                spec[0] == "7.77"
+                for spec in getattr(drawing.get_annotation(name), "pdf_text_relative_specs", ())
+            )
+        )
+        _assert_first_character_overlaps_annotation(text_page, extracted, "0.123", control)
+        _assert_first_character_overlaps_annotation(text_page, extracted, "7.77", finish)
     finally:
         text_page.close()
         pdf.close()
@@ -251,6 +269,7 @@ def test_semantic_order_tiebreak_and_basic_dimension_rotation_are_total(tmp_path
     [
         ((50, 10, 0), (10, 50, 0), -45.0),
         ((20, 50, 0), (20, 10, 0), 90.0),
+        ((10, 10, 0), (20, 10, 0), 0.0),
     ],
 )
 def test_basic_dimension_semantic_text_is_normalised_upright(tmp_path, start, end, expected):
@@ -270,16 +289,35 @@ def test_basic_dimension_semantic_text_is_normalised_upright(tmp_path, start, en
         pdf.close()
 
 
-def test_raw_helper_dimension_semantic_fallback_keeps_visible_units(tmp_path):
+@pytest.mark.parametrize(
+    ("dimension_kwargs", "expected"),
+    [
+        ({}, "10.0mm"),
+        ({"basic": True}, "10.0mm"),
+        ({"tolerance": 0.1}, "10.0 ±0.1mm"),
+        ({"basic": True, "tolerance": 0.1}, "10.0 ±0.1mm"),
+        ({"label": "CUSTOM"}, "CUSTOM"),
+    ],
+)
+def test_raw_helper_dimension_semantic_fallback_keeps_visible_label(
+    tmp_path, dimension_kwargs, expected
+):
     drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
-    annotation = Dimension((10, 10, 0), (20, 10, 0), "above", 10, drawing.draft)
+    annotation = Dimension(
+        (10, 10, 0),
+        (20, 10, 0),
+        "above",
+        10,
+        drawing.draft,
+        **dimension_kwargs,
+    )
     drawing.registry.add(annotation, "raw_units", view=None)
     drawing.items.append(annotation)
 
     pdf_path = drawing.export(str(tmp_path / "raw_units"), formats=("pdf",))["pdf"]
     pdf, text_page, extracted = _pdf_text(pdf_path)
     try:
-        assert "10.0mm" in extracted
+        assert expected in extracted
     finally:
         text_page.close()
         pdf.close()

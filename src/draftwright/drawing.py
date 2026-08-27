@@ -3658,20 +3658,37 @@ class Drawing:
             return _font_safe_text(value).translate(_PDF_VECTOR_ONLY_TEXT)
 
         def text_rotation(annotation) -> float:
+            def upright(angle: float) -> float:
+                return angle if -90.0 < angle <= 90.0 else angle - math.copysign(180.0, angle)
+
             live_rotation = float(getattr(annotation.location.orientation, "Z", 0.0))
             explicit = getattr(annotation, "pdf_text_rotation", None)
             if explicit is not None:
                 return float(explicit) + live_rotation
             if getattr(annotation, "is_basic", False):
+                # Engine-built dimensions retain their authored endpoints even when a wide
+                # basic label consumes both shaft spans. Prefer that authoritative text axis
+                # over reverse-engineering whichever strokes survived helper rendering.
+                if (spec := getattr(annotation, "_dw_spec", None)) is not None:
+                    dx, dy = spec.p2[0] - spec.p1[0], spec.p2[1] - spec.p1[1]
+                    if math.hypot(dx, dy) > 1e-9:
+                        return upright(math.degrees(math.atan2(dy, dx)) + live_rotation)
                 # A basic dimension's keep-clear polygon is its axis-aligned frame,
-                # not its rotated text.  Its first shaft span retains the live text axis.
-                for start, end in getattr(annotation, "segments", ()):
+                # not its rotated text. For an external raw helper dimension, distinguish
+                # surviving collinear shaft spans from two parallel witness lines; text runs
+                # along the former and perpendicular to the latter.
+                segments = list(getattr(annotation, "segments", ()))
+                ink = segments[:-4] if len(segments) >= 4 else segments
+                if len(ink) == 2:
+                    (a0, a1), (b0, _b1) = ink
+                    dx, dy = a1[0] - a0[0], a1[1] - a0[1]
+                    cross = dx * (b0[1] - a0[1]) - dy * (b0[0] - a0[0])
+                    angle = math.degrees(math.atan2(dy, dx))
+                    return upright(angle if abs(cross) < 1e-7 else angle + 90.0)
+                for start, end in ink:
                     dx, dy = end[0] - start[0], end[1] - start[1]
                     if math.hypot(dx, dy) > 1e-9:
-                        angle = math.degrees(math.atan2(dy, dx))
-                        return (
-                            angle if -90.0 < angle <= 90.0 else angle - math.copysign(180.0, angle)
-                        )
+                        return upright(math.degrees(math.atan2(dy, dx)))
             polygon = getattr(annotation, "label_polygon", None)
             if polygon and len(polygon) >= 2:
                 (x0, y0), (x1, y1) = polygon[:2]
@@ -3773,33 +3790,73 @@ class Drawing:
                     value = getattr(annotation, "label", None)
                 label_box = getattr(annotation, "label_bbox", None)
                 if value and label_box:
-                    # A raw helper Dimension with label=None visibly renders units while its
-                    # compatibility metadata remains unitless.  Sanctioned Draftwright verbs
-                    # supply explicit labels; this width check preserves the deprecated raw-add
-                    # case without changing an explicit custom label.
-                    if (
-                        hasattr(annotation, "measured_length")
-                        and not getattr(annotation, "is_basic", False)
-                        and (polygon := getattr(annotation, "label_polygon", None))
-                    ):
-                        rendered = self.draft._number_with_units(annotation.measured_length)
-                        visible_width = math.dist(polygon[0], polygon[1])
-                        value_width = _text_size(
-                            value,
-                            fs,
-                            drawing_font_path,
-                            drawing_font_name,
-                            self.draft.font_style,
-                        )[0]
-                        rendered_width = _text_size(
-                            rendered,
-                            fs,
-                            drawing_font_path,
-                            drawing_font_name,
-                            self.draft.font_style,
-                        )[0]
-                        if abs(rendered_width - visible_width) < abs(value_width - visible_width):
-                            value = rendered
+                    if hasattr(annotation, "measured_length"):
+                        spec = getattr(annotation, "_dw_spec", None)
+                        if spec is not None and spec.kwargs.get("label") is None:
+                            # The engine owns this construction spec, including tolerance;
+                            # reproduce the exact helper-rendered label rather than its
+                            # intentionally unitless compatibility metadata.
+                            value = spec.draft._number_with_units(
+                                annotation.measured_length,
+                                spec.kwargs.get("tolerance"),
+                            )
+                        elif spec is None:
+                            # External raw helpers retain no label/tolerance constructor args.
+                            # Compare the few possible unit renderings to the live label geometry;
+                            # this also preserves explicit custom labels (their own width wins).
+                            bare_zero = self.draft._number_with_units(0.0, display_units=False)
+                            unit_zero = self.draft._number_with_units(0.0, display_units=True)
+                            unit_suffix = unit_zero.removeprefix(bare_zero)
+                            candidates = [
+                                value,
+                                self.draft._number_with_units(annotation.measured_length),
+                            ]
+                            if unit_suffix and not value.endswith(unit_suffix):
+                                candidates.append(value + unit_suffix)
+                            candidates = list(dict.fromkeys(candidates))
+                            rotation = text_rotation(annotation)
+                            if getattr(annotation, "is_basic", False):
+                                x0, y0, x1, y1 = label_box
+                                actual = (x1 - x0, y1 - y0)
+                                angle = math.radians(rotation)
+
+                                def geometry_error(candidate):
+                                    width, height = _text_size(
+                                        candidate,
+                                        fs,
+                                        drawing_font_path,
+                                        drawing_font_name,
+                                        self.draft.font_style,
+                                    )
+                                    predicted = (
+                                        abs(width * math.cos(angle))
+                                        + abs(height * math.sin(angle))
+                                        + 0.8 * fs,
+                                        abs(width * math.sin(angle))
+                                        + abs(height * math.cos(angle))
+                                        + 0.8 * fs,
+                                    )
+                                    return math.dist(actual, predicted)
+
+                            else:
+                                polygon = getattr(annotation, "label_polygon", None)
+                                visible_width = (
+                                    math.dist(polygon[0], polygon[1])
+                                    if polygon
+                                    else label_box[2] - label_box[0]
+                                )
+
+                                def geometry_error(candidate):
+                                    width = _text_size(
+                                        candidate,
+                                        fs,
+                                        drawing_font_path,
+                                        drawing_font_name,
+                                        self.draft.font_style,
+                                    )[0]
+                                    return abs(width - visible_width)
+
+                            value = min(candidates, key=geometry_error)
                     font_style = (
                         drawing_font_style
                         if hasattr(annotation, "measured_length")
