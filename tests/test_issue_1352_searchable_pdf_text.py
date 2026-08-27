@@ -448,7 +448,11 @@ def test_engine_dimension_keeps_its_construction_draft_and_rotation(tmp_path, ro
     finally:
         text_page.close()
         pdf.close()
-    assert b"Arial-BoldMT" in Path(pdf_path).read_bytes()
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    resolved = _resolved_semantic_font_path(None, "Arial", "BOLD")
+    expected_postscript_name = TTFont("ResolvedArialBold", resolved).face.name
+    assert expected_postscript_name in Path(pdf_path).read_bytes()
 
 
 @pytest.mark.parametrize(
