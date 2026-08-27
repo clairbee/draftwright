@@ -69,6 +69,14 @@ _RECON_POS_TOL = 0.5
 _LOCATION_AXIS_TOL = 1.0
 
 
+def _registry_satisfactions(registry) -> set:
+    """Return placed structured authority from old or current registry-shaped objects."""
+    satisfaction_of = getattr(registry, "satisfaction_of", None)
+    if registry is None or not callable(satisfaction_of):
+        return set()
+    return {identity for name in registry.names() for identity in satisfaction_of(name)}
+
+
 def _location_ref(owner, point) -> HoleRef:
     """Location identity with an irrelevant through-axis coordinate removed.
 
@@ -324,9 +332,7 @@ def lint_feature_coverage(
         # Structured note authority is a semantic assertion, not prose parsing. Resolve only
         # canonical diameter parameters on the exact feature carried by each DimensionId;
         # malformed identities contribute nothing rather than guessing (#1351).
-        identities = {
-            identity for name in registry.names() for identity in registry.satisfaction_of(name)
-        }
+        identities = _registry_satisfactions(registry)
         for identity in identities:
             feature = getattr(identity, "feature", None)
             parameter_id = getattr(identity, "parameter", None)
@@ -444,16 +450,11 @@ def lint_location_coverage(
     dim_verts: dict[str, list] = {}
     structured_locations: set[tuple[object, str, HoleRef]] = set()
     registry = getattr(dwg, "registry", None)
-    satisfied_locations = (
-        {
-            identity.feature
-            for name in registry.names()
-            for identity in registry.satisfaction_of(name)
-            if getattr(identity, "parameter", None) == "location"
-        }
-        if registry is not None
-        else set()
-    )
+    satisfied_locations = {
+        identity.feature
+        for identity in _registry_satisfactions(registry)
+        if getattr(identity, "parameter", None) == "location"
+    }
     for name, ann in dwg.iter_annotations():
         view = dwg.view_of(name)
         if view is None:
@@ -948,11 +949,7 @@ def lint_prismatic_coverage(
     severity: Literal["info", "warning"] = "info" if assembly else "warning"
     pairs_by_view: dict[str, list] = {}
     registry = getattr(dwg, "registry", None)
-    satisfied_ids = (
-        {identity for name in registry.names() for identity in registry.satisfaction_of(name)}
-        if registry is not None
-        else set()
-    )
+    satisfied_ids = _registry_satisfactions(registry)
 
     def satisfied(feature, parameter: str) -> bool:
         return any(
@@ -1392,11 +1389,7 @@ def lint_axial_coverage(part, dwg, assembly=None, prof=_UNSET, recognition=None)
         if registry is not None
         else set()
     )
-    satisfied_ids = (
-        {identity for name in registry.names() for identity in registry.satisfaction_of(name)}
-        if registry is not None
-        else set()
-    )
+    satisfied_ids = _registry_satisfactions(registry)
     # Match structured step-length authority back to the recognition-owned physical band by
     # its axial span. This preserves the denominator and prevents an unrelated declared step
     # from certifying one merely because both share the same role (#1351, ADR 0017).
@@ -1514,11 +1507,7 @@ def lint_boss_height_coverage(part, dwg, features, assembly=None, omissions=()) 
         if registry is not None
         else set()
     )
-    satisfied = (
-        {identity for name in registry.names() for identity in registry.satisfaction_of(name)}
-        if registry is not None
-        else set()
-    )
+    satisfied = _registry_satisfactions(registry)
     conveyed = {
         omission.feature
         for omission in omissions
