@@ -383,7 +383,11 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
                 if cos_angle < -1e-9:
                     # Poppler can reorder a leftward run even though its geometry is correct.
                     # ActualText is the PDF-standard logical representation for extraction;
-                    # its marked content retains the run's overall positioned ink bounds.
+                    # its marked content retains the run's matrix and overall positioned ink
+                    # bounds. Replacement text is span-atomic: PDFium partitions that overall
+                    # AABB for partial-character selection, but whole-term selection stays on
+                    # the physical word. Keeping an unwrapped physical copy would instead
+                    # corrupt search/copy in every Poppler extraction mode.
                     actual_text = "FEFF" + run.text.encode("utf-16-be").hex().upper()
                     canvas.addLiteral(f"/Span << /ActualText <{actual_text}> >> BDC")
                     canvas.drawText(text)

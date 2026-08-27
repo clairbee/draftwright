@@ -68,6 +68,26 @@ def _assert_first_character_overlaps_annotation(text_page, extracted, text, anno
     assert bottom < y1 * k and top > y0 * k
 
 
+def _assert_term_selection_tracks_physical_object(text_page, extracted, text, expected_angle):
+    start = extracted.index(text)
+    boxes = [text_page.get_charbox(index) for index in range(start, start + len(text))]
+    selection_bounds = (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+    page = text_page.parent
+    text_object = next(
+        item
+        for item in page.get_objects(textpage=text_page)
+        if isinstance(item, pdfium.PdfTextObj) and item.extract() == text
+    )
+    assert selection_bounds == pytest.approx(text_object.get_bounds(), abs=0.1)
+    a, b, _c, _d, _e, _f = text_object.get_matrix().get()
+    assert math.degrees(math.atan2(b, a)) == pytest.approx(expected_angle, abs=1.0)
+
+
 def _assert_text_contains_run_anchor(text_page, extracted, text, point):
     start = extracted.index(text)
     boxes = [text_page.get_charbox(index) for index in range(start, start + len(text))]
@@ -589,6 +609,46 @@ def test_raw_single_glyph_basic_dimension_recovers_rotation(tmp_path, axis, expe
         pdf.close()
 
 
+@pytest.mark.parametrize(("axis", "expected"), [(-80, -30.0), (45, 95.0)])
+def test_raw_helper_default_font_recovers_challenging_single_glyph_rotations(
+    tmp_path, axis, expected
+):
+    for label in "BGCO069":
+        drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+        custom = Draft(font_size=20)
+        angle = math.radians(axis)
+        annotation = Dimension(
+            (50, 50, 0),
+            (50 + math.cos(angle), 50 + math.sin(angle), 0),
+            "above",
+            10,
+            custom,
+            label=label,
+            basic=True,
+            rotation=30,
+        )
+        annotation.location = Location((0, 0, 0), (0, 0, 20))
+        drawing.registry.add(annotation, "raw_single_glyph", view=None)
+        drawing.items.append(annotation)
+
+        pdf_path = drawing.export(
+            str(tmp_path / f"raw_challenging_{axis}_{label}"), formats=("pdf",)
+        )["pdf"]
+        pdf, text_page, _extracted = _pdf_text(pdf_path)
+        page = text_page.parent
+        try:
+            text_object = next(
+                item
+                for item in page.get_objects(textpage=text_page)
+                if isinstance(item, pdfium.PdfTextObj) and item.extract() == label
+            )
+            a, b, _c, _d, _e, _f = text_object.get_matrix().get()
+            assert math.degrees(math.atan2(b, a)) == pytest.approx(expected, abs=1.0)
+        finally:
+            text_page.close()
+            pdf.close()
+
+
 def test_poppler_keeps_a_term_whole_when_its_baseline_points_left(tmp_path):
     executable = shutil.which("pdftotext")
     if executable is None:
@@ -630,6 +690,14 @@ def test_poppler_keeps_a_term_whole_when_its_baseline_points_left(tmp_path):
         assert lines.count("LEFTWARD") == 1
         assert all("ANGLE" not in line or line == "ANGLE" for line in lines)
         assert all("LEFTWARD" not in line or line == "LEFTWARD" for line in lines)
+
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        _assert_term_selection_tracks_physical_object(text_page, extracted, "ANGLE", 110)
+        _assert_term_selection_tracks_physical_object(text_page, extracted, "LEFTWARD", 110)
+    finally:
+        text_page.close()
+        pdf.close()
 
 
 def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):

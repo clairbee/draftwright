@@ -3783,17 +3783,38 @@ class Drawing:
                     for candidate in raw_dimension_candidates(
                         annotation, getattr(annotation, "label", ""), self.draft
                     ):
-                        source_faces = Text(
-                            txt=candidate,
-                            font_size=fs,
-                            font=drawing_font_name,
-                            font_style=self.draft.font_style,
-                            font_path=drawing_font_path,
-                            align=(Align.CENTER, Align.CENTER),
-                            mode=Mode.PRIVATE,
-                        ).faces()
-                        if len(source_faces) != len(glyph_faces) or not source_faces:
+                        source_face_options = []
+                        for font_path in dict.fromkeys((drawing_font_path, DEFAULT_FONT_PATH)):
+                            faces = Text(
+                                txt=candidate,
+                                font_size=fs,
+                                font=drawing_font_name,
+                                font_style=self.draft.font_style,
+                                font_path=font_path,
+                                align=(Align.CENTER, Align.CENTER),
+                                mode=Mode.PRIVATE,
+                            ).faces()
+                            if len(faces) != len(glyph_faces) or not faces:
+                                continue
+
+                            def face_ratio(face):
+                                box = face.oriented_bounding_box()
+                                sizes = sorted((box.size.X, box.size.Y, box.size.Z), reverse=True)
+                                return sizes[0] / max(sizes[1], 1e-12)
+
+                            source_area = sum(face.area for face in faces)
+                            target_area = sum(face.area for face in glyph_faces)
+                            font_error = sum(
+                                abs(source.area / source_area - target.area / target_area)
+                                + abs(math.log(face_ratio(source) / face_ratio(target)))
+                                for source, target in zip(faces, glyph_faces, strict=True)
+                            )
+                            source_face_options.append((font_error, faces))
+                        if not source_face_options:
                             continue
+                        _font_error, source_faces = min(
+                            source_face_options, key=lambda item: item[0]
+                        )
                         if len(source_faces) == 1:
 
                             def line_directions(face):
