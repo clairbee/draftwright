@@ -73,6 +73,7 @@ from draftwright.export import (
     set_dxf_metadata,
     write_dxf,
 )
+from draftwright.fonts import PLEX_MONO
 from draftwright.intents import Intent
 from draftwright.layout import FitBoxTrace, fit_box
 from draftwright.linting import (
@@ -113,6 +114,8 @@ from draftwright.projection import (
 from draftwright.recognition_cache import RecognitionCache
 from draftwright.registry import AnnotationRegistry
 from draftwright.repair import repair_drawing
+
+_PDF_VECTOR_ONLY_TEXT = str.maketrans("⌴⌵↧", "   ")
 
 # Codes that check standards/geometry correctness rather than pure page
 # layout. Grouped so a caller (and the #30 repair loop) can tell a wrong
@@ -3626,14 +3629,61 @@ class Drawing:
     def _pdf_text_runs(self):
         """Return semantic text overlaid on path-rendered PDF glyphs.
 
-        Scope is deliberately limited to text whose authoritative source and
-        final page geometry are both retained: unrotated free notes and generic tables.
-        Other annotations remain path-only until their renderers expose the
-        same information without reverse-engineering exported geometry.
+        The visible glyphs remain paths.  Dimensions, leaders and notes expose
+        their authoritative label plus final label geometry; tables retain their
+        source rows; the title block retains public-cell-centred value specs.
+        Unsupported feature symbols stay path-only while adjacent text remains
+        selectable, rather than forcing the complete callout back to outlines.
         """
         groups = []
         fs = self.draft.font_size
         pad = self.draft.pad_around_text
+        mono = getattr(self.draft, "font_path", None) or PLEX_MONO
+
+        def semantic_text(value) -> str:
+            # The bundled faces do not carry the geometric counterbore,
+            # countersink or depth glyphs.  They remain visibly rendered by the
+            # existing vector callout; spaces keep the neighbouring supported
+            # terms separate in copied/searchable text.
+            return _font_safe_text(value).translate(_PDF_VECTOR_ONLY_TEXT)
+
+        def text_rotation(annotation) -> float:
+            explicit = getattr(annotation, "pdf_text_rotation", None)
+            if explicit is not None:
+                return float(explicit)
+            polygon = getattr(annotation, "label_polygon", None)
+            if polygon and len(polygon) >= 2:
+                (x0, y0), (x1, y1) = polygon[:2]
+                return math.degrees(math.atan2(y1 - y0, x1 - x0))
+            return 0.0
+
+        def centred_runs(value, label_box, font_size, rotation, font_path):
+            lines = semantic_text(value).splitlines()
+            if not lines:
+                return []
+            x0, y0, x1, y1 = label_box
+            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            angle = math.radians(rotation)
+            sin_angle, cos_angle = math.sin(angle), math.cos(angle)
+            runs = []
+            for index, line in enumerate(lines):
+                if not line:
+                    continue
+                local_y = ((len(lines) - 1) / 2.0 - index) * font_size
+                runs.append(
+                    _PDFTextRun(
+                        line,
+                        cx - sin_angle * local_y,
+                        cy + cos_angle * local_y,
+                        font_size,
+                        rotation,
+                        font_path,
+                        "center",
+                        "middle",
+                    )
+                )
+            return runs
+
         for _name, annotation in self._registry.iter_named():
             box = annotation.bounding_box()
             rows = getattr(annotation, "table_rows", None)
@@ -3648,30 +3698,35 @@ class Drawing:
                         if cell:
                             runs.append(
                                 _PDFTextRun(
-                                    _font_safe_text(cell),
+                                    semantic_text(cell),
                                     box.min.X + lefts[ci] + pad,
                                     baseline,
                                     fs,
+                                    font_path=mono,
                                 )
                             )
+            elif specs := getattr(annotation, "pdf_text_specs", None):
+                for value, x, y, font_size, font_path in specs:
+                    runs.append(
+                        _PDFTextRun(
+                            semantic_text(value),
+                            x,
+                            y,
+                            font_size,
+                            font_path=font_path,
+                            h_align="center",
+                            v_align="middle",
+                        )
+                    )
             else:
                 value = getattr(annotation, "pdf_text", None)
-                rotation = getattr(annotation, "pdf_text_rotation", 0.0)
-                # An axis-aligned bounding box cannot recover a rotated note's
-                # original text origin. Leave those path-only until the note
-                # renderer retains its anchor/alignment transform explicitly.
-                if value and not rotation:
-                    lines = str(value).splitlines() or [str(value)]
-                    for index, line in enumerate(lines):
-                        if line:
-                            runs.append(
-                                _PDFTextRun(
-                                    line,
-                                    box.min.X,
-                                    box.max.Y - (index + 1) * fs,
-                                    fs,
-                                )
-                            )
+                if value is None:
+                    value = getattr(annotation, "label", None)
+                label_box = getattr(annotation, "label_bbox", None)
+                if value and label_box:
+                    runs.extend(
+                        centred_runs(value, label_box, fs, text_rotation(annotation), mono)
+                    )
             if runs:
                 groups.append((-box.max.Y, box.min.X, runs))
         return tuple(run for _top, _left, runs in sorted(groups) for run in runs)

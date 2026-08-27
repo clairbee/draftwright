@@ -12,8 +12,10 @@ shapes), so it sits below `make_drawing` in the import DAG and depends only on
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import ezdxf
@@ -35,6 +37,20 @@ class _PDFTextRun:
     y: float
     font_size: float
     rotation: float = 0.0
+    font_path: str = PLEX_MONO
+    h_align: str = "left"
+    v_align: str = "baseline"
+
+
+@lru_cache(maxsize=16)
+def _semantic_font_name(font_path: str) -> str:
+    """Return a stable reportlab registration name for one bundled font file."""
+    from hashlib import sha256
+
+    path = Path(font_path)
+    digest = sha256(path.read_bytes()).hexdigest()[:12]
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", path.stem)
+    return f"Draftwright_{stem}_{digest}"
 
 
 def fix_svg_page_size(svg_path: str, page_w: float, page_h: float) -> None:
@@ -279,28 +295,44 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
 
-            font_name = "Draftwright_IBMPlexMono_Semantic_v1"
-            if font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(font_name, PLEX_MONO))
             k = 72.0 / 25.4
             for run in text_runs:
+                font_name = _semantic_font_name(run.font_path)
+                if font_name not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont(font_name, run.font_path))
+                font_size = run.font_size * k
+                dx = 0.0
+                if run.h_align == "center":
+                    dx = -pdfmetrics.stringWidth(run.text, font_name, font_size) / 2.0
+                elif run.h_align == "right":
+                    dx = -pdfmetrics.stringWidth(run.text, font_name, font_size)
+                elif run.h_align != "left":
+                    raise ValueError(f"unknown PDF text horizontal alignment {run.h_align!r}")
+                dy = 0.0
+                if run.v_align == "middle":
+                    ascent, descent = pdfmetrics.getAscentDescent(font_name, font_size)
+                    dy = -(ascent + descent) / 2.0
+                elif run.v_align != "baseline":
+                    raise ValueError(f"unknown PDF text vertical alignment {run.v_align!r}")
+
+                angle = math.radians(run.rotation)
+                cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+                origin_x = run.x * k + cos_angle * dx - sin_angle * dy
+                origin_y = run.y * k + sin_angle * dx + cos_angle * dy
                 text = canvas.beginText()
                 text.setTextRenderMode(3)  # invisible, but retained for search/copy
-                text.setFont(font_name, run.font_size * k)
+                text.setFont(font_name, font_size)
                 if run.rotation:
-                    import math
-
-                    angle = math.radians(run.rotation)
                     text.setTextTransform(
-                        math.cos(angle),
-                        math.sin(angle),
-                        -math.sin(angle),
-                        math.cos(angle),
-                        run.x * k,
-                        run.y * k,
+                        cos_angle,
+                        sin_angle,
+                        -sin_angle,
+                        cos_angle,
+                        origin_x,
+                        origin_y,
                     )
                 else:
-                    text.setTextOrigin(run.x * k, run.y * k)
+                    text.setTextOrigin(origin_x, origin_y)
                 text.textOut(run.text)
                 canvas.drawText(text)
         if link_rect is not None:
