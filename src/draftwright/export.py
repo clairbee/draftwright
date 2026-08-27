@@ -37,9 +37,28 @@ class _PDFTextRun:
     y: float
     font_size: float
     rotation: float = 0.0
-    font_path: str = PLEX_MONO
+    font_path: str | None = PLEX_MONO
+    font_name: str = "Arial"
     h_align: str = "left"
     v_align: str = "baseline"
+
+
+@lru_cache(maxsize=16)
+def _resolved_semantic_font_path(font_path: str | None, font_name: str) -> str:
+    """Resolve the same regular face used by build123d's text renderer.
+
+    A ``None`` path is a deliberate opt-out from Draftwright's pinned font: build123d
+    resolves ``draft.font`` through OCCT.  Ask that same manager for the concrete file so
+    ReportLab embeds the matching face instead of silently substituting Plex Mono.
+    """
+    if font_path is not None:
+        return font_path
+
+    from build123d import FontStyle
+    from build123d.text import FONT_ASPECT, FontManager
+
+    face = FontManager().find_font(font_name, FontStyle.REGULAR)
+    return str(face.FontPath(FONT_ASPECT[FontStyle.REGULAR]).ToCString())
 
 
 @lru_cache(maxsize=16)
@@ -297,9 +316,24 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
 
             k = 72.0 / 25.4
             for run in text_runs:
-                font_name = _semantic_font_name(run.font_path)
+                font_path = _resolved_semantic_font_path(run.font_path, run.font_name)
+                font_name = _semantic_font_name(font_path)
                 if font_name not in pdfmetrics.getRegisteredFontNames():
-                    pdfmetrics.registerFont(TTFont(font_name, run.font_path))
+                    try:
+                        pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    except Exception:  # noqa: BLE001 - CFF/single-stroke faces are not TTFont
+                        # Geometry supports more font formats than ReportLab's TTFont
+                        # subsetter.  Keep export/search total with the bundled Unicode face;
+                        # the normal pinned TTF path above still matches visible metrics.
+                        _log.warning(
+                            "PDF semantic font %s cannot be embedded; using bundled Plex Mono",
+                            font_path,
+                            exc_info=True,
+                        )
+                        font_path = PLEX_MONO
+                        font_name = _semantic_font_name(font_path)
+                        if font_name not in pdfmetrics.getRegisteredFontNames():
+                            pdfmetrics.registerFont(TTFont(font_name, font_path))
                 font_size = run.font_size * k
                 dx = 0.0
                 if run.h_align == "center":

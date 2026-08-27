@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import math
+import shutil
 import warnings
 from pathlib import Path
 
 import pypdfium2 as pdfium
-from build123d import Align, Box, Cylinder, Pos
+import pytest
+from build123d import Align, Box, Cylinder, Location, Pos
+from build123d_drafting import Dimension
 from PIL import Image, ImageChops
 
-from draftwright import Sheet
+from draftwright import Sheet, build_drawing
 from draftwright.drawing import Drawing
+from draftwright.export import _PDFTextRun, _render_pdf, _resolved_semantic_font_path
+from draftwright.fonts import PLEX_MONO, PLEX_SANS_CONDENSED
 
 
 def _manufacturing_drawing():
@@ -30,6 +36,8 @@ def _manufacturing_drawing():
         sheet.auto_dimensions()
     sheet.hole(diameter=2.5, at=(-20, 0, 6), axis="z", through=True).thread("M3x0.5")
     sheet.hole(diameter=8, at=(20, 0, 6), axis="z", through=True).fit("H7")
+    top_face = max(part.faces(), key=lambda face: face.center().Z)
+    sheet.note("DEBURR ALL EDGES", top_face, view="front", side="above")
     drawing = sheet.build()
     drawing.note("INSPECT DATUM A", (160, 185), name="inspection_note")
     return drawing
@@ -63,6 +71,7 @@ def test_pdf_extracts_dimensions_callouts_notes_and_title_block_values(tmp_path)
     pdf, text_page, extracted = _pdf_text(pdf_path)
     try:
         assert "INSPECT DATUM A" in extracted
+        assert "DEBURR ALL EDGES" in extracted
         assert "M3x0.5" in extracted
         assert "H7" in extracted
         assert "SEARCHABLE BRACKET" in extracted
@@ -84,7 +93,7 @@ def test_pdf_extracts_dimensions_callouts_notes_and_title_block_values(tmp_path)
             text_page, extracted, "65", drawing.get_annotation(dimension_name)
         )
         _assert_first_character_overlaps_annotation(
-            text_page, extracted, "ø2.5 THRU M3x0.5", drawing.get_annotation(thread_name)
+            text_page, extracted, "M3x0.5", drawing.get_annotation(thread_name)
         )
     finally:
         text_page.close()
@@ -106,3 +115,126 @@ def test_semantic_text_layer_does_not_change_rendered_pixels(tmp_path, monkeypat
     semantic_image = Image.open(semantic).convert("RGBA")
     path_only_image = Image.open(path_only).convert("RGBA")
     assert ImageChops.difference(semantic_image, path_only_image).getbbox() is None
+
+
+def _character_centre(text_page, index):
+    left, bottom, right, top = text_page.get_charbox(index)
+    return ((left + right) / 2.0, (bottom + top) / 2.0)
+
+
+def _extracted_text_angle(text_page, extracted, value):
+    start = extracted.index(value)
+    x0, y0 = _character_centre(text_page, start)
+    x1, y1 = _character_centre(text_page, start + len(value) - 1)
+    return math.degrees(math.atan2(y1 - y0, x1 - x0))
+
+
+def test_multiline_notes_and_title_values_retain_visible_line_pitch(tmp_path):
+    drawing = build_drawing(
+        Box(10, 10, 10),
+        auto_dims=False,
+        title="TOP\nBOTTOM",
+        number="D\n2",
+    )
+    drawing.note("A\nB\nC\nD\nE\nF\nG", (100, 100), name="multiline")
+
+    pdf_path = drawing.export(str(tmp_path / "multiline"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "A\r\nB\r\nC\r\nD\r\nE\r\nF\r\nG" in extracted
+        assert "TOP\r\nBOTTOM" in extracted
+        expected_pitch_points = 1.3 * drawing.draft.font_size * 72.0 / 25.4
+        note_indices = [extracted.index(line) for line in tuple("ABCDEFG")]
+        centres = [_character_centre(text_page, index) for index in note_indices]
+        assert all(
+            upper[1] - lower[1] == pytest.approx(expected_pitch_points, abs=0.15)
+            for upper, lower in zip(centres, centres[1:], strict=False)
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_semantic_order_tiebreak_and_basic_dimension_rotation_are_total(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    for index, label in enumerate(("AA", "BB")):
+        annotation = Dimension(
+            (10, 10, 0),
+            (50, 50, 0),
+            (0, 1, 0),
+            10,
+            drawing.draft,
+            label=label,
+            basic=index == 1,
+        )
+        # Deliberate overlap exercises export robustness. Production feature
+        # dimensions still enter through the verbs and placement solve.
+        drawing.registry.add(annotation, f"same_box_{index}", view=None)
+        drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "same_box"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "AA" in extracted and "BB" in extracted
+        assert _extracted_text_angle(text_page, extracted, "AA") == pytest.approx(45.0, abs=1.0)
+        assert _extracted_text_angle(text_page, extracted, "BB") == pytest.approx(45.0, abs=1.0)
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    drawing.note("ROTATED", (100, 100), rotation=10, name="rotated")
+    drawing.get_annotation("rotated").location = Location((0, 0, 0), (0, 0, 20))
+
+    pdf_path = drawing.export(str(tmp_path / "rotated"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert _extracted_text_angle(text_page, extracted, "ROTATED") == pytest.approx(
+            30.0, abs=1.0
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_named_font_opt_out_resolves_the_renderer_face():
+    path = Path(_resolved_semantic_font_path(None, "Arial"))
+    assert path.is_file()
+
+
+def test_non_ttfont_semantic_face_falls_back_without_losing_text(tmp_path, monkeypatch):
+    from reportlab.pdfbase import ttfonts
+
+    svg_path = tmp_path / "blank.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" '
+        'viewBox="0 0 100 100"><path d="M0 0 L1 1"/></svg>',
+        encoding="utf-8",
+    )
+    unsupported = tmp_path / "unsupported.otf"
+    shutil.copyfile(PLEX_SANS_CONDENSED, unsupported)
+    real_ttfont = ttfonts.TTFont
+
+    class RejectNonTTFont(real_ttfont):
+        def __init__(self, name, path, *args, **kwargs):
+            if Path(path) == unsupported:
+                raise ValueError("CFF-style font is not supported by ReportLab TTFont")
+            super().__init__(name, path, *args, **kwargs)
+
+    monkeypatch.setattr(ttfonts, "TTFont", RejectNonTTFont)
+    pdf_path = tmp_path / "fallback.pdf"
+    _render_pdf(
+        str(svg_path),
+        str(pdf_path),
+        text_runs=(_PDFTextRun("FALLBACK", 10, 10, 3, font_path=str(unsupported)),),
+    )
+
+    pdf, text_page, extracted = _pdf_text(str(pdf_path))
+    try:
+        assert "FALLBACK" in extracted
+        assert Path(PLEX_MONO).is_file()
+    finally:
+        text_page.close()
+        pdf.close()

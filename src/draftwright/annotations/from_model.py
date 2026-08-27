@@ -174,6 +174,53 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
         suffix=suffix,
         draft=draft,
     )
+    # Retain token-level text positions from the exact layout recipe used by
+    # ``HoleCallout``.  Whole-label centring is not equivalent for compound callouts:
+    # vector symbols consume fixed-width cells while text tokens use font metrics.
+    h = draft.font_size
+    gap = 0.45 * h
+    sym_w = h
+    visible_tokens: list[tuple[str, str]] = []
+    if count:
+        visible_tokens.append(("text", f"{count}×"))
+    visible_tokens.extend((("sym", "diameter"), ("text", dia)))
+    if spec["through"]:
+        visible_tokens.append(("text", "THRU"))
+    elif depth is not None:
+        visible_tokens.extend((("sym", "depth"), ("text", depth)))
+    if cbore_dia is not None:
+        visible_tokens.extend((("sym", "counterbore"), ("sym", "diameter"), ("text", cbore_dia)))
+        if cbore_depth is not None:
+            visible_tokens.extend((("sym", "depth"), ("text", cbore_depth)))
+    if csink_dia is not None:
+        visible_tokens.extend((("sym", "countersink"), ("sym", "diameter"), ("text", csink_dia)))
+        if csink_angle is not None:
+            visible_tokens.append(("text", f"× {csink_angle}°"))
+    if suffix:
+        visible_tokens.append(("text", suffix))
+
+    font_path = getattr(draft, "font_path", DEFAULT_FONT_PATH)
+    font_name = getattr(draft, "font", "Arial")
+    x = 0.0
+    token_specs: list[tuple[str, float, float, float, str | None, str, str, str]] = []
+    for kind, value in visible_tokens:
+        if kind == "sym":
+            # Diameter has a faithful Unicode compatibility glyph.  The remaining
+            # manufacturing symbols stay vector-only, as permitted by #1352.
+            if value == "diameter":
+                token_specs.append(
+                    ("ø", x + sym_w / 2.0, 0.0, h, font_path, font_name, "center", "middle")
+                )
+            x += sym_w + gap
+        else:
+            token_specs.append((value, x, 0.0, h, font_path, font_name, "left", "middle"))
+            x += _text_size(value, h, font_path, font_name)[0] + gap
+    cb = callout.bounding_box()
+    ccx, ccy = (cb.min.X + cb.max.X) / 2.0, (cb.min.Y + cb.max.Y) / 2.0
+    callout.pdf_text_relative_specs = tuple(
+        (value, px - ccx, py - ccy, size, path, name, h_align, v_align)
+        for value, px, py, size, path, name, h_align, v_align in token_specs
+    )
     # ``HoleCallout`` renders ISO symbols as geometry and consequently exposes an empty
     # helper-level label. Preserve an equivalent semantic string at this sole construction
     # seam so critique, audit and downstream tooling can identify what the geometry says.
@@ -5780,7 +5827,7 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                     pos if abs(dx) >= _MIN_LEADER else _px + math.copysign(_MIN_LEADER, dx or 1.0)
                 )
                 elbow = (pos, _py)
-            return Leader(
+            leader = Leader(
                 tip=tip,
                 elbow=elbow,
                 label="",
@@ -5789,6 +5836,13 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                 all_around=getattr(_it, "all_around", False),
                 all_over=getattr(_it, "all_over", False),
             )
+            if _it.kind == "note":
+                # The outer leader intentionally has label="" because the visible
+                # payload is a TextBlock callout.  Preserve the authored note and the
+                # TextBlock's 1.6-em line pitch for the semantic PDF layer.
+                leader.pdf_text = _font_safe_text(_it.text)
+                leader.pdf_text_line_spacing = 1.6
+            return leader
 
         def _drop(
             nm,

@@ -37,6 +37,7 @@ from build123d import (
     LineType,
     Location,
 )
+from build123d_drafting.helpers import DEFAULT_FONT_PATH
 
 from draftwright._core import (
     _MARGIN,
@@ -2830,6 +2831,7 @@ class Drawing:
         # overlay (notably its established ⌀ -> ø compatibility substitution).
         n.pdf_text = _font_safe_text(text)
         n.pdf_text_rotation = float(rotation)
+        n.pdf_text_line_spacing = 1.3
         if name is None:
             i = 0
             while (name := f"note{i}") in self._registry:
@@ -3638,7 +3640,8 @@ class Drawing:
         groups = []
         fs = self.draft.font_size
         pad = self.draft.pad_around_text
-        mono = getattr(self.draft, "font_path", None) or PLEX_MONO
+        drawing_font_path = getattr(self.draft, "font_path", DEFAULT_FONT_PATH)
+        drawing_font_name = getattr(self.draft, "font", "Arial")
 
         def semantic_text(value) -> str:
             # The bundled faces do not carry the geometric counterbore,
@@ -3648,16 +3651,32 @@ class Drawing:
             return _font_safe_text(value).translate(_PDF_VECTOR_ONLY_TEXT)
 
         def text_rotation(annotation) -> float:
+            live_rotation = float(getattr(annotation.location.orientation, "Z", 0.0))
             explicit = getattr(annotation, "pdf_text_rotation", None)
             if explicit is not None:
-                return float(explicit)
+                return float(explicit) + live_rotation
+            if getattr(annotation, "is_basic", False):
+                # A basic dimension's keep-clear polygon is its axis-aligned frame,
+                # not its rotated text.  Its first shaft span retains the live text axis.
+                for start, end in getattr(annotation, "segments", ()):
+                    dx, dy = end[0] - start[0], end[1] - start[1]
+                    if math.hypot(dx, dy) > 1e-9:
+                        return math.degrees(math.atan2(dy, dx))
             polygon = getattr(annotation, "label_polygon", None)
             if polygon and len(polygon) >= 2:
                 (x0, y0), (x1, y1) = polygon[:2]
                 return math.degrees(math.atan2(y1 - y0, x1 - x0))
-            return 0.0
+            return live_rotation
 
-        def centred_runs(value, label_box, font_size, rotation, font_path):
+        def centred_runs(
+            value,
+            label_box,
+            font_size,
+            rotation,
+            font_path,
+            font_name="Arial",
+            line_spacing=1.3,
+        ):
             lines = semantic_text(value).splitlines()
             if not lines:
                 return []
@@ -3669,7 +3688,7 @@ class Drawing:
             for index, line in enumerate(lines):
                 if not line:
                     continue
-                local_y = ((len(lines) - 1) / 2.0 - index) * font_size
+                local_y = ((len(lines) - 1) / 2.0 - index) * font_size * line_spacing
                 runs.append(
                     _PDFTextRun(
                         line,
@@ -3678,13 +3697,14 @@ class Drawing:
                         font_size,
                         rotation,
                         font_path,
+                        font_name,
                         "center",
                         "middle",
                     )
                 )
             return runs
 
-        for _name, annotation in self._registry.iter_named():
+        for ordinal, (_name, annotation) in enumerate(self._registry.iter_named()):
             box = annotation.bounding_box()
             rows = getattr(annotation, "table_rows", None)
             runs = []
@@ -3702,22 +3722,36 @@ class Drawing:
                                     box.min.X + lefts[ci] + pad,
                                     baseline,
                                     fs,
-                                    font_path=mono,
+                                    font_path=PLEX_MONO,
                                 )
                             )
             elif specs := getattr(annotation, "pdf_text_specs", None):
                 for value, x, y, font_size, font_path in specs:
-                    runs.append(
-                        _PDFTextRun(
-                            semantic_text(value),
-                            x,
-                            y,
-                            font_size,
-                            font_path=font_path,
-                            h_align="center",
-                            v_align="middle",
+                    runs.extend(centred_runs(value, (x, y, x, y), font_size, 0.0, font_path))
+            elif specs := getattr(annotation, "pdf_text_relative_specs", None):
+                label_box = getattr(annotation, "label_bbox", None)
+                if label_box:
+                    cx = (label_box[0] + label_box[2]) / 2.0
+                    cy = (label_box[1] + label_box[3]) / 2.0
+                    rotation = text_rotation(annotation)
+                    angle = math.radians(rotation)
+                    cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+                    for spec in specs:
+                        value, rx, ry, size, path, name, *align = spec
+                        h_align, v_align = align or ("center", "middle")
+                        runs.append(
+                            _PDFTextRun(
+                                semantic_text(value),
+                                cx + cos_angle * rx - sin_angle * ry,
+                                cy + sin_angle * rx + cos_angle * ry,
+                                size,
+                                rotation,
+                                path,
+                                name,
+                                h_align,
+                                v_align,
+                            )
                         )
-                    )
             else:
                 value = getattr(annotation, "pdf_text", None)
                 if value is None:
@@ -3725,11 +3759,19 @@ class Drawing:
                 label_box = getattr(annotation, "label_bbox", None)
                 if value and label_box:
                     runs.extend(
-                        centred_runs(value, label_box, fs, text_rotation(annotation), mono)
+                        centred_runs(
+                            value,
+                            label_box,
+                            fs,
+                            text_rotation(annotation),
+                            drawing_font_path,
+                            drawing_font_name,
+                            getattr(annotation, "pdf_text_line_spacing", 1.3),
+                        )
                     )
             if runs:
-                groups.append((-box.max.Y, box.min.X, runs))
-        return tuple(run for _top, _left, runs in sorted(groups) for run in runs)
+                groups.append((-box.max.Y, box.min.X, ordinal, runs))
+        return tuple(run for _top, _left, _ordinal, runs in sorted(groups) for run in runs)
 
     def export(
         self, out=None, *, formats=None, svg=None, dxf=None, dpi: int = 150
