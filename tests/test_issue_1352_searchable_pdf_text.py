@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
 import warnings
 from pathlib import Path
 
@@ -483,6 +484,107 @@ def test_raw_custom_limit_lookalike_is_not_rewritten(tmp_path):
     finally:
         text_page.close()
         pdf.close()
+
+
+@pytest.mark.parametrize("basic", [False, True])
+def test_raw_freeform_dimension_from_a_different_draft_keeps_its_text(tmp_path, basic):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    custom = Draft(
+        font_size=5,
+        font="Arial",
+        font_style=FontStyle.BOLD,
+        display_units=False,
+    )
+    custom.font_path = None
+    annotation = Dimension(
+        (20, 20, 0),
+        (60, 20, 0),
+        "above",
+        10,
+        custom,
+        label="BOLD",
+        basic=basic,
+    )
+    drawing.registry.add(annotation, "raw_custom_draft", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / f"raw_custom_{basic}"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert "BOLD" in extracted
+        assert "40.0mm" not in extracted
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+@pytest.mark.parametrize(("axis", "expected"), [(-80, -30.0), (45, 95.0)])
+def test_raw_single_glyph_basic_dimension_recovers_rotation(tmp_path, axis, expected):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    custom = Draft(font_size=20)
+    angle = math.radians(axis)
+    annotation = Dimension(
+        (50, 50, 0),
+        (50 + math.cos(angle), 50 + math.sin(angle), 0),
+        "above",
+        4,
+        custom,
+        label="R",
+        basic=True,
+        rotation=30,
+    )
+    annotation.location = Location((0, 0, 0), (0, 0, 20))
+    drawing.registry.add(annotation, "raw_single_glyph", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / f"single_{axis}"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    page = text_page.parent
+    try:
+        assert "R" in extracted
+        text_object = next(
+            item
+            for item in page.get_objects(textpage=text_page)
+            if isinstance(item, pdfium.PdfTextObj) and item.extract() == "R"
+        )
+        a, b, _c, _d, _e, _f = text_object.get_matrix().get()
+        actual = math.degrees(math.atan2(b, a))
+        assert (actual - expected + 90.0) % 180.0 - 90.0 == pytest.approx(0.0, abs=1.0)
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_poppler_keeps_a_term_whole_when_its_baseline_points_left(tmp_path):
+    executable = shutil.which("pdftotext")
+    if executable is None:
+        pytest.skip("Poppler pdftotext is not installed")
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension(
+        (50, 50, 0),
+        (90, 50, 0),
+        "above",
+        4,
+        drawing.draft,
+        label="ANGLE",
+        basic=True,
+        rotation=110,
+    )
+    box = annotation.bounding_box()
+    annotation.location = Location(
+        (100 - (box.min.X + box.max.X) / 2, 100 - (box.min.Y + box.max.Y) / 2, 0)
+    )
+    drawing.registry.add(annotation, "leftward_text", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / "poppler_rotation"), formats=("pdf",))["pdf"]
+    extracted = subprocess.run(
+        [executable, pdf_path, "-"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "ANGLE" in extracted
 
 
 def test_note_semantic_rotation_tracks_later_annotation_transform(tmp_path):

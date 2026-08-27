@@ -3679,6 +3679,18 @@ class Drawing:
                 candidates.insert(0, f"{prefix} +{lower} -{upper}{unit_suffix}")
             return list(dict.fromkeys(candidates))
 
+        def raw_dimension_label_is_freeform(annotation, value):
+            """Whether retained helper metadata can only have come from ``label=``."""
+            numeric_prefix = value.split(" ±", 1)[0].split(" +", 1)[0]
+            try:
+                return not math.isclose(
+                    float(numeric_prefix),
+                    float(annotation.measured_length),
+                    abs_tol=1e-9,
+                )
+            except ValueError:
+                return True
+
         def text_rotation(annotation) -> float:
             def upright(angle: float) -> float:
                 angle = (angle + 90.0) % 180.0 - 90.0
@@ -3742,7 +3754,6 @@ class Drawing:
                     inset = 0.05 * fs
                     centres = []
                     glyph_faces = []
-                    glyph_boxes = []
                     for face in annotation.faces():
                         face_box = face.bounding_box()
                         if (
@@ -3750,14 +3761,11 @@ class Drawing:
                             and face_box.max.X <= x1 - inset
                             and face_box.min.Y >= y0 + inset
                             and face_box.max.Y <= y1 - inset
-                            and face_box.size.X <= 2.0 * fs
-                            and face_box.size.Y <= 2.0 * fs
                         ):
                             centre = face.center()
                             centres.append((centre.X, centre.Y))
                             glyph_faces.append(face)
-                            glyph_boxes.append(face_box)
-                    shape_matches = []
+                    shape_matches: list[tuple[float, str, float]] = []
                     for candidate in raw_dimension_candidates(
                         annotation, getattr(annotation, "label", ""), self.draft
                     ):
@@ -3770,20 +3778,135 @@ class Drawing:
                             align=(Align.CENTER, Align.CENTER),
                             mode=Mode.PRIVATE,
                         ).faces()
-                        if len(source_faces) != len(glyph_faces) or len(source_faces) < 2:
+                        if len(source_faces) != len(glyph_faces) or not source_faces:
                             continue
-                        source_centres = [face.center() for face in source_faces]
+                        if len(source_faces) == 1:
+
+                            def line_directions(face):
+                                directions = []
+                                for edge in face.edges():
+                                    if getattr(edge.geom_type, "name", "") != "LINE":
+                                        continue
+                                    tangent = edge.tangent_at(0.5)
+                                    directions.append(
+                                        (
+                                            math.degrees(math.atan2(tangent.Y, tangent.X)) % 180.0,
+                                            edge.length,
+                                        )
+                                    )
+                                return directions
+
+                            def direction_stats(directions, angle):
+                                matching = [
+                                    weight
+                                    for direction, weight in directions
+                                    if abs((direction - angle + 90.0) % 180.0 - 90.0) < 1e-5
+                                ]
+                                return sum(matching), len(matching)
+
+                            source_directions = line_directions(source_faces[0])
+                            target_directions = line_directions(glyph_faces[0])
+                            source_horizontal, source_horizontal_count = direction_stats(
+                                source_directions, 0.0
+                            )
+                            source_vertical, source_vertical_count = direction_stats(
+                                source_directions, 90.0
+                            )
+                            source_axis_total = source_horizontal + source_vertical
+                            if source_axis_total > 1e-9 and target_directions:
+                                axis_matches = []
+                                source_share = source_horizontal / source_axis_total
+                                for direction, _weight in target_directions:
+                                    for angle in (direction, direction - 90.0):
+                                        target_horizontal, target_horizontal_count = (
+                                            direction_stats(target_directions, angle)
+                                        )
+                                        target_vertical, target_vertical_count = direction_stats(
+                                            target_directions, angle + 90.0
+                                        )
+                                        target_axis_total = target_horizontal + target_vertical
+                                        if target_axis_total > 1e-9:
+                                            axis_matches.append(
+                                                (
+                                                    abs(
+                                                        source_share
+                                                        - target_horizontal / target_axis_total
+                                                    )
+                                                    + (
+                                                        abs(
+                                                            source_horizontal_count
+                                                            - target_horizontal_count
+                                                        )
+                                                        + abs(
+                                                            source_vertical_count
+                                                            - target_vertical_count
+                                                        )
+                                                    )
+                                                    / max(
+                                                        1,
+                                                        source_horizontal_count
+                                                        + source_vertical_count,
+                                                    ),
+                                                    angle,
+                                                )
+                                            )
+                                if axis_matches:
+                                    error, angle = min(axis_matches)
+                                    shape_matches.append((error, candidate, angle))
+                                    continue
+                            source_obb = source_faces[0].oriented_bounding_box()
+                            target_obb = glyph_faces[0].oriented_bounding_box()
+                            source_axes = sorted(
+                                (
+                                    (source_obb.size.X, source_obb.plane.x_dir),
+                                    (source_obb.size.Y, source_obb.plane.y_dir),
+                                    (source_obb.size.Z, source_obb.plane.z_dir),
+                                ),
+                                key=lambda item: item[0],
+                                reverse=True,
+                            )
+                            target_axes = sorted(
+                                (
+                                    (target_obb.size.X, target_obb.plane.x_dir),
+                                    (target_obb.size.Y, target_obb.plane.y_dir),
+                                    (target_obb.size.Z, target_obb.plane.z_dir),
+                                ),
+                                key=lambda item: item[0],
+                                reverse=True,
+                            )
+                            if min(source_axes[1][0], target_axes[1][0]) < 1e-9:
+                                continue
+                            source_ratio = source_axes[0][0] / source_axes[1][0]
+                            target_ratio = target_axes[0][0] / target_axes[1][0]
+                            aspect_error = abs(math.log(source_ratio / target_ratio))
+                            source_dir = source_axes[0][1]
+                            target_dir = target_axes[0][1]
+                            dot = source_dir.X * target_dir.X + source_dir.Y * target_dir.Y
+                            cross = source_dir.X * target_dir.Y - source_dir.Y * target_dir.X
+                            shape_matches.append(
+                                (
+                                    aspect_error,
+                                    candidate,
+                                    math.degrees(math.atan2(cross, dot)),
+                                )
+                            )
+                            continue
+                        else:
+                            source_points = [
+                                (face.center().X, face.center().Y) for face in source_faces
+                            ]
+                            target_points = centres
                         source_mean = (
-                            sum(point.X for point in source_centres) / len(source_centres),
-                            sum(point.Y for point in source_centres) / len(source_centres),
+                            sum(point[0] for point in source_points) / len(source_points),
+                            sum(point[1] for point in source_points) / len(source_points),
                         )
                         target_mean = (
-                            sum(point[0] for point in centres) / len(centres),
-                            sum(point[1] for point in centres) / len(centres),
+                            sum(point[0] for point in target_points) / len(target_points),
+                            sum(point[1] for point in target_points) / len(target_points),
                         )
                         dot = cross = 0.0
-                        for source, target in zip(source_centres, centres, strict=True):
-                            sx, sy = source.X - source_mean[0], source.Y - source_mean[1]
+                        for source, target in zip(source_points, target_points, strict=True):
+                            sx, sy = source[0] - source_mean[0], source[1] - source_mean[1]
                             tx, ty = target[0] - target_mean[0], target[1] - target_mean[1]
                             dot += sx * tx + sy * ty
                             cross += sx * ty - sy * tx
@@ -3792,78 +3915,22 @@ class Drawing:
                         angle = math.atan2(cross, dot)
                         cos_angle, sin_angle = math.cos(angle), math.sin(angle)
                         error = 0.0
-                        for source, source_face, target, target_face in zip(
-                            source_centres,
-                            source_faces,
-                            centres,
-                            glyph_faces,
-                            strict=True,
-                        ):
-                            sx, sy = source.X - source_mean[0], source.Y - source_mean[1]
+                        for source, target in zip(source_points, target_points, strict=True):
+                            sx, sy = source[0] - source_mean[0], source[1] - source_mean[1]
                             predicted = (
                                 target_mean[0] + cos_angle * sx - sin_angle * sy,
                                 target_mean[1] + sin_angle * sx + cos_angle * sy,
                             )
                             error += math.dist(predicted, target) ** 2
+                        for source_face, target_face in zip(
+                            source_faces, glyph_faces, strict=True
+                        ):
                             error += (source_face.area - target_face.area) ** 2
                         shape_matches.append((error, candidate, math.degrees(angle)))
                     if shape_matches:
                         _error, matched_text, matched_angle = min(shape_matches)
                         raw_basic_matches[id(annotation)] = (matched_text, matched_angle)
                         return matched_angle
-                    xy = 0.0
-                    if centres:
-                        mx = sum(point[0] for point in centres) / len(centres)
-                        my = sum(point[1] for point in centres) / len(centres)
-                        xy = sum((point[0] - mx) * (point[1] - my) for point in centres)
-                    actual_w = (
-                        max(box.max.X for box in glyph_boxes)
-                        - min(box.min.X for box in glyph_boxes)
-                        if glyph_boxes
-                        else x1 - x0 - 0.8 * fs
-                    )
-                    actual_h = (
-                        max(box.max.Y for box in glyph_boxes)
-                        - min(box.min.Y for box in glyph_boxes)
-                        if glyph_boxes
-                        else y1 - y0 - 0.8 * fs
-                    )
-                    matches = []
-                    for candidate in raw_dimension_candidates(
-                        annotation, getattr(annotation, "label", ""), self.draft
-                    ):
-                        width, height = _text_size(
-                            candidate,
-                            fs,
-                            drawing_font_path,
-                            drawing_font_name,
-                            self.draft.font_style,
-                        )
-                        if abs(width - height) < 1e-9:
-                            continue
-                        cos_plus_sin = (actual_w + actual_h) / (width + height)
-                        cos_minus_sin = (actual_w - actual_h) / (width - height)
-                        cos_angle = (cos_plus_sin + cos_minus_sin) / 2.0
-                        sin_angle = (cos_plus_sin - cos_minus_sin) / 2.0
-                        if min(cos_angle, sin_angle) < -1e-6:
-                            continue
-                        cos_angle = max(0.0, cos_angle)
-                        sin_angle = max(0.0, sin_angle)
-                        magnitude = math.degrees(math.atan2(sin_angle, cos_angle))
-                        predicted = (
-                            width * math.cos(math.radians(magnitude))
-                            + height * math.sin(math.radians(magnitude)),
-                            width * math.sin(math.radians(magnitude))
-                            + height * math.cos(math.radians(magnitude)),
-                        )
-                        circle_error = abs(cos_angle**2 + sin_angle**2 - 1.0)
-                        matches.append(
-                            (math.dist((actual_w, actual_h), predicted) + circle_error, magnitude)
-                        )
-                    if matches:
-                        magnitude = min(matches)[1]
-                        axis = -magnitude if xy < 0.0 else magnitude
-                        return raw_basic_text_angle(axis)
             polygon = getattr(annotation, "label_polygon", None)
             if polygon and len(polygon) >= 2:
                 (x0, y0), (x1, y1) = polygon[:2]
@@ -3965,6 +4032,7 @@ class Drawing:
                     value = getattr(annotation, "label", None)
                 label_box = getattr(annotation, "label_bbox", None)
                 if value and label_box:
+                    raw_freeform = False
                     run_font_size = fs
                     run_font_path = drawing_font_path
                     run_font_name = drawing_font_name
@@ -3990,8 +4058,11 @@ class Drawing:
                             # External raw helpers retain no label/tolerance constructor args.
                             # Compare the few possible unit renderings to the live label geometry;
                             # this also preserves explicit custom labels (their own width wins).
-                            candidates = raw_dimension_candidates(
-                                annotation, value, dimension_draft
+                            raw_freeform = raw_dimension_label_is_freeform(annotation, value)
+                            candidates = (
+                                [value]
+                                if raw_freeform
+                                else raw_dimension_candidates(annotation, value, dimension_draft)
                             )
                             rotation = text_rotation(annotation)
                             if getattr(annotation, "is_basic", False):
@@ -4053,6 +4124,25 @@ class Drawing:
                                 if match is not None and match[0] in candidates
                                 else min(candidates, key=geometry_error)
                             )
+                            if raw_freeform:
+                                polygon = getattr(annotation, "label_polygon", None)
+                                if polygon:
+                                    visible_width = math.dist(polygon[0], polygon[1])
+                                    unit_width, unit_height = _text_size(
+                                        value,
+                                        1.0,
+                                        run_font_path,
+                                        run_font_name,
+                                        run_font_style_enum,
+                                    )
+                                    if getattr(annotation, "is_basic", False):
+                                        unit_width = (
+                                            abs(unit_width * math.cos(base_angle))
+                                            + abs(unit_height * math.sin(base_angle))
+                                            + 0.8
+                                        )
+                                    if unit_width > 1e-9:
+                                        run_font_size = visible_width / unit_width
                     if not hasattr(annotation, "measured_length"):
                         run_font_style = getattr(annotation, "pdf_text_font_style", "REGULAR")
                     runs.extend(
