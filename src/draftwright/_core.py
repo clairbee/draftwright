@@ -29,7 +29,18 @@ if TYPE_CHECKING:
 
     from draftwright.compose import StripDepths
 
-from build123d import Align, BoundBox, Compound, Edge, Location, Mode, Shape, Text, Vector
+from build123d import (
+    Align,
+    BoundBox,
+    Compound,
+    Edge,
+    FontStyle,
+    Location,
+    Mode,
+    Shape,
+    Text,
+    Vector,
+)
 from build123d_drafting.helpers import (
     Dimension,
     TitleBlock,
@@ -373,6 +384,7 @@ def _text_size(
     font_size: float,
     font_path: str | None = PLEX_MONO,
     font: str = "Arial",
+    font_style: FontStyle = FontStyle.REGULAR,
 ) -> tuple[float, float]:
     """Measured rendered (width, height) (page-mm) of *text* at *font_size*.
 
@@ -394,10 +406,41 @@ def _text_size(
         font_size=font_size,
         font=font,
         font_path=font_path,
+        font_style=font_style,
         align=(Align.CENTER, Align.CENTER),
         mode=Mode.PRIVATE,
     ).bounding_box()
     return (bb.size.X, bb.size.Y)
+
+
+@functools.lru_cache(maxsize=32)
+def _text_line_spacing_em(
+    font_size: float,
+    font_path: str | None = PLEX_MONO,
+    font: str = "Arial",
+) -> float:
+    """Return OCCT's actual newline advance for a regular face, in em units.
+
+    The advance is face-dependent (Plex Mono is 1.3 em; named Arial on macOS is
+    about 1.15 em).  Measure the same repeated glyph twice through build123d so
+    the invisible PDF layer follows the renderer instead of baking either value.
+    """
+    probe = Text(
+        txt="A\nA",
+        font_size=font_size,
+        font=font,
+        font_path=font_path,
+        font_style=FontStyle.REGULAR,
+        align=(Align.CENTER, Align.CENTER),
+        mode=Mode.PRIVATE,
+    )
+    centres = sorted(
+        ((face.bounding_box().min.Y + face.bounding_box().max.Y) / 2.0 for face in probe.faces()),
+        reverse=True,
+    )
+    if len(centres) < 2:  # pragma: no cover - defensive for a pathological font
+        return 1.3
+    return abs(centres[0] - centres[-1]) / font_size
 
 
 def _text_width(text: str, font_size: float, font_path: str = PLEX_MONO) -> float:
@@ -1218,16 +1261,25 @@ def _make_title_block(dwg, a: Analysis):
     drawn-by cell bbox (for the hyperlink rect). Shared by :func:`_add_title_block` (which adds
     it, last) and :func:`_title_block_box` (which measures its footprint for GD&T avoidance, #481)
     so the two never drift."""
+    title = _font_safe_text(a.title)
+    number = _font_safe_text(a.number)
+    tolerance = _font_safe_text(a.tolerance)
+    designed_by = _font_safe_text(_attribution_author(a.drawn_by))
+    material = _font_safe_text(a.material)
+    date = _font_safe_text(a.date)
+    revision = _font_safe_text(a.revision)
+    legal_owner = _font_safe_text(a.company)
+    scale = format_drawing_scale(a.SCALE)
     tb = TitleBlock(
-        _font_safe_text(a.title),
-        _font_safe_text(a.number),
-        scale=format_drawing_scale(a.SCALE),
-        general_tolerance=_font_safe_text(a.tolerance),
-        designed_by=_font_safe_text(_attribution_author(a.drawn_by)),
-        material=_font_safe_text(a.material),
-        date=_font_safe_text(a.date),
-        revision=_font_safe_text(a.revision),
-        legal_owner=_font_safe_text(a.company),
+        title,
+        number,
+        scale=scale,
+        general_tolerance=tolerance,
+        designed_by=designed_by,
+        material=material,
+        date=date,
+        revision=revision,
+        legal_owner=legal_owner,
         width=a.TB_W,
         # Title block renders in condensed sans (the tight ISO 7200 cells), a
         # different face from the monospace dimensions — so it carries its own
@@ -1242,7 +1294,37 @@ def _make_title_block(dwg, a: Analysis):
     # than hardcoded column fractions, so the hyperlink rect tracks any upstream
     # TitleBlock layout change. Build-frame bbox; translated to page space below.
     cell = tb.drawn_by_cell_bbox()
-    tb = tb.locate(Location((a.PAGE_W - a.TB_W - _TB_CLEAR, _TB_CLEAR, 0)))
+    bx, by = a.PAGE_W - a.TB_W - _TB_CLEAR, _TB_CLEAR
+    tb = tb.locate(Location((bx, by, 0)))
+
+    # Retain authoritative title-block values at their public cell centres for the PDF semantic
+    # text layer.  The visible block stays path-rendered; these specs merely let export embed the
+    # same bundled condensed face as invisible selectable text without parsing SVG geometry.
+    fields = (
+        ("title", title),
+        ("drawing_number", number),
+        ("scale", scale),
+        ("material", material),
+        ("revision", revision or date),
+        ("general_tolerance", tolerance),
+        ("designed_by", designed_by),
+        ("legal_owner", legal_owner),
+    )
+    specs = []
+    for field, value in fields:
+        if not value:
+            continue
+        box = tb.cell_bbox(field)
+        specs.append(
+            (
+                value,
+                bx + (box["min_x"] + box["max_x"]) / 2.0,
+                by + (box["min_y"] + box["max_y"]) / 2.0,
+                dwg.draft.font_size,
+                PLEX_SANS_CONDENSED,
+            )
+        )
+    tb.pdf_text_specs = tuple(specs)
     return tb, cell
 
 

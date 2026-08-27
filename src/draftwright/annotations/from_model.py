@@ -58,6 +58,7 @@ from draftwright._core import (
     _legible_locations,
     _log,
     _solve_strip_ys,
+    _text_line_spacing_em,
     _text_size,
     _title_block_box,
     _tol_suffix,
@@ -173,6 +174,65 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
         csink_angle=csink_angle,
         suffix=suffix,
         draft=draft,
+    )
+    # Retain token-level text positions from the exact layout recipe used by
+    # ``HoleCallout``.  Whole-label centring is not equivalent for compound callouts:
+    # vector symbols consume fixed-width cells while text tokens use font metrics.
+    h = draft.font_size
+    gap = 0.45 * h
+    sym_w = h
+    visible_tokens: list[tuple[str, str]] = []
+    if count:
+        visible_tokens.append(("text", f"{count}×"))
+    visible_tokens.extend((("sym", "diameter"), ("text", dia)))
+    if spec["through"]:
+        visible_tokens.append(("text", "THRU"))
+    elif depth is not None:
+        visible_tokens.extend((("sym", "depth"), ("text", depth)))
+    if cbore_dia is not None:
+        visible_tokens.extend((("sym", "counterbore"), ("sym", "diameter"), ("text", cbore_dia)))
+        if cbore_depth is not None:
+            visible_tokens.extend((("sym", "depth"), ("text", cbore_depth)))
+    if csink_dia is not None:
+        visible_tokens.extend((("sym", "countersink"), ("sym", "diameter"), ("text", csink_dia)))
+        if csink_angle is not None:
+            visible_tokens.append(("text", f"× {csink_angle}°"))
+    if suffix:
+        visible_tokens.append(("text", suffix))
+
+    font_path = getattr(draft, "font_path", DEFAULT_FONT_PATH)
+    font_name = getattr(draft, "font", "Arial")
+    x = 0.0
+    token_specs: list[tuple[str, float, float, float, str | None, str, str, str, str]] = []
+    for kind, value in visible_tokens:
+        if kind == "sym":
+            # Diameter has a faithful Unicode compatibility glyph.  The remaining
+            # manufacturing symbols stay vector-only, as permitted by #1352.
+            if value == "diameter":
+                token_specs.append(
+                    (
+                        "ø",
+                        x + sym_w / 2.0,
+                        0.0,
+                        h,
+                        font_path,
+                        font_name,
+                        "REGULAR",
+                        "center",
+                        "middle",
+                    )
+                )
+            x += sym_w + gap
+        else:
+            token_specs.append(
+                (value, x, 0.0, h, font_path, font_name, "REGULAR", "left", "middle")
+            )
+            x += _text_size(value, h, font_path, font_name)[0] + gap
+    cb = callout.bounding_box()
+    ccx, ccy = (cb.min.X + cb.max.X) / 2.0, (cb.min.Y + cb.max.Y) / 2.0
+    callout.pdf_text_relative_specs = tuple(
+        (value, px - ccx, py - ccy, size, path, name, style, h_align, v_align)
+        for value, px, py, size, path, name, style, h_align, v_align in token_specs
     )
     # ``HoleCallout`` renders ISO symbols as geometry and consequently exposes an empty
     # helper-level label. Preserve an equivalent semantic string at this sole construction
@@ -5679,6 +5739,77 @@ def _gdt_glyph(item, draft):
     return SurfaceFinish(item.ra, position=(0.0, 0.0), draft=draft)
 
 
+def _gdt_pdf_text_specs(glyph, item, draft) -> tuple:
+    """Token-level semantic text in coordinates relative to *glyph*'s centre.
+
+    GD&T characteristic/diameter/material-condition rings and surface-finish marks remain
+    vector geometry. Their adjacent values and datum letters use the exact cell anchors from
+    the helper renderer so selection aligns without treating the whole compound glyph as one
+    centred string.
+    """
+    box = glyph.bounding_box()
+    gcx, gcy = (box.min.X + box.max.X) / 2.0, (box.min.Y + box.max.Y) / 2.0
+    h = draft.font_size
+    font_path = getattr(draft, "font_path", DEFAULT_FONT_PATH)
+    font_name = getattr(draft, "font", "Arial")
+    specs = []
+
+    def add(value, x, y, size=h, *, h_align="center"):
+        specs.append(
+            (
+                _font_safe_text(value),
+                x - gcx,
+                y - gcy,
+                size,
+                font_path,
+                font_name,
+                "REGULAR",
+                h_align,
+                "middle",
+            )
+        )
+
+    if item.kind == "datum_ref":
+        x0, y0, x1, y1 = glyph.label_bbox
+        add(glyph.label, (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        return tuple(specs)
+    if item.kind == "finish":
+        x0, y0, x1, y1 = glyph.label_bbox
+        add(glyph.label, (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        return tuple(specs)
+    if item.kind != "control_frame":
+        return ()
+
+    # Mirror helpers._gdt_tol_cell / _gdt_datum_cell. The renderer deliberately
+    # uses regular text even when the surrounding Draft requests another style.
+    H = 2.0 * h
+    pad, diameter_radius, modifier_radius = 0.6 * h, 0.42 * h, 0.62 * h
+    x = H + pad
+    if item.diameter:
+        diameter_cx = x + diameter_radius
+        add("ø", diameter_cx, H / 2.0)
+        x = diameter_cx + diameter_radius + pad
+    tolerance_width = _text_size(item.tolerance, h, font_path, font_name)[0]
+    tolerance_cx = x + tolerance_width / 2.0
+    add(item.tolerance, tolerance_cx, H / 2.0)
+    x = tolerance_cx + tolerance_width / 2.0 + pad
+    if item.modifier:
+        modifier_cx = x + modifier_radius
+        add(item.modifier.upper(), modifier_cx, H / 2.0, size=0.8 * h)
+
+    tolerance_cell_width = (
+        pad
+        + tolerance_width
+        + pad
+        + (2.0 * diameter_radius + pad if item.diameter else 0.0)
+        + (2.0 * modifier_radius + pad if item.modifier else 0.0)
+    )
+    datum_start = H + tolerance_cell_width
+    for index, letter in enumerate(item.datums):
+        add(letter, datum_start + (index + 0.5) * H, H / 2.0)
+    return tuple(specs)
+
+
 def render_gdt(dwg, model, a, *, ctx) -> int:
     """Place declared GD&T frames / datum symbols / surface finishes (#61) as first-class
     ADR 0009 corridor candidates — registered into the SAME strip the feature's dimensions
@@ -5780,7 +5911,7 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                     pos if abs(dx) >= _MIN_LEADER else _px + math.copysign(_MIN_LEADER, dx or 1.0)
                 )
                 elbow = (pos, _py)
-            return Leader(
+            leader = Leader(
                 tip=tip,
                 elbow=elbow,
                 label="",
@@ -5789,6 +5920,20 @@ def render_gdt(dwg, model, a, *, ctx) -> int:
                 all_around=getattr(_it, "all_around", False),
                 all_over=getattr(_it, "all_over", False),
             )
+            if _it.kind == "note":
+                # The outer leader intentionally has label="" because the visible
+                # payload is a TextBlock callout. Preserve the authored note and measure
+                # the embedded Text renderer's face-dependent newline pitch for PDF.
+                leader.pdf_text = _font_safe_text(_it.text)
+                leader.pdf_text_font_style = "REGULAR"
+                leader.pdf_text_line_spacing = _text_line_spacing_em(
+                    draft.font_size,
+                    getattr(draft, "font_path", DEFAULT_FONT_PATH),
+                    getattr(draft, "font", "Arial"),
+                )
+            else:
+                leader.pdf_text_relative_specs = _gdt_pdf_text_specs(g, _it, draft)
+            return leader
 
         def _drop(
             nm,

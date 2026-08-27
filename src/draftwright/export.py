@@ -12,8 +12,10 @@ shapes), so it sits below `make_drawing` in the import DAG and depends only on
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import ezdxf
@@ -35,6 +37,73 @@ class _PDFTextRun:
     y: float
     font_size: float
     rotation: float = 0.0
+    font_path: str | None = PLEX_MONO
+    font_name: str = "Arial"
+    font_style: str = "REGULAR"
+    h_align: str = "left"
+    v_align: str = "baseline"
+
+
+@lru_cache(maxsize=32)
+def _resolved_semantic_font_path(
+    font_path: str | None, font_name: str, font_style: str = "REGULAR"
+) -> str:
+    """Resolve the same regular face used by build123d's text renderer.
+
+    A ``None`` path is a deliberate opt-out from Draftwright's pinned font: build123d
+    resolves ``draft.font`` through OCCT.  Ask that same manager for the concrete file so
+    ReportLab embeds the matching face instead of silently substituting Plex Mono.
+    """
+    if font_path is not None:
+        return font_path
+
+    from build123d import FontStyle
+
+    style = FontStyle[font_style]
+    try:
+        from build123d.text import FONT_ASPECT, FontManager
+    except ModuleNotFoundError as exc:
+        if exc.name != "build123d.text":  # pragma: no cover - broken installation
+            raise
+
+        # build123d 0.10 resolves fonts inline in Compound.make_text(); the public
+        # FontManager wrapper arrived in 0.11.  Mirror the 0.10 renderer so the
+        # invisible PDF face remains the one that produced the visible outlines.
+        import os
+        import sys
+
+        import OCP.Font as ocp_font
+        from OCP.TCollection import TCollection_AsciiString
+
+        if sys.platform.startswith("linux"):
+            os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
+            os.environ["FONTCONFIG_PATH"] = "/etc/fonts/"
+        font_aspects = {
+            FontStyle.REGULAR: ocp_font.Font_FA_Regular,
+            FontStyle.BOLD: ocp_font.Font_FA_Bold,
+            FontStyle.ITALIC: ocp_font.Font_FA_Italic,
+        }
+        if hasattr(FontStyle, "BOLDITALIC"):
+            font_aspects[FontStyle.BOLDITALIC] = ocp_font.Font_FA_BoldItalic
+        font_aspect = font_aspects[style]
+        face = ocp_font.Font_FontMgr.GetInstance_s().FindFont(
+            TCollection_AsciiString(font_name), font_aspect
+        )
+        return str(face.FontPath(font_aspect).ToCString())
+
+    face = FontManager().find_font(font_name, style)
+    return str(face.FontPath(FONT_ASPECT[style]).ToCString())
+
+
+@lru_cache(maxsize=16)
+def _semantic_font_name(font_path: str) -> str:
+    """Return a stable reportlab registration name for one bundled font file."""
+    from hashlib import sha256
+
+    path = Path(font_path)
+    digest = sha256(path.read_bytes()).hexdigest()[:12]
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", path.stem)
+    return f"Draftwright_{stem}_{digest}"
 
 
 def fix_svg_page_size(svg_path: str, page_w: float, page_h: float) -> None:
@@ -279,30 +348,82 @@ def _render_pdf(svg_path: str, pdf_path: str, link_rect=None, text_runs=()) -> N
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
 
-            font_name = "Draftwright_IBMPlexMono_Semantic_v1"
-            if font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(font_name, PLEX_MONO))
             k = 72.0 / 25.4
+            font_choices: dict[tuple[str | None, str, str], tuple[str, str]] = {}
             for run in text_runs:
+                font_key = (run.font_path, run.font_name, run.font_style)
+                choice = font_choices.get(font_key)
+                if choice is None:
+                    font_path = _resolved_semantic_font_path(*font_key)
+                    font_name = _semantic_font_name(font_path)
+                    if font_name not in pdfmetrics.getRegisteredFontNames():
+                        try:
+                            pdfmetrics.registerFont(TTFont(font_name, font_path))
+                        except Exception as exc:  # noqa: BLE001 - CFF/single-stroke faces
+                            # Geometry supports more font formats than ReportLab's TTFont
+                            # subsetter. Keep export/search total with the bundled Unicode face.
+                            # Cache the choice per export so a dense drawing warns/probes once.
+                            _log.warning(
+                                "PDF semantic font %s cannot be embedded (%s); "
+                                "using bundled Plex Mono",
+                                font_path,
+                                exc,
+                            )
+                            font_path = PLEX_MONO
+                            font_name = _semantic_font_name(font_path)
+                            if font_name not in pdfmetrics.getRegisteredFontNames():
+                                pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    choice = (font_path, font_name)
+                    font_choices[font_key] = choice
+                font_path, font_name = choice
+                font_size = run.font_size * k
+                dx = 0.0
+                if run.h_align == "center":
+                    dx = -pdfmetrics.stringWidth(run.text, font_name, font_size) / 2.0
+                elif run.h_align == "right":
+                    dx = -pdfmetrics.stringWidth(run.text, font_name, font_size)
+                elif run.h_align != "left":
+                    raise ValueError(f"unknown PDF text horizontal alignment {run.h_align!r}")
+                dy = 0.0
+                if run.v_align == "middle":
+                    ascent, descent = pdfmetrics.getAscentDescent(font_name, font_size)
+                    dy = -(ascent + descent) / 2.0
+                elif run.v_align != "baseline":
+                    raise ValueError(f"unknown PDF text vertical alignment {run.v_align!r}")
+
+                angle = math.radians(run.rotation)
+                cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+                origin_x = run.x * k + cos_angle * dx - sin_angle * dy
+                origin_y = run.y * k + sin_angle * dx + cos_angle * dy
                 text = canvas.beginText()
                 text.setTextRenderMode(3)  # invisible, but retained for search/copy
-                text.setFont(font_name, run.font_size * k)
+                text.setFont(font_name, font_size)
                 if run.rotation:
-                    import math
-
-                    angle = math.radians(run.rotation)
                     text.setTextTransform(
-                        math.cos(angle),
-                        math.sin(angle),
-                        -math.sin(angle),
-                        math.cos(angle),
-                        run.x * k,
-                        run.y * k,
+                        cos_angle,
+                        sin_angle,
+                        -sin_angle,
+                        cos_angle,
+                        origin_x,
+                        origin_y,
                     )
                 else:
-                    text.setTextOrigin(run.x * k, run.y * k)
+                    text.setTextOrigin(origin_x, origin_y)
                 text.textOut(run.text)
-                canvas.drawText(text)
+                if cos_angle < -1e-9:
+                    # Poppler can reorder a leftward run even though its geometry is correct.
+                    # ActualText is the PDF-standard logical representation for extraction;
+                    # its marked content retains the run's matrix and overall positioned ink
+                    # bounds. Replacement text is span-atomic: PDFium partitions that overall
+                    # AABB for partial-character selection, but whole-term selection stays on
+                    # the physical word. Keeping an unwrapped physical copy would instead
+                    # corrupt search/copy in every Poppler extraction mode.
+                    actual_text = "FEFF" + run.text.encode("utf-16-be").hex().upper()
+                    canvas.addLiteral(f"/Span << /ActualText <{actual_text}> >> BDC")
+                    canvas.drawText(text)
+                    canvas.addLiteral("EMC")
+                else:
+                    canvas.drawText(text)
         if link_rect is not None:
             k = 72.0 / 25.4
             x0, y0, x1, y1 = link_rect

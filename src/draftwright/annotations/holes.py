@@ -101,6 +101,7 @@ def _profiled_callout_leader(*, callout, **kw):
         )
     leader = Leader(callout=callout, **kw)
     leader.label = semantic_label
+    leader.pdf_text_relative_specs = tuple(getattr(callout, "pdf_text_relative_specs", ()))
     leader.covers_profiles = getattr(callout, "covers_profiles", ())
     leader.covers_hole_requirements = getattr(callout, "covers_hole_requirements", ())
     leader.source_ids = tuple(getattr(callout, "source_ids", ()))

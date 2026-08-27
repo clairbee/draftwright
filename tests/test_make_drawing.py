@@ -11572,7 +11572,7 @@ class TestDraftwrightAttribution:
 
         dwg = build_drawing(Box(60, 40, 20), auto_dims=False)
         dwg.note("INSPECT SURFACE ±0.1", (65, 55), name="inspection_note")
-        dwg.note("ROTATED PATH ONLY", (100, 55), rotation=45, name="rotated_note")
+        dwg.note("ROTATED NOTE", (100, 55), rotation=45, name="rotated_note")
         dwg.add_table(
             [("NOTES", "SIZE"), ("DEBURR", "⌀5 ±0.1")],
             name="notes_table",
@@ -11585,11 +11585,12 @@ class TestDraftwrightAttribution:
             text_page = page.get_textpage()
             extracted = text_page.get_text_range()
             first_char_box = text_page.get_charbox(extracted.index("INSPECT SURFACE"))
+            rotated_char_box = text_page.get_charbox(extracted.index("ROTATED NOTE"))
         finally:
             pdf.close()
 
         assert "INSPECT SURFACE ±0.1" in extracted
-        assert "ROTATED PATH ONLY" not in extracted
+        assert "ROTATED NOTE" in extracted
         assert "NOTES" in extracted and "DEBURR" in extracted
         # The visible drafting font's longstanding CAD compatibility glyph is
         # ø for source ⌀; copied text must match what the engineer sees.
@@ -11601,6 +11602,10 @@ class TestDraftwrightAttribution:
         left, bottom, right, top = first_char_box
         assert left < note_box.max.X * k and right > note_box.min.X * k
         assert bottom < note_box.max.Y * k and top > note_box.min.Y * k
+        rotated_box = dwg.get_annotation("rotated_note").bounding_box()
+        left, bottom, right, top = rotated_char_box
+        assert left < rotated_box.max.X * k and right > rotated_box.min.X * k
+        assert bottom < rotated_box.max.Y * k and top > rotated_box.min.Y * k
 
     def test_export_pdf_does_not_silently_discard_semantic_text(self, tmp_path, monkeypatch):
         from reportlab.pdfgen.canvas import Canvas
