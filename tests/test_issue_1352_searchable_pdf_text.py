@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
-from build123d import Align, Box, Cylinder, Location, Pos
+from build123d import Align, Box, Cylinder, FontStyle, Location, Pos
 from build123d_drafting import Dimension
+from build123d_drafting.helpers import Draft
 from PIL import Image, ImageChops
 
 from draftwright import Sheet, build_drawing
@@ -64,6 +65,18 @@ def _assert_first_character_overlaps_annotation(text_page, extracted, text, anno
     x0, y0, x1, y1 = label_box
     assert left < x1 * k and right > x0 * k
     assert bottom < y1 * k and top > y0 * k
+
+
+def _assert_text_contains_run_anchor(text_page, extracted, text, point):
+    start = extracted.index(text)
+    boxes = [text_page.get_charbox(index) for index in range(start, start + len(text))]
+    left = min(box[0] for box in boxes)
+    bottom = min(box[1] for box in boxes)
+    right = max(box[2] for box in boxes)
+    top = max(box[3] for box in boxes)
+    k = 72.0 / 25.4
+    assert left <= point[0] * k <= right
+    assert bottom <= point[1] * k <= top
 
 
 def test_pdf_extracts_dimensions_callouts_notes_and_title_block_values(tmp_path):
@@ -231,6 +244,15 @@ def test_declared_gdt_values_and_datums_are_searchable(tmp_path):
         )
         _assert_first_character_overlaps_annotation(text_page, extracted, "0.123", control)
         _assert_first_character_overlaps_annotation(text_page, extracted, "7.77", finish)
+        for annotation, value in ((control, "0.123"), (finish, "7.77")):
+            spec = next(item for item in annotation.pdf_text_relative_specs if item[0] == value)
+            x0, y0, x1, y1 = annotation.label_bbox
+            _assert_text_contains_run_anchor(
+                text_page,
+                extracted,
+                value,
+                ((x0 + x1) / 2.0 + spec[1], (y0 + y1) / 2.0 + spec[2]),
+            )
     finally:
         text_page.close()
         pdf.close()
@@ -290,12 +312,80 @@ def test_basic_dimension_semantic_text_is_normalised_upright(tmp_path, start, en
 
 
 @pytest.mark.parametrize(
+    ("start", "end", "label", "label_offset_x", "expected"),
+    [
+        ((50, 50, 0), (90, 50, 0), "X", -20, 0.0),
+        ((50, 50, 0), (50, 90, 0), "W" * 40, 0, 90.0),
+        ((50, 50, 0), (90, 90, 0), "W" * 40, 0, 45.0),
+        ((50, 90, 0), (90, 50, 0), "W" * 40, 0, -45.0),
+    ],
+)
+def test_raw_basic_dimension_rotation_survives_missing_or_mixed_spans(
+    tmp_path, start, end, label, label_offset_x, expected
+):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    annotation = Dimension(
+        start,
+        end,
+        "above",
+        4,
+        drawing.draft,
+        label=label,
+        basic=True,
+        label_offset_x=label_offset_x,
+    )
+    drawing.registry.add(annotation, "raw_basic", view=None)
+    drawing.items.append(annotation)
+
+    pdf_path = drawing.export(str(tmp_path / f"raw_basic_{expected}"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert label in extracted
+        assert _extracted_text_angle(text_page, extracted, label) == pytest.approx(
+            expected, abs=1.0
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+
+
+def test_engine_dimension_keeps_its_construction_draft_and_rotation(tmp_path):
+    drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
+    custom = Draft(font_size=5, font="Arial", font_style=FontStyle.BOLD)
+    custom.font_path = None
+    with pytest.warns(DeprecationWarning):
+        drawing.place_dim(
+            (20, 20, 0),
+            (60, 20, 0),
+            "above",
+            "front",
+            custom,
+            name="tagged",
+            basic=True,
+            label="TAGGED",
+            rotation=30,
+        )
+
+    pdf_path = drawing.export(str(tmp_path / "tagged"), formats=("pdf",))["pdf"]
+    pdf, text_page, extracted = _pdf_text(pdf_path)
+    try:
+        assert _extracted_text_angle(text_page, extracted, "TAGGED") == pytest.approx(
+            30.0, abs=1.0
+        )
+    finally:
+        text_page.close()
+        pdf.close()
+    assert b"Arial-BoldMT" in Path(pdf_path).read_bytes()
+
+
+@pytest.mark.parametrize(
     ("dimension_kwargs", "expected"),
     [
         ({}, "10.0mm"),
         ({"basic": True}, "10.0mm"),
         ({"tolerance": 0.1}, "10.0 ±0.1mm"),
         ({"basic": True, "tolerance": 0.1}, "10.0 ±0.1mm"),
+        ({"tolerance": (0.1, 0.2)}, "10.0 +0.1 -0.2mm"),
         ({"label": "CUSTOM"}, "CUSTOM"),
     ],
 )
