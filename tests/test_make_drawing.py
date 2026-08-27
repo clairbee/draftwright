@@ -11567,6 +11567,54 @@ class TestDraftwrightAttribution:
                 found = True
         assert found, "PDF must embed a clickable draftwright URI link annotation"
 
+    def test_export_pdf_notes_and_tables_are_searchable_unicode_text(self, tmp_path):
+        import pypdfium2 as pdfium
+
+        dwg = build_drawing(Box(60, 40, 20), auto_dims=False)
+        dwg.note("INSPECT SURFACE ±0.1", (65, 55), name="inspection_note")
+        dwg.note("ROTATED PATH ONLY", (100, 55), rotation=45, name="rotated_note")
+        dwg.add_table(
+            [("NOTES", "SIZE"), ("DEBURR", "⌀5 ±0.1")],
+            name="notes_table",
+        )
+
+        pdf_path = dwg.export(str(tmp_path / "searchable"), formats=("pdf",))["pdf"]
+        pdf = pdfium.PdfDocument(pdf_path)
+        try:
+            page = pdf[0]
+            text_page = page.get_textpage()
+            extracted = text_page.get_text_range()
+            first_char_box = text_page.get_charbox(extracted.index("INSPECT SURFACE"))
+        finally:
+            pdf.close()
+
+        assert "INSPECT SURFACE ±0.1" in extracted
+        assert "ROTATED PATH ONLY" not in extracted
+        assert "NOTES" in extracted and "DEBURR" in extracted
+        # The visible drafting font's longstanding CAD compatibility glyph is
+        # ø for source ⌀; copied text must match what the engineer sees.
+        assert "ø5 ±0.1" in extracted
+        # It is not merely an off-page search index: the selectable character
+        # geometry lies over the visible note on the drawing.
+        note_box = dwg.get_annotation("inspection_note").bounding_box()
+        k = 72.0 / 25.4
+        left, bottom, right, top = first_char_box
+        assert left < note_box.max.X * k and right > note_box.min.X * k
+        assert bottom < note_box.max.Y * k and top > note_box.min.Y * k
+
+    def test_export_pdf_does_not_silently_discard_semantic_text(self, tmp_path, monkeypatch):
+        from reportlab.pdfgen.canvas import Canvas
+
+        dwg = build_drawing(Box(30, 20, 10), auto_dims=False)
+        dwg.note("MUST BE SEARCHABLE", (50, 50))
+
+        def fail_semantic_text(_self, _text):
+            raise RuntimeError("semantic text failure")
+
+        monkeypatch.setattr(Canvas, "drawText", fail_semantic_text)
+        with pytest.raises(RuntimeError, match="semantic text failure"):
+            dwg.export(str(tmp_path / "broken"), formats=("pdf",))
+
 
 class TestExportFormats:
     """The unified export(formats=...) → {format: path} API + PNG raster export
