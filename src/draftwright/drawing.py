@@ -3816,6 +3816,62 @@ class Drawing:
                             source_face_options, key=lambda item: item[0]
                         )
                         if len(source_faces) == 1:
+                            source_vertices = source_faces[0].vertices()
+                            target_vertices = glyph_faces[0].vertices()
+                            if (
+                                len(source_vertices) == len(target_vertices)
+                                and len(source_vertices) > 1
+                            ):
+                                source_points = [(point.X, point.Y) for point in source_vertices]
+                                target_points = [(point.X, point.Y) for point in target_vertices]
+                                source_mean = (
+                                    sum(point[0] for point in source_points) / len(source_points),
+                                    sum(point[1] for point in source_points) / len(source_points),
+                                )
+                                target_mean = (
+                                    sum(point[0] for point in target_points) / len(target_points),
+                                    sum(point[1] for point in target_points) / len(target_points),
+                                )
+                                dot = cross = source_norm = target_norm = 0.0
+                                for source, target in zip(
+                                    source_points, target_points, strict=True
+                                ):
+                                    sx, sy = (
+                                        source[0] - source_mean[0],
+                                        source[1] - source_mean[1],
+                                    )
+                                    tx, ty = (
+                                        target[0] - target_mean[0],
+                                        target[1] - target_mean[1],
+                                    )
+                                    dot += sx * tx + sy * ty
+                                    cross += sx * ty - sy * tx
+                                    source_norm += sx * sx + sy * sy
+                                    target_norm += tx * tx + ty * ty
+                                if source_norm > 1e-12 and target_norm > 1e-12:
+                                    angle = math.atan2(cross, dot)
+                                    scale = math.sqrt(target_norm / source_norm)
+                                    cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+                                    error = 0.0
+                                    for source, target in zip(
+                                        source_points, target_points, strict=True
+                                    ):
+                                        sx, sy = (
+                                            source[0] - source_mean[0],
+                                            source[1] - source_mean[1],
+                                        )
+                                        predicted = (
+                                            target_mean[0]
+                                            + scale * (cos_angle * sx - sin_angle * sy),
+                                            target_mean[1]
+                                            + scale * (sin_angle * sx + cos_angle * sy),
+                                        )
+                                        error += math.dist(predicted, target) ** 2
+                                    if error / target_norm < 1e-12:
+                                        shape_matches.append(
+                                            (error, candidate, math.degrees(angle))
+                                        )
+                                        continue
 
                             def line_directions(face):
                                 directions = []
