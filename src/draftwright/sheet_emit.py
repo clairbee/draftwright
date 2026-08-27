@@ -29,9 +29,11 @@ fixtures (#472).
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Literal, cast
 
@@ -1606,6 +1608,14 @@ def _adopted_view_block(constraints: ViewConstraints, names: Mapping[int, str]) 
             keyword = "through" if spec.kind == "section" else "around"
             args = f'"{label}", {keyword}={feature_name}'
         elif target_kind == "at" and spec.kind == "section":
+            if (
+                isinstance(target_value, bool)
+                or not isinstance(target_value, Real)
+                or not math.isfinite(float(target_value))
+            ):
+                raise ValueError(
+                    f"cannot emit {spec.name!r}: an at= target must be a finite numeric value"
+                )
             args = f'"{label}", at={float(target_value)!r}'
         else:
             raise ValueError(f"cannot emit {spec.name!r}: unsupported target {target!r}")

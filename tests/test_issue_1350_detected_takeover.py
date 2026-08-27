@@ -468,6 +468,13 @@ def test_emitter_round_trips_directional_relations_between_automatic_views():
         ),
         (
             ViewConstraints(
+                principal_source="authored",
+                principals=(ViewConstraint(ViewSpec("front", "pictorial")),),
+            ),
+            "principal view 'front' with kind 'pictorial'",
+        ),
+        (
+            ViewConstraints(
                 derived_source="authored",
                 derived=(ViewConstraint(ViewSpec("front", "principal", target=("at", 0.0))),),
             ),
@@ -502,6 +509,22 @@ def test_emitter_round_trips_directional_relations_between_automatic_views():
                 derived=(ViewConstraint(ViewSpec("detail_b", "detail", target=("at", 0.0))),),
             ),
             "unsupported target",
+        ),
+        (
+            ViewConstraints(
+                derived_source="authored",
+                derived=(
+                    ViewConstraint(ViewSpec("section_aa", "section", target=("at", float("inf")))),
+                ),
+            ),
+            "at= target must be a finite numeric value",
+        ),
+        (
+            ViewConstraints(
+                derived_source="authored",
+                derived=(ViewConstraint(ViewSpec("section_aa", "section", target=("at", True))),),
+            ),
+            "at= target must be a finite numeric value",
         ),
         (
             ViewConstraints(relations=(ViewRelation("front", "align_x", "plan"),)),

@@ -47,7 +47,9 @@ dimensions. Use `take_over(...)` to adopt that same Sheet as an explicit editabl
 copying features into a second Sheet:
 
 ```python
-s = Sheet.from_part(part).take_over(
+s = Sheet.from_part(part)
+hole = s.of(next(feature for feature in s.features if feature.kind == "hole"))
+s.take_over(
     dimensions="authored",
     principal_views="automatic",
     derived_views="authored",
