@@ -671,9 +671,10 @@ def test_raw_drawing_font_single_curved_glyph_keeps_exact_rotation(
     )
     annotation.location = Location((0, 0, 0), (0, 0, live_rotation))
     box = annotation.bounding_box()
-    annotation.location = Location(
-        (100 - (box.min.X + box.max.X) / 2, 100 - (box.min.Y + box.max.Y) / 2, 0)
-    ) * annotation.location
+    annotation.location = (
+        Location((100 - (box.min.X + box.max.X) / 2, 100 - (box.min.Y + box.max.Y) / 2, 0))
+        * annotation.location
+    )
     drawing.registry.add(annotation, "raw_curved_glyph", view=None)
     drawing.items.append(annotation)
 
