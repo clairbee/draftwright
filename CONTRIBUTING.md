@@ -100,4 +100,4 @@ the installed package. Never commit a path or Git override.
 - Use the PR template to record the slice and its stop condition.
 - Run `scripts/pr-check --quick` while iterating and `scripts/pr-check` before the final push.
 
-Questions or commercial-licensing enquiries: pzfreo@gmail.com.
+Questions or commercial-licensing enquiries: paul@fremantle.org.
