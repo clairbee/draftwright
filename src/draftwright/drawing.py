@@ -3803,9 +3803,8 @@ class Drawing:
                         glyph_faces = [face for face in glyph_faces if face.area >= min_area]
                         centres = [(face.center().X, face.center().Y) for face in glyph_faces]
                     shape_matches: list[tuple[float, str, float]] = []
-                    for candidate in raw_dimension_candidates(
-                        annotation, getattr(annotation, "label", ""), self.draft
-                    ):
+                    raw_label = str(getattr(annotation, "label", ""))
+                    for candidate in raw_dimension_candidates(annotation, raw_label, self.draft):
                         source_face_options = []
                         for font_path in dict.fromkeys((drawing_font_path, DEFAULT_FONT_PATH)):
                             faces = Text(
@@ -3835,10 +3834,16 @@ class Drawing:
                             source_face_options.append((font_error, faces))
                         if not source_face_options:
                             continue
-                        if len(glyph_faces) == 1:
+                        if len(candidate) == 1:
+                            target_vertices = [
+                                vertex for face in glyph_faces for vertex in face.vertices()
+                            ]
                             for _font_error, exact_faces in source_face_options:
+                                source_vertices = [
+                                    vertex for face in exact_faces for vertex in face.vertices()
+                                ]
                                 exact_rotation = _exact_vertex_rotation(
-                                    exact_faces[0].vertices(), glyph_faces[0].vertices()
+                                    source_vertices, target_vertices
                                 )
                                 if exact_rotation is not None:
                                     raw_basic_exact_matches.add(id(annotation))
@@ -3998,7 +4003,7 @@ class Drawing:
                         ):
                             error += (source_face.area - target_face.area) ** 2
                         shape_matches.append((error, candidate, math.degrees(angle)))
-                    if len(glyph_faces) == 1 and id(annotation) not in raw_basic_exact_matches:
+                    if len(raw_label) == 1 and id(annotation) not in raw_basic_exact_matches:
                         # External helpers discard their construction Draft.  A guessed
                         # face can put selectable text far from custom-font ink, so retain
                         # the helper's visible vector glyph unless its outline proves the

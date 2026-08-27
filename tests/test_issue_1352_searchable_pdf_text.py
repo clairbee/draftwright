@@ -719,8 +719,11 @@ def test_raw_drawing_font_single_curved_glyph_keeps_exact_rotation(
         pdf.close()
 
 
-@pytest.mark.parametrize(("axis", "expected"), [(45, 45.0), (-45, -45.0)])
-def test_raw_drawing_font_single_stroke_glyph_prefers_exact_face(tmp_path, axis, expected):
+@pytest.mark.parametrize(
+    ("label", "axis", "expected"),
+    [("1", 45, 45.0), ("1", -45, -45.0), ("%", 45, 45.0)],
+)
+def test_raw_drawing_font_single_glyph_prefers_exact_outline(tmp_path, label, axis, expected):
     drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
     angle = math.radians(axis)
     annotation = Dimension(
@@ -729,19 +732,21 @@ def test_raw_drawing_font_single_stroke_glyph_prefers_exact_face(tmp_path, axis,
         "above",
         1,
         drawing.draft,
-        label="1",
+        label=label,
         basic=True,
     )
-    drawing.registry.add(annotation, "raw_single_stroke", view=None)
+    drawing.registry.add(annotation, "raw_single_glyph", view=None)
     drawing.items.append(annotation)
 
-    pdf_path = drawing.export(str(tmp_path / f"raw_single_stroke_{axis}"), formats=("pdf",))["pdf"]
+    pdf_path = drawing.export(
+        str(tmp_path / f"raw_single_glyph_{label}_{axis}"), formats=("pdf",)
+    )["pdf"]
     pdf, text_page, _extracted = _pdf_text(pdf_path)
     try:
         text_object = next(
             item
             for item in text_page.parent.get_objects(textpage=text_page)
-            if isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == "1"
+            if isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == label
         )
         a, b, _c, _d, _e, _f = text_object.get_matrix().get()
         assert math.degrees(math.atan2(b, a)) == pytest.approx(expected, abs=1.0)
@@ -750,7 +755,8 @@ def test_raw_drawing_font_single_stroke_glyph_prefers_exact_face(tmp_path, axis,
         pdf.close()
 
 
-def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path):
+@pytest.mark.parametrize("label", ["C", "%"])
+def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path, label):
     drawing = build_drawing(Box(10, 10, 10), auto_dims=False)
     drawing.draft.font_size = 20
     custom = Draft(font_size=20)
@@ -762,7 +768,7 @@ def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path):
         "above",
         10,
         custom,
-        label="C",
+        label=label,
         basic=True,
     )
     box = annotation.bounding_box()
@@ -772,11 +778,11 @@ def test_raw_unknown_single_glyph_font_keeps_vector_fallback(tmp_path):
     drawing.registry.add(annotation, "raw_custom_glyph", view=None)
     drawing.items.append(annotation)
 
-    pdf_path = drawing.export(str(tmp_path / "raw_custom_glyph"), formats=("pdf",))["pdf"]
+    pdf_path = drawing.export(str(tmp_path / f"raw_custom_glyph_{label}"), formats=("pdf",))["pdf"]
     pdf, text_page, _extracted = _pdf_text(pdf_path)
     try:
         assert not any(
-            isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == "C"
+            isinstance(item, pdfium.PdfTextObj) and item.extract().strip() == label
             for item in text_page.parent.get_objects(textpage=text_page)
         )
     finally:
