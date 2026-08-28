@@ -112,7 +112,7 @@ def test_generated_sheet_preserves_broad_tolerance_beneath_bore_fit():
     assert tolerances["counterbore.diameter"] == 0.05
 
 
-@pytest.mark.parametrize("depth", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("depth", [0, -1, float("nan"), float("inf"), True, "12", None, object()])
 def test_thread_operation_rejects_nonpositive_or_nonfinite_depth(depth):
     with pytest.raises(ValueError, match="thread depth must be finite and positive"):
         ThreadOperation("M6x1", depth)

@@ -542,11 +542,16 @@ class ThreadOperation:
         if not isinstance(self.designation, str):
             raise ValueError("thread designation must be a non-empty string")
         designation = self.designation.strip()
-        depth = float(self.depth)
         if not designation:
             raise ValueError("thread designation must be a non-empty string")
-        if not isfinite(depth) or depth <= 0:
+        if (
+            not isinstance(self.depth, (int, float))
+            or isinstance(self.depth, bool)
+            or not isfinite(self.depth)
+            or self.depth <= 0
+        ):
             raise ValueError("thread depth must be finite and positive")
+        depth = float(self.depth)
         object.__setattr__(self, "designation", designation)
         object.__setattr__(self, "depth", depth)
 
