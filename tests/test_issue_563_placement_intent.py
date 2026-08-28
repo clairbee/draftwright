@@ -453,6 +453,24 @@ def test_plan_right_corridor_does_not_force_feasible_a4_scale_reduction():
     assert not [issue for issue in drawing.lint() if issue.severity != "info"]
 
 
+def test_front_right_corridor_reserves_after_automatic_height_ladder():
+    sheet = Sheet(Box(40, 40, 40), page="A4").auto_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=20,
+        label="20",
+        dominant_axis="Z",
+        ref_bbox=(-2, -2, -10, 2, 2, 10),
+        ref_pts=[(0, 0, -10), (0, 0, 10)],
+        view="front",
+        side="right",
+    )
+    drawing = sheet.build()
+    assert "pmi_z_0" in drawing.annotations()
+    assert "dim_height" in drawing.annotations()
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
 @pytest.mark.parametrize(
     ("view", "side", "message"),
     [

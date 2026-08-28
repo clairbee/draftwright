@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from inspect import signature
 
 from b123d_recognisers import full_cylinders
-from build123d import Compound
+from build123d import Compound, Shape
 
 _log = logging.getLogger(__name__)
 
@@ -188,6 +189,23 @@ def _solids_body(part, src: str = "part"):
     ):
         _log.info("Dropping non-solid geometry from %s (PMI presentation data)", src)
     return body
+
+
+_SCALE_SUPPORTS_ABOUT = "about" in signature(Shape.scale).parameters
+
+
+def _scale_world(shape, factor: float):
+    """Scale a build123d shape about the world origin on every supported version.
+
+    build123d 0.9/0.10's factor-only ``Shape.scale`` uses the world origin. Version 0.11 added
+    ``about=`` and changed the default to ``shape.location.position``. Draftwright supports both
+    dependency lines, so select the signature once and state the same world-origin transform on
+    either API without converting analytic geometry through a general affine transform.
+    """
+
+    if _SCALE_SUPPORTS_ABOUT:
+        return shape.scale(factor, about=(0, 0, 0))
+    return shape.scale(factor)
 
 
 def _axis_letter(obj) -> str:

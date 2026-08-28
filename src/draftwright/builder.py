@@ -44,6 +44,7 @@ from draftwright._core import (
     _Projector,
     _tb_width,
 )
+from draftwright._geometry import _scale_world
 from draftwright._warnings import ScaleCompletenessWarning
 from draftwright.analysis import Analysis, _analyse, _apply_principal_view_pins
 from draftwright.annotations._common import (
@@ -622,14 +623,14 @@ def _assemble(
     # times — the root cause of #1135's hour-long build. This parameter is the seam where the
     # loop's intermediate assemblies will pass a cheap stand-in and only the final one the real
     # solid (#1137). Every caller currently takes the default, so nothing has changed yet.
-    # build123d scales about ``shape.location.position`` by default.  The solids-only body
+    # build123d 0.11 scales about ``shape.location.position`` by default. The solids-only body
     # returned by ``_solids_body`` commonly carries the source primitive's placement as its
     # Location (for a centred Box, its minimum corner), even though its bounding box and every
     # analysis/projector coordinate are expressed in world space.  Scaling about that stored
     # location moves the rendered silhouette away from the solver's world-origin projection at
     # every non-1:1 scale.  Scale world geometry about the world origin explicitly so the view,
     # ViewCoordinates and annotation zones retain one transform.
-    part_s = (a.part if shape is None else shape).scale(a.SCALE, about=(0, 0, 0))
+    part_s = _scale_world(a.part if shape is None else shape, a.SCALE)
 
     # ADR 0018: the views this drawing has, and where they go, come from ONE resolved plan
     # instead of three hardcoded calls whose cameras, page fields and layout meaning were
