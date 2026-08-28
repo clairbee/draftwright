@@ -12,6 +12,7 @@ from draftwright import Sheet
 from draftwright.compose import _compose_anno_boxes, _footprint_from_boxes
 from draftwright.model import DimensionParameterId
 from draftwright.model.compiled import compile_dimensions
+from draftwright.model.ir import authored_dimension_target_view
 from draftwright.model.planner import plan_dimensions
 from draftwright.sheet_emit import emit_sheet_script
 
@@ -236,6 +237,26 @@ def test_no_measured_override_keeps_existing_geometric_derivation():
     assert annotation._dw_spec.side == "right"
 
 
+@pytest.mark.parametrize(
+    ("kind", "axis", "view", "side", "expected"),
+    [
+        ("linear", "?", "detail_a", None, "detail_a"),
+        ("linear", "Z", None, None, None),
+        ("diameter", "X", None, "above", "side"),
+        ("diameter", "Y", None, "above", "front"),
+        ("diameter", "Z", None, "above", "plan"),
+        ("diameter", "?", None, "above", None),
+        ("linear", "X", None, "above", "front"),
+        ("linear", "Z", None, "left", "front"),
+        ("linear", "Y", None, "above", "side"),
+        ("linear", "Y", None, "right", "plan"),
+        ("linear", "?", None, "right", None),
+    ],
+)
+def test_measured_target_view_resolution_is_total(kind, axis, view, side, expected):
+    assert authored_dimension_target_view(kind, axis, view, side) == expected
+
+
 def test_view_only_measured_override_preserves_the_derived_side():
     def build(view):
         sheet = Sheet(Box(60, 40, 20), page="A3").authored_dimensions()
@@ -251,6 +272,51 @@ def test_view_only_measured_override_preserves_the_derived_side():
         return sheet.build().get_annotation("pmi_z_0")._dw_spec.side
 
     assert build(None) == build("front") == "left"
+
+
+@pytest.mark.parametrize(
+    ("view", "ref_bbox", "expected_side"),
+    [
+        ("side", (-2, -10, 20, 2, 10, 30), "above"),
+        ("side", (-2, -10, -30, 2, 10, -20), "below"),
+        ("plan", (20, -10, -2, 30, 10, 2), "right"),
+        ("plan", (-30, -10, -2, -20, 10, 2), "left"),
+    ],
+)
+def test_y_view_only_override_preserves_its_geometry_derived_side(view, ref_bbox, expected_side):
+    sheet = Sheet(Box(80, 80, 80), page="A3").authored_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=20,
+        label="20",
+        dominant_axis="Y",
+        ref_bbox=ref_bbox,
+        ref_pts=[(0, -10, 0), (0, 10, 0)],
+        view=view,
+    )
+
+    drawing = sheet.build()
+    assert drawing.get_annotation("pmi_y_0")._dw_spec.side == expected_side
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
+def test_y_override_reports_degenerate_reference_geometry():
+    sheet = Sheet(Box(80, 80, 80), page="A3").authored_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=1,
+        label="1",
+        dominant_axis="Y",
+        ref_bbox=(-2, 0, -2, 2, 0, 2),
+        ref_pts=[(0, 0, 0), (0, 0, 0)],
+        view="side",
+    )
+
+    drawing = sheet.build()
+    assert "pmi_y_0" not in drawing.annotations()
+    assert [(issue.severity, issue.code) for issue in drawing.lint()] == [
+        ("warning", "authored_dim_degenerate")
+    ]
 
 
 def test_front_above_measured_intent_participates_in_view_composition():
@@ -351,6 +417,15 @@ def test_compose_reserves_every_supported_measured_corridor_family():
     assert footprint.fv_top > 0 and footprint.fv_bottom > 0
     assert footprint.pv_authored_top > 0 and footprint.pv_bottom > 0
     assert footprint.sv_top > 0 and footprint.sv_bottom > 0
+
+
+def test_compose_ignores_an_unresolved_defensive_target(monkeypatch):
+    import draftwright.compose as compose
+
+    sheet = _measured_sheet(view="front", side="left")
+    monkeypatch.setattr(compose, "authored_dimension_target_view", lambda *_args: None)
+
+    assert _compose_anno_boxes(sheet.model(), n_steps=0)
 
 
 def test_front_and_plan_horizontal_corridors_reuse_the_same_depth():
@@ -496,6 +571,36 @@ def test_invalid_referential_strip_and_compound_conflict_fail_clearly():
     conflict.dimension(blind, "bore.depth", view="plan", side="right")
     with pytest.raises(ValueError, match="conflicting placement intent"):
         plan_dimensions(conflict.model())
+
+
+def test_repeat_parameter_placement_conflict_and_envelope_side_fail_clearly():
+    repeated = Sheet(Box(40, 40, 10)).authored_dimensions()
+    hole = repeated.hole(diameter=4, at=(0, 0, 0), axis="z")
+    repeated.dimension(hole, "bore.diameter", view="plan", side="left")
+    repeated.dimension(hole, "bore.diameter", view="plan", side="right")
+    with pytest.raises(ValueError, match="conflicting placement intent"):
+        plan_dimensions(repeated.model())
+
+    envelope_sheet = Sheet.from_part(Box(40, 20, 10)).take_over(
+        dimensions="authored",
+        principal_views="automatic",
+        derived_views="automatic",
+    )
+    envelope = next(feature for feature in envelope_sheet.features if feature.kind == "envelope")
+    envelope_sheet.dimension(envelope, "width.length", view="front", side="above")
+    with pytest.raises(ValueError, match="supported sides for this renderer: none"):
+        plan_dimensions(envelope_sheet.model())
+
+
+def test_legacy_build123d_scaling_uses_the_factor_only_signature(monkeypatch):
+    import draftwright._geometry as geometry
+
+    class LegacyShape:
+        def scale(self, factor):
+            return ("scaled", factor)
+
+    monkeypatch.setattr(geometry, "_SCALE_SUPPORTS_ABOUT", False)
+    assert geometry._scale_world(LegacyShape(), 2) == ("scaled", 2)
 
 
 def test_location_unknown_side_unavailable_view_and_missing_planned_view_fail_clearly():
