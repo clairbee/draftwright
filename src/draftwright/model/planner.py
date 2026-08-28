@@ -115,8 +115,9 @@ _CONVENTION = {
 @dataclass(frozen=True)
 class PlannedDimension:
     """A parameter plus its render *intent* — the planner's decision about how/whether
-    it is drawn, leaving the layout (zones/sides/coordinates) to the renderer
-    (ADR 0008 Amendment 4). `suppressed`/`reason` carry *model-level* suppression
+    it is drawn. An authored request may select a semantic view/side corridor; the renderer
+    and placement solve still own candidate geometry, capacity, and coordinates
+    (ADR 0008 Amendment 4 / ADR 0014). `suppressed`/`reason` carry *model-level* suppression
     (the planner sees the model, not the drawing-in-progress, so render-state
     suppression like "diameter already mentioned" stays in the renderer). `datum` is
     the reference a positional dim measures from, resolved from `param.refs` against
@@ -145,6 +146,10 @@ class PlannedDimension:
     # Per-intent display policy (#1349). The authoritative numeric value remains on ``param``;
     # legacy callout consumers use this field until they migrate to ``ApprovedDimension``.
     display_decimals: int | None = None
+    # Declarative projection/strip intent carried from the referential request.  Resolution
+    # happens once per compound group below; renderers never receive raw coordinates.
+    view: str | None = None
+    side: str | None = None
 
 
 # Correlated sets (ADR 0016 identity, tier 3): exact ``(feature kind, role)`` pairs
@@ -267,6 +272,7 @@ class DimensionGroup:
     feature: Feature
     view: str  # one view for the whole group
     units: tuple[AddressableDimension, ...]
+    side: str | None = None
 
     @property
     def dims(self) -> tuple[PlannedDimension, ...]:
@@ -966,14 +972,14 @@ def _authored_for(model, feature, param):
     return None
 
 
-def _check_display_policy_conflicts(model: PartModel) -> None:
-    """A semantic dimension cannot have two competing display authorities (#1349)."""
+def _check_intent_policy_conflicts(model: PartModel) -> None:
+    """A semantic dimension cannot have competing display or placement authorities."""
     requests = (
         model.authored_dimensions
         if model.authored_dimensions is not None
         else model.requested_dimensions
     )
-    seen: dict[tuple[int, str], int | None] = {}
+    seen: dict[tuple[int, str], tuple[int | None, str | None, str | None]] = {}
     for request in requests:
         targets: tuple[str, ...]
         if request.role == LOCATION_ROLE:
@@ -986,14 +992,72 @@ def _check_display_policy_conflicts(model: PartModel) -> None:
             )
         for parameter_id in targets:
             key = (id(request.feature), parameter_id)
-            previous = seen.get(key, request.display_decimals)
-            if key in seen and previous != request.display_decimals:
+            policy = (request.display_decimals, request.view, request.side)
+            previous = seen.get(key, policy)
+            if key in seen and previous != policy:
+                if previous[0] != policy[0]:
+                    raise ValueError(
+                        f"conflicting display precision for {parameter_id}: "
+                        f"{previous[0]!r} and {policy[0]!r}; repeat intent is idempotent "
+                        "only when its display policy agrees"
+                    )
                 raise ValueError(
-                    f"conflicting display precision for {parameter_id}: "
-                    f"{previous!r} and {request.display_decimals!r}; repeat intent is "
-                    "idempotent only when its display policy agrees"
+                    f"conflicting placement intent for {parameter_id}: "
+                    f"{previous[1:]!r} and {policy[1:]!r}; repeat intent is idempotent "
+                    "only when its placement policy agrees"
                 )
-            seen[key] = request.display_decimals
+            seen[key] = policy
+
+
+def _group_placement(feature: Feature, dims: list[PlannedDimension], planned_views=None):
+    """Resolve one view/side for a compound group, or reject an unrenderable intent."""
+    approved = [pd for pd in dims if not pd.suppressed]
+    views = {pd.view for pd in approved if pd.view is not None}
+    sides = {pd.side for pd in approved if pd.side is not None}
+    if len(views) > 1 or len(sides) > 1:
+        raise ValueError(
+            f"conflicting placement intent for one {feature.kind} callout: "
+            f"views={sorted(views)}, sides={sorted(sides)}"
+        )
+    requested_view = next(iter(views), None)
+    requested_side = next(iter(sides), None)
+    selected_view = requested_view or _group_view(feature, planned_views)
+    if requested_view is not None:
+        incompatible = [
+            pd.param.parameter_id
+            for pd in approved
+            if requested_view not in _parameter_view_preferences(feature, pd)
+        ]
+        if incompatible:
+            raise ValueError(
+                f"{feature.kind} dimension(s) {incompatible} cannot render in "
+                f"{requested_view!r}; supported view(s): "
+                f"{sorted(set().union(*(_parameter_view_preferences(feature, pd) for pd in approved)))}"
+            )
+        if planned_views is not None and requested_view not in set(planned_views):
+            raise ValueError(
+                f"requested dimension view {requested_view!r} is not in the planned views "
+                f"{sorted(set(planned_views))}"
+            )
+    if requested_side is not None:
+        supported = {
+            "plan": {"left", "right"},
+            "side": {"right"},
+            "front": {"below"},
+        }.get(selected_view or "", set())
+        if (
+            not isinstance(feature, HoleFeature | PatternFeature)
+            or requested_side not in supported
+        ):
+            choices = (
+                sorted(supported) if isinstance(feature, HoleFeature | PatternFeature) else []
+            )
+            raise ValueError(
+                f"{feature.kind} dimensions cannot render at "
+                f"{selected_view!r}/{requested_side!r}; supported sides for this renderer: "
+                f"{choices or 'none'}"
+            )
+    return selected_view, requested_side
 
 
 def authored_location_omitted(model, feature) -> bool:
@@ -1279,7 +1343,7 @@ def plan_dimensions(model: PartModel, *, planned_views=None) -> list[DimensionGr
     """Plan each feature's parameters into one `DimensionGroup` (anchor + single
     view + planned dims, each carrying its render intent — convention, model-level
     suppression, datum). No cross- or within-feature value de-duplication."""
-    _check_display_policy_conflicts(model)
+    _check_intent_policy_conflicts(model)
     if model.authored_dimensions is not None:
         _check_authored_targets(model)
     groups: list[DimensionGroup] = []
@@ -1336,10 +1400,12 @@ def plan_dimensions(model: PartModel, *, planned_views=None) -> list[DimensionGr
                     display_decimals=(
                         display_intent.display_decimals if display_intent is not None else None
                     ),
+                    view=display_intent.view if display_intent is not None else None,
+                    side=display_intent.side if display_intent is not None else None,
                 )
             )
         if dims:
-            selected_view = _group_view(feature, planned_views)
+            selected_view, selected_side = _group_placement(feature, dims, planned_views)
             groups.append(
                 DimensionGroup(
                     feature=feature,
@@ -1348,6 +1414,7 @@ def plan_dimensions(model: PartModel, *, planned_views=None) -> list[DimensionGr
                     # crossing the planner boundary when it is not actually selected.
                     view=selected_view or _preferred_group_view(feature),
                     units=_addressable(feature, dims),
+                    side=selected_side,
                 )
             )
     if planned_views is not None:

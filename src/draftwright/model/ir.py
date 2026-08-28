@@ -36,6 +36,58 @@ if TYPE_CHECKING:
 
 Point = tuple[float, float, float]
 CylinderSense = Literal["external", "internal"]
+PLACEMENT_VIEWS = frozenset({"front", "plan", "side"})
+PLACEMENT_SIDES = frozenset({"above", "below", "left", "right"})
+
+
+def validate_placement_intent(view: str | None, side: str | None, *, owner: str) -> None:
+    """Validate the shared declarative view/strip vocabulary.
+
+    Compatibility with a particular renderer is checked where the dimension kind and
+    projection are known.  Keeping the vocabulary check here also protects hand-built IR.
+    """
+    if view is not None and view not in PLACEMENT_VIEWS:
+        raise ValueError(f"{owner} view must be one of {sorted(PLACEMENT_VIEWS)} (got {view!r})")
+    if side is not None and side not in PLACEMENT_SIDES:
+        raise ValueError(f"{owner} side must be one of {sorted(PLACEMENT_SIDES)} (got {side!r})")
+
+
+def validate_authored_dimension_placement(
+    dimension_kind: str,
+    dominant_axis: str,
+    view: str | None,
+    side: str | None,
+    *,
+    owner: str,
+) -> None:
+    """Reject a view/side pair for which the authored-dimension renderer has no candidate."""
+    validate_placement_intent(view, side, owner=owner)
+    if view is None and side is None:
+        return
+    valid_pairs: tuple[tuple[str, str], ...]
+    if dimension_kind in ("diameter", "radius"):
+        end_view = {"X": "side", "Y": "front", "Z": "plan"}.get(dominant_axis)
+        valid_pairs = () if end_view is None else ((end_view, "above"), (end_view, "below"))
+    else:
+        valid_pairs = {
+            "X": (("front", "above"), ("front", "below")),
+            "Z": (("front", "right"), ("front", "left")),
+            "Y": (
+                ("side", "above"),
+                ("side", "below"),
+                ("plan", "left"),
+                ("plan", "right"),
+            ),
+        }.get(dominant_axis, ())
+    if not any(
+        (view is None or candidate_view == view) and (side is None or candidate_side == side)
+        for candidate_view, candidate_side in valid_pairs
+    ):
+        choices = ", ".join(f"{v}/{s}" for v, s in valid_pairs) or "none"
+        raise ValueError(
+            f"{owner} cannot render {dimension_kind}/{dominant_axis} at "
+            f"{view or '*'}/{side or '*'}; supported placement(s): {choices}"
+        )
 
 
 def _finite_point3(name: str, value) -> Point:
@@ -1679,7 +1731,20 @@ class AuthoredDimension:
     # value is enough to render or correlate a diameter; generic linear dimensions still
     # require two reference stations.
     cylindrical_refs: tuple[CylindricalReference, ...] = ()
+    # Declarative projection/strip intent. These select ordinary corridor candidates;
+    # they are not page coordinates and do not bypass placement solving (ADR 0012/0014).
+    view: str | None = None
+    side: str | None = None
     kind: ClassVar[str] = "authored_dimension"
+
+    def __post_init__(self) -> None:
+        validate_authored_dimension_placement(
+            self.dimension_kind,
+            self.dominant_axis,
+            self.view,
+            self.side,
+            owner="authored dimension",
+        )
 
     @property
     def pmi_kind(self) -> str:
@@ -1884,8 +1949,10 @@ class RequestedDimension:
     through ``render_locations(pinned=…)`` for location dims only. Adding a third,
     pre-build spelling would scatter one concept across three layers, the same way the
     corridor priority scale was scattered before #894 consolidated it. The convergence
-    is tracked separately; this type stays free of placement state. It carries selection plus
-    optional display policy, while the measurement itself remains referential.
+    is tracked separately. ``view``/``side`` are not emphasis or frozen placement: they
+    select a semantic corridor whose candidates still enter the normal solve. This type
+    carries selection plus optional display/corridor policy, while the measurement itself
+    remains referential and coordinates remain absent.
     """
 
     feature: Feature
@@ -1898,8 +1965,18 @@ class RequestedDimension:
     #: identity still come from ``feature``; this controls only the compiler-owned text at
     #: the rendering boundary (#1349).  ``None`` preserves the existing automatic formatting.
     display_decimals: int | None = None
+    #: Optional semantic projection/strip preference. The planner validates renderer
+    #: compatibility; the placement engine still owns coordinates.
+    view: str | None = None
+    side: str | None = None
 
     def __post_init__(self) -> None:
+        validate_placement_intent(self.view, self.side, owner="requested dimension")
+        if self.role == "location" and (self.view is not None or self.side is not None):
+            raise ValueError(
+                "placement intent is unavailable for location dimensions: one location "
+                "may compile into multiple directional values"
+            )
         decimals = self.display_decimals
         if decimals is None:
             return

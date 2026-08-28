@@ -4,6 +4,12 @@
 
 ### Added
 
+- Referential and measured Sheet dimensions accept optional `view=` / `side=` placement
+  intent. Supported pairs survive IR/compiler and generated-script round trips, constrain
+  ordinary corridor candidates without exposing page coordinates, and fail clearly when a
+  renderer cannot honour the requested view/strip. Compound hole callouts can therefore be
+  authored to opposite sides of one end view while retaining normal solve and lint behavior
+  (#563).
 - Feature-linked Sheet notes can explicitly satisfy one or more canonical requirement ids with
   `.note(..., satisfies=(...))`. Placed structured notes retain each requirement's identity in
   coverage reports and generated scripts without masquerading as dimensions or parsing prose;

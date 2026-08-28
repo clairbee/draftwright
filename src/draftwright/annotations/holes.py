@@ -2299,8 +2299,9 @@ def _carve_and_place(cands_in, intervals, key_prefix_local, ctx: _StripCtx, *, a
 def _assemble_view_callouts(a, view_of_axis, groups, feature_keys, only, draft):
     """The ``by_view`` callout-assembly loop, promoted out of ``_annotate_holes`` (#638).
 
-    Returns ``(by_view, feat_of_callout)`` — one ``(locs, dia, callout, pat)`` spec per
-    surviving hole/pattern group keyed by target view, plus the callout→feature ``id()`` map.
+    Returns ``(by_view, feat_of_callout, side_of_callout)`` — one
+    ``(locs, dia, callout, pat)`` spec per surviving hole/pattern group keyed by target view,
+    plus callout→feature and callout→authored-side ``id()`` maps.
 
     The IR is the single grouping + geometry authority (#238 B2/B3, Amendment 6):
     build_part_model already split the holes into one DimensionGroup per pattern +
@@ -2314,6 +2315,7 @@ def _assemble_view_callouts(a, view_of_axis, groups, feature_keys, only, draft):
     # flows unchanged from here through the by_view/queue tuples to both emit sites, so an
     # id() map tags it there without threading a feature through the placement machinery.
     _feat_of_callout: dict[int, object] = {}
+    _side_of_callout: dict[int, str] = {}
     for g in groups:
         feat = g.feature
         if not isinstance(feat, HoleFeature | PatternFeature):
@@ -2343,10 +2345,15 @@ def _assemble_view_callouts(a, view_of_axis, groups, feature_keys, only, draft):
         callout = callout_from_spec(spec, draft, count)
         if callout is None:
             continue
-        view = view_of_axis[feat.frame.axis][0]
+        # The planner has validated this semantic projection against the renderer.  With no
+        # authored intent it is the same axis-derived view as before; with one it is the
+        # requested projection, still placed through the normal corridor solve.
+        view = g.view
         _feat_of_callout[id(callout)] = feat  # provenance (#408)
+        if g.side is not None:
+            _side_of_callout[id(callout)] = g.side
         by_view.setdefault(view, []).append((locs, dia, callout, pat))
-    return by_view, _feat_of_callout
+    return by_view, _feat_of_callout, _side_of_callout
 
 
 def _hc_name(only, view, i, hc_used):
@@ -2495,6 +2502,7 @@ def _place_queue(
     band_intervals,
     elbow_dx,
     feat_of_callout,
+    side_of_callout,
     hc_used,
     only,
     place_furniture,
@@ -2655,6 +2663,7 @@ def _place_queue(
         for s in queue:
             _locs, dia, callout, feat, natural_y, _rep = s
             owner = feat_of_callout.get(id(callout))
+            requested_side = side_of_callout.get(id(callout))
             ys: list[float] = []
             for y in (
                 source_final_y.get(id(s)),
@@ -2671,7 +2680,12 @@ def _place_queue(
                 if not any(abs(y - prior) <= 1e-6 for prior in ys):
                     ys.append(y)
 
-            def _raw_candidates(_s=s, _ys=tuple(ys), _owner=owner):
+            def _raw_candidates(
+                _s=s,
+                _ys=tuple(ys),
+                _owner=owner,
+                _requested_side=requested_side,
+            ):
                 for y in _ys:
                     tip, elbow = _leader_anchors(
                         _s,
@@ -2690,20 +2704,21 @@ def _place_queue(
                 # expose the opposite view boundary so a required callout can
                 # route clear rather than silently accepting a new Policy-B
                 # crossing.  The legacy resource floor below remains unchanged.
-                other_side = "left" if side == "right" else "right"
-                other_edge = vb[0] if other_side == "left" else vb[2]
-                for y in _ys:
-                    tip, elbow = _leader_anchors(
-                        _s,
-                        other_edge,
-                        other_side,
-                        y,
-                        to_page,
-                        elbow_dx,
-                        draft,
-                        a.SCALE,
-                    )
-                    yield (tip, elbow, _owner)
+                if _requested_side is None:
+                    other_side = "left" if side == "right" else "right"
+                    other_edge = vb[0] if other_side == "left" else vb[2]
+                    for y in _ys:
+                        tip, elbow = _leader_anchors(
+                            _s,
+                            other_edge,
+                            other_side,
+                            y,
+                            to_page,
+                            elbow_dx,
+                            draft,
+                            a.SCALE,
+                        )
+                        yield (tip, elbow, _owner)
 
             legacy_y = source_final_y.get(id(s))
 
@@ -2917,6 +2932,7 @@ def _place_planside_callouts(
     ctx,
     hc_used,
     feat_of_callout,
+    side_of_callout,
     only,
     place_furniture,
     plan,
@@ -3006,6 +3022,11 @@ def _place_planside_callouts(
         )
         can_right = (edge_right + elbow_dx) + gap + w <= right_limit
         can_left = edge_left is not None and (edge_left - elbow_dx) - gap - w >= a.margin
+        requested_side = side_of_callout.get(id(callout))
+        if requested_side == "right":
+            can_left = False
+        elif requested_side == "left":
+            can_right = False
 
         if not can_right and not can_left:
             _log.info("Hole callout ø%s skipped (no room)", _fmt(dia))
@@ -3038,6 +3059,7 @@ def _place_planside_callouts(
         band_intervals=band_intervals,
         elbow_dx=elbow_dx,
         feat_of_callout=feat_of_callout,
+        side_of_callout=side_of_callout,
         hc_used=hc_used,
         only=only,
         place_furniture=place_furniture,
@@ -3061,6 +3083,7 @@ def _place_planside_callouts(
             band_intervals=band_intervals,
             elbow_dx=elbow_dx,
             feat_of_callout=feat_of_callout,
+            side_of_callout=side_of_callout,
             hc_used=hc_used,
             only=only,
             place_furniture=place_furniture,
@@ -3126,7 +3149,7 @@ def _annotate_holes(
         for g in groups
     )
 
-    by_view, feat_of_callout = _assemble_view_callouts(
+    by_view, feat_of_callout, side_of_callout = _assemble_view_callouts(
         a, view_of_axis, groups, feature_keys, only, draft
     )
 
@@ -3176,6 +3199,7 @@ def _annotate_holes(
                 ctx=ctx,
                 hc_used=hc_used,
                 feat_of_callout=feat_of_callout,
+                side_of_callout=side_of_callout,
                 only=only,
                 place_furniture=place_furniture,
                 plan=plan,

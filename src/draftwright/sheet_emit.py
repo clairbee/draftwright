@@ -460,6 +460,10 @@ def _measured_dimension_line(f) -> str:
         kw.append(f"rendering_blockers={f.rendering_blockers!r}")
     if getattr(f, "cylindrical_refs", ()):
         kw.append(f"cylindrical_refs={_cylindrical_refs_arg(f.cylindrical_refs)}")
+    if getattr(f, "view", None) is not None:
+        kw.append(f"view={f.view!r}")
+    if getattr(f, "side", None) is not None:
+        kw.append(f"side={f.side!r}")
     # `measured_dimension` since #873 — a generated script must not emit the transitional
     # overload, or every regenerated AP242 script would arrive pre-deprecated.
     return "sheet.measured_dimension(" + ", ".join(kw) + ")"
@@ -1251,6 +1255,13 @@ def _mirrored_requests(declared, declared_envelope=None):
 
 def _requested_display_decimals(model, feature, role, discriminator) -> int | None:
     """Precision attached to an augmenting intent mirrored as an authored line (#1349)."""
+    return _requested_intent_policy(model, feature, role, discriminator)[0]
+
+
+def _requested_intent_policy(
+    model, feature, role, discriminator
+) -> tuple[int | None, str | None, str | None]:
+    """Display and placement policy attached to an augmenting referential intent."""
     for request in model.requested_dimensions:
         if request.feature is not feature:
             continue
@@ -1263,8 +1274,12 @@ def _requested_display_decimals(model, feature, role, discriminator) -> int | No
             request.discriminator == discriminator or role.endswith(f".{request.discriminator}")
         ):
             continue
-        return cast(int | None, request.display_decimals)
-    return None
+        return (
+            cast(int | None, request.display_decimals),
+            cast(str | None, request.view),
+            cast(str | None, request.side),
+        )
+    return None, None, None
 
 
 def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) -> list[str]:
@@ -1312,7 +1327,7 @@ def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) ->
         ]
     requests = (
         [
-            (a.feature, a.role, a.discriminator, a.display_decimals)
+            (a.feature, a.role, a.discriminator, a.display_decimals, a.view, a.side)
             for a in model.authored_dimensions
         ]
         if model.authored_dimensions is not None
@@ -1325,7 +1340,7 @@ def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) ->
         else [
             (
                 *request,
-                _requested_display_decimals(model, *request),
+                *_requested_intent_policy(model, *request),
             )
             for request in _mirrored_requests(model, synthesised_envelope)
         ]
@@ -1347,7 +1362,7 @@ def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) ->
         # automatic one does, rather than in prose a reader has to trust.
         "sheet.authored_dimensions()",
     ]
-    for feature, role, discriminator, display_decimals in requests:
+    for feature, role, discriminator, display_decimals, view, side in requests:
         name = names.get(id(feature))
         if name is None:
             # Reachable for a kind with no declarative verb (its line is a comment, so it
@@ -1370,7 +1385,12 @@ def _dimension_block(model, names: dict[int, str], synthesised_envelope=None) ->
             if discriminator and "." not in role[role.find(".") + 1 :]
             else ""
         )
-        line = f'sheet.dimension({name}, "{role}"{axis})'
+        placement = ""
+        if view is not None:
+            placement += f', view="{view}"'
+        if side is not None:
+            placement += f', side="{side}"'
+        line = f'sheet.dimension({name}, "{role}"{axis}{placement})'
         if display_decimals is not None:
             line += f".format(decimals={display_decimals})"
         out.append(line)

@@ -5410,6 +5410,16 @@ def _pmi_front_linear(dwg, a, ctx, rec, ax, label, name, primary, secondary, cen
         "right": a.fv_zones.right,
         "left": a.fv_zones.left,
     }
+    if rec.view is not None or rec.side is not None:
+        sides = [s for s in (primary, secondary) if rec.side is None or rec.side == s]
+        return _pmi_queue_options(
+            dwg,
+            ctx,
+            [_pmi_dim_spec(p1, p2, zones[s], label, name, "front", s, draft) for s in sides],
+            ax,
+            label,
+            rec,
+        )
     placed = False
     if avg >= center:
         placed = _pmi_queue_options(
@@ -5486,6 +5496,12 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
             u, v = cfg["centre"](cx_f, cy_f, cz_f)
             if half_span_pg >= _MIN_INPLACE_BORE_HALF_MM:
                 p1, p2 = cfg["span"](cx_f, cy_f, cz_f, lo, hi)
+                order = tuple(
+                    s
+                    for s in cfg["order"]
+                    if (rec.view is None or rec.view == cfg["view"])
+                    and (rec.side is None or rec.side == s)
+                )
                 placed = _pmi_queue_options(
                     dwg,
                     ctx,
@@ -5493,13 +5509,19 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
                         _pmi_dim_spec(
                             p1, p2, cfg["zones"][s], label, name_d, cfg["view"], s, draft
                         )
-                        for s in cfg["order"]
+                        for s in order
                     ],
                     ax,
                     label,
                     rec,
                 )
             else:
+                leader_order = tuple(
+                    s
+                    for s in cfg["leader_order"]
+                    if (rec.view is None or rec.view == cfg["view"])
+                    and (rec.side is None or rec.side == s)
+                )
                 placed = _pmi_queue_options(
                     dwg,
                     ctx,
@@ -5513,7 +5535,7 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
                             s,
                             draft,
                         )
-                        for s in cfg["leader_order"]
+                        for s in leader_order
                     ],
                     ax,
                     label,
@@ -5533,6 +5555,48 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
             _log.debug("PMI dim[%d] Z: degenerate reference", idx)
             _record_pmi_unrenderable(dwg, label, rec, ctx=ctx)
             return False
+
+    elif ax == "Y" and (rec.view is not None or rec.side is not None):
+        # A degenerate reference (no witness in EITHER candidate view) is a validation
+        # failure, not a placement one — report it distinctly (#562).
+        if (
+            _pmi_witness_from_bbox(rec, "side", a) is None
+            and _pmi_witness_from_bbox(rec, "plan", a) is None
+        ):
+            _log.debug("PMI dim[%d] Y: degenerate reference", idx)
+            _record_pmi_unrenderable(dwg, label, rec, ctx=ctx)
+            return False
+        # An authored target is an exact view/strip selection, still queued through the
+        # ordinary corridor solve. Build only matching candidates.
+        options = []
+        for target_view, target_side in (
+            ("side", "above"),
+            ("side", "below"),
+            ("plan", "left"),
+            ("plan", "right"),
+        ):
+            if rec.view is not None and rec.view != target_view:
+                continue
+            if rec.side is not None and rec.side != target_side:
+                continue
+            wp = _pmi_witness_from_bbox(rec, target_view, a)
+            if wp is None:
+                continue
+            p1, p2, _ = wp
+            zones = a.sv_zones if target_view == "side" else a.pv_zones
+            options.append(
+                _pmi_dim_spec(
+                    p1,
+                    p2,
+                    getattr(zones, target_side),
+                    label,
+                    name_y,
+                    target_view,
+                    target_side,
+                    draft,
+                )
+            )
+        placed = _pmi_queue_options(dwg, ctx, options, ax, label, rec)
 
     elif ax == "Y":
         # A degenerate reference (no witness in EITHER candidate view) is a validation

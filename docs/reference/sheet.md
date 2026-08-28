@@ -95,11 +95,15 @@ source = emit_sheet_script(
 referential `DimensionIntent`. The handle never carries a replacement nominal and never chooses
 page coordinates. Use `format(decimals=n)` to preserve between 0 and 15 decimal places in the
 printed nominal while reconciliation, tolerance, suppression and provenance continue to read the
-numeric parameter from the feature. Trailing zeroes are intentional manufacturing display text:
+numeric parameter from the feature. Optional `view="front|plan|side"` and
+`side="above|below|left|right"` arguments select a supported semantic corridor when authored
+routing must override the derived default; the normal placement solve still chooses coordinates
+and reports capacity/crossing failures. Trailing zeroes are intentional manufacturing display text:
 
 ```python
 sheet.authored_dimensions()
 sheet.dimension(envelope, "width.length").format(decimals=2)  # 13.5 prints as 13.50
+sheet.dimension(tapped_hole, "bore.diameter", view="plan", side="left")
 ```
 
 ::: draftwright.sheet.DimensionIntent
