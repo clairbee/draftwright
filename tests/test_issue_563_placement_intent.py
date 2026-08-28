@@ -6,7 +6,7 @@ import warnings
 from typing import cast
 
 import pytest
-from build123d import Align, Box, Cylinder, Pos
+from build123d import Align, Box, Cylinder, Pos, Rot
 
 from draftwright import Sheet
 from draftwright.model import DimensionParameterId
@@ -134,6 +134,65 @@ def test_augmenting_referential_intent_is_preserved_when_the_emitter_mirrors_it(
     assert 'sheet.dimension(hole1, "bore.diameter", view="plan", side="left")' in source
 
 
+def test_independent_envelope_dimensions_honour_distinct_view_overrides():
+    sheet = Sheet.from_part(Box(40, 20, 10), page="A3").take_over(
+        dimensions="authored",
+        principal_views="automatic",
+        derived_views="automatic",
+    )
+    envelope = next(feature for feature in sheet.features if feature.kind == "envelope")
+    sheet.dimension(envelope, "width.length", view="front")
+    sheet.dimension(envelope, "depth.length", view="side")
+
+    planned = next(group for group in plan_dimensions(sheet.model()) if group.feature is envelope)
+    assert {(pd.param.parameter_id, pd.view) for pd in planned.dims if not pd.suppressed} == {
+        ("width.length", "front"),
+        ("depth.length", "side"),
+    }
+    compiled = next(
+        group
+        for group in compile_dimensions(sheet.model()).groups
+        if group.feature_kind == "envelope"
+    )
+    assert {(pd.parameter_id, pd.view) for pd in compiled.dims} == {
+        ("width.length", "front"),
+        ("depth.length", "side"),
+    }
+
+    drawing = sheet.build()
+    assert drawing.view_of("m_env_width") == "front"
+    assert drawing.view_of("m_env_depth") == "side"
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
+def test_augmenting_envelope_view_policy_builds_without_moving_its_siblings():
+    sheet = Sheet.from_part(Box(40, 20, 10), page="A3")
+    envelope = next(feature for feature in sheet.features if feature.kind == "envelope")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sheet.auto_dimensions()
+        sheet.add_dimension(envelope, "width.length", view="front")
+
+    drawing = sheet.build()
+    assert drawing.view_of("m_env_width") == "front"
+    assert drawing.view_of("m_env_depth") == "side"
+
+
+def test_referential_override_vetoes_an_automatic_view_reduction():
+    part = Rot(0, 90, 0) * Cylinder(10, 40)
+    sheet = Sheet.from_part(part, page="A3").take_over(
+        dimensions="authored",
+        principal_views="automatic",
+        derived_views="automatic",
+    )
+    envelope = next(feature for feature in sheet.features if feature.kind == "envelope")
+    sheet.dimension(envelope, "width.length", view="plan")
+
+    drawing = sheet.build()
+    assert "plan" in drawing.views
+    assert drawing.view_decision["status"] == "retained_for_requirements"
+
+
 def _measured_sheet(*, view=None, side=None) -> Sheet:
     sheet = Sheet(Box(40, 20, 10)).authored_dimensions()
     sheet.measured_dimension(
@@ -174,6 +233,40 @@ def test_measured_dimension_uses_requested_corridor_and_round_trips():
 def test_no_measured_override_keeps_existing_geometric_derivation():
     annotation = _measured_sheet().build().get_annotation("pmi_z_0")
     assert annotation._dw_spec.side == "right"
+
+
+def test_view_only_measured_override_preserves_the_derived_side():
+    def build(view):
+        sheet = Sheet(Box(60, 40, 20), page="A3").authored_dimensions()
+        sheet.measured_dimension(
+            kind="linear",
+            value=10,
+            label="10",
+            dominant_axis="Z",
+            ref_bbox=(-25, -2, 0, -15, 2, 10),
+            ref_pts=[(-20, 0, 0), (-20, 0, 10)],
+            view=view,
+        )
+        return sheet.build().get_annotation("pmi_z_0")._dw_spec.side
+
+    assert build(None) == build("front") == "left"
+
+
+def test_front_above_measured_intent_participates_in_view_composition():
+    sheet = Sheet(Box(60, 40, 20), page="A3").authored_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=40,
+        label="40",
+        dominant_axis="X",
+        ref_bbox=(-20, -2, 4, 20, 2, 8),
+        ref_pts=[(-20, 0, 6), (20, 0, 6)],
+        view="front",
+        side="above",
+    )
+    drawing = sheet.build()
+    assert drawing.get_annotation("pmi_x_0")._dw_spec.side == "above"
+    assert not [issue for issue in drawing.lint() if issue.code == "pmi_dropped"]
 
 
 def test_y_and_diameter_measured_intents_use_their_supported_exact_corridors():
@@ -264,5 +357,36 @@ def test_location_unknown_side_unavailable_view_and_missing_planned_view_fail_cl
     missing_view = Sheet(Box(40, 40, 10)).authored_dimensions()
     bore = missing_view.hole(diameter=4, at=(0, 0, 0), axis="z")
     missing_view.dimension(bore, "bore.diameter", view="plan")
-    with pytest.raises(ValueError, match="not in the planned views"):
+    with pytest.raises(ValueError, match="cannot be shown"):
         plan_dimensions(missing_view.model(), planned_views=("front",))
+
+    measured_missing = Sheet(Box(40, 20, 10)).authored_dimensions().authored_views()
+    measured_missing.view("front")
+    measured_missing.measured_dimension(
+        kind="diameter",
+        value=10,
+        label="ø10",
+        dominant_axis="Z",
+        ref_bbox=(-5, -5, 0, 5, 5, 10),
+        ref_pts=[(-5, 0, 5), (5, 0, 5)],
+        view="plan",
+        side="above",
+    )
+    with pytest.raises(ValueError, match="cannot be shown"):
+        measured_missing.build()
+
+
+def test_pattern_pitch_placement_policy_is_rejected_instead_of_moving_the_callout():
+    sheet = Sheet(Box(40, 20, 10)).authored_dimensions()
+    sheet.hole(diameter=4, at=(-10, 0, 0), axis="z")
+    pattern = sheet.pattern(
+        sheet.features[-1],
+        kind="linear",
+        count=3,
+        pitch=10,
+        direction=(1, 0, 0),
+        at=(-10, 0, 0),
+    )
+    sheet.dimension(pattern, "pitch.length", view="plan", side="left")
+    with pytest.raises(ValueError, match="unavailable.*pattern pitch"):
+        plan_dimensions(sheet.model())

@@ -84,6 +84,7 @@ from draftwright.projection import (
 )
 from draftwright.view_plan import (
     ARRANGEMENTS,
+    UncoveredViewRequirement,
     ViewConstraints,
     ViewPlanIncomplete,
     resolve_from_analysis,
@@ -1193,6 +1194,36 @@ def _build_drawing_once(
         )
 
     a = analyse(reuse=_analysis_base, views=_views)
+    if _views is not None:
+        # Measured dimensions are model-routed (ADR 0015) and therefore do not enter
+        # plan_dimensions' requirement check.  An authored principal set is nevertheless
+        # a hard constraint: reject a measured mark targeting an absent projection before
+        # corridor placement can misreport the contradiction as a capacity drop.
+        explicit_model = (
+            _coerce_model(model, a.part, decorations, requested, authored)
+            if model is not None
+            else cast("PartModel", a.model if a.model is not None else build_model(a))
+        )
+        uncovered_measured = []
+        for feature in explicit_model.features:
+            feature_view = getattr(feature, "view", None)
+            if (
+                getattr(feature, "kind", None) != "authored_dimension"
+                or not isinstance(feature_view, str)
+                or feature_view in set(_views)
+            ):
+                continue
+            uncovered_measured.append(
+                UncoveredViewRequirement(
+                    identity=feature,
+                    label=getattr(feature, "source_id", "") or "measured_dimension",
+                    preferred_view=feature_view,
+                    eligible_views=(feature_view,),
+                    reason=f"is explicitly placed in `{feature_view}`",
+                )
+            )
+        if uncovered_measured:
+            raise ViewPlanIncomplete(_views, uncovered_measured)
     view_attempts: tuple[dict[str, object], ...] = ()
     view_status = "selected"
     if _select_automatic_views and _views is None and auto_dims:

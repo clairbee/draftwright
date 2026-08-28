@@ -188,6 +188,11 @@ class ApprovedDimension:
     #: Step details use presence of this fact to crop around correspondent stations rather
     #: than treating a fallback envelope-edge span as physical evidence (#915).
     support_bounds: tuple[float, float, float, float] | None = None
+    #: Optional semantic placement policy for this mark.  Most compound renderers use the
+    #: group policy; independent marks such as envelope extents consume these per-dimension
+    #: fields because one feature's dimensions legitimately scatter across views.
+    view: str | None = None
+    side: str | None = None
 
     @property
     def parameter_id(self) -> str:
@@ -1397,6 +1402,8 @@ def _compile_groups(planned) -> tuple[list[ApprovedGroup], list[Omission]]:
                 discriminator=pd.param.discriminator,
                 tolerance=pd.param.tolerance,
                 display_decimals=pd.display_decimals,
+                view=pd.view,
+                side=pd.side,
             )
             for pd in g.dims
             if not pd.suppressed

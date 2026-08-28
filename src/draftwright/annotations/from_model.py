@@ -3520,7 +3520,11 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         extent = env.dim(role=role)
         if extent is None or extent.span is None:
             continue
-        view = views_showing(axis, dwg.views, horizontal=True)
+        # A caller may override the derived view for this independent extent.  The planner
+        # has already proved that the selected projection can render the measurement and is
+        # present in the resolved view plan; placement still goes through the normal strip
+        # candidate solve below.
+        view = extent.view or views_showing(axis, dwg.views, horizontal=True)
         if view is None:
             # No planned view can carry it. Reported against the measurement, never dropped
             # in silence (ADR 0016 Amdt 6) — and this is exactly what the ADR 0018
@@ -4939,7 +4943,9 @@ def _record_pmi_drop(ctx, dwg, ax, label, rec):
     dominant-axis table above (X/Z→front, Y→side primary). Conflating the two
     mislabels every dropped bore diameter/radius (review finding, #351 PR-4a).
     """
-    if rec.pmi_kind in ("diameter", "radius"):
+    if rec.view is not None:
+        view = rec.view
+    elif rec.pmi_kind in ("diameter", "radius"):
         view = {"Z": "plan", "X": "side", "Y": "front"}.get(ax, "front")
     else:
         view = "front" if ax in ("X", "Z") else "side"
@@ -5410,8 +5416,8 @@ def _pmi_front_linear(dwg, a, ctx, rec, ax, label, name, primary, secondary, cen
         "right": a.fv_zones.right,
         "left": a.fv_zones.left,
     }
-    if rec.view is not None or rec.side is not None:
-        sides = [s for s in (primary, secondary) if rec.side is None or rec.side == s]
+    if rec.side is not None:
+        sides = [s for s in (primary, secondary) if rec.side == s]
         return _pmi_queue_options(
             dwg,
             ctx,
@@ -5566,25 +5572,23 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
             _log.debug("PMI dim[%d] Y: degenerate reference", idx)
             _record_pmi_unrenderable(dwg, label, rec, ctx=ctx)
             return False
-        # An authored target is an exact view/strip selection, still queued through the
-        # ordinary corridor solve. Build only matching candidates.
+        # A side override selects an exact strip. A view-only override keeps the ordinary
+        # geometry-derived side within that projection instead of changing an unspecified
+        # policy merely because its sibling field was supplied.
+        target_view = rec.view or ("side" if rec.side in {"above", "below"} else "plan")
+        wp = _pmi_witness_from_bbox(rec, target_view, a)
         options = []
-        for target_view, target_side in (
-            ("side", "above"),
-            ("side", "below"),
-            ("plan", "left"),
-            ("plan", "right"),
-        ):
-            if rec.view is not None and rec.view != target_view:
-                continue
-            if rec.side is not None and rec.side != target_side:
-                continue
-            wp = _pmi_witness_from_bbox(rec, target_view, a)
-            if wp is None:
-                continue
-            p1, p2, _ = wp
+        if wp is not None:
+            p1, p2, avg = wp
             zones = a.sv_zones if target_view == "side" else a.pv_zones
-            options.append(
+            target_sides: tuple[str, ...]
+            if rec.side is not None:
+                target_sides = (rec.side,)
+            elif target_view == "side":
+                target_sides = ("above", "below") if avg >= a.SV_Y else ("below",)
+            else:
+                target_sides = ("right", "left") if avg >= a.PV_X else ("left", "right")
+            options = [
                 _pmi_dim_spec(
                     p1,
                     p2,
@@ -5595,7 +5599,8 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
                     target_side,
                     draft,
                 )
-            )
+                for target_side in target_sides
+            ]
         placed = _pmi_queue_options(dwg, ctx, options, ax, label, rec)
 
     elif ax == "Y":

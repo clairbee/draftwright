@@ -1012,6 +1012,43 @@ def _check_intent_policy_conflicts(model: PartModel) -> None:
 def _group_placement(feature: Feature, dims: list[PlannedDimension], planned_views=None):
     """Resolve one view/side for a compound group, or reject an unrenderable intent."""
     approved = [pd for pd in dims if not pd.suppressed]
+
+    # An envelope group is a feature-level compiler container, not one compound mark:
+    # width, depth, and height are independent dimensions which intentionally scatter
+    # across views (ADR 0016).  Validate each requested view independently and preserve it
+    # on the PlannedDimension; forcing them through the one-callout policy below would
+    # reject a perfectly valid width/front + depth/side pair.
+    if feature.kind == "envelope":
+        for pd in approved:
+            if pd.side is not None:
+                raise ValueError(
+                    f"envelope dimensions cannot render at {pd.view!r}/{pd.side!r}; "
+                    "supported sides for this renderer: none"
+                )
+            if pd.view is None:
+                continue
+            eligible_views = _parameter_view_preferences(feature, pd)
+            if pd.view not in eligible_views:
+                raise ValueError(
+                    f"envelope dimension {pd.param.parameter_id!r} cannot render in "
+                    f"{pd.view!r}; supported view(s): {list(eligible_views)}"
+                )
+        return _group_view(feature, planned_views), None
+
+    unsupported_pattern_intents = [
+        pd.param.parameter_id
+        for pd in approved
+        if isinstance(feature, PatternFeature)
+        and pd.param.role in {"pitch", "grid_pitch"}
+        and (pd.view is not None or pd.side is not None)
+    ]
+    if unsupported_pattern_intents:
+        raise ValueError(
+            "placement intent is unavailable for independently rendered pattern "
+            f"pitch dimension(s) {unsupported_pattern_intents}; omit view/side and let "
+            "the pitch renderer derive placement"
+        )
+
     views = {pd.view for pd in approved if pd.view is not None}
     sides = {pd.side for pd in approved if pd.side is not None}
     if len(views) > 1 or len(sides) > 1:
@@ -1033,11 +1070,6 @@ def _group_placement(feature: Feature, dims: list[PlannedDimension], planned_vie
                 f"{feature.kind} dimension(s) {incompatible} cannot render in "
                 f"{requested_view!r}; supported view(s): "
                 f"{sorted(set().union(*(_parameter_view_preferences(feature, pd) for pd in approved)))}"
-            )
-        if planned_views is not None and requested_view not in set(planned_views):
-            raise ValueError(
-                f"requested dimension view {requested_view!r} is not in the planned views "
-                f"{sorted(set(planned_views))}"
             )
     if requested_side is not None:
         supported = {
@@ -1236,7 +1268,14 @@ def _uncovered_group_requirements(
             # A correlated unit is one ADR 0016 identity.  Every member must be renderable;
             # report the unit once at the first unmet member rather than inflate the count.
             for pd in approved:
-                preferences = _parameter_view_preferences(group.feature, pd)
+                # An authored override is a hard requirement, not merely another eligible
+                # projection. Let ViewPlanIncomplete reject an automatic reduction that
+                # omitted it, so the builder can retain the requirement-preserving set.
+                preferences = (
+                    (pd.view,)
+                    if pd.view is not None
+                    else _parameter_view_preferences(group.feature, pd)
+                )
                 if planned.intersection(preferences):
                     continue
                 identity = DimensionId(group.feature, unit.id)

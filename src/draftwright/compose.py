@@ -341,6 +341,7 @@ class StripDepths:
     left: float  # horizontal corridor left of FV/PV
     top: float = 0.0  # band above PV for tiered X-location dims (#121)
     pv_halo: float = 0.0  # balloon standoff band reserved around the plan view (#111)
+    fv_top: float = 0.0  # authored X-linear dimensions above the front view (#563)
 
 
 def _measure_strips(
@@ -437,6 +438,17 @@ def _compose_anno_boxes(
             AnnoBox("right", _est_right_strip_depth(n_steps, n_boss_h) + z_authored * slot)
         )
         boxes.append(AnnoBox("left", _STRIP_GAP + z_authored * slot))
+    x_front_above = sum(
+        1
+        for f in model.features
+        if f.kind == "authored_dimension"
+        and f.dominant_axis == "X"
+        and getattr(f, "dimension_kind", None) not in ("diameter", "radius", "angular")
+        and getattr(f, "view", None) == "front"
+        and getattr(f, "side", None) == "above"
+    )
+    if x_front_above:
+        boxes.append(AnnoBox("front_above", _STRIP_GAP + x_front_above * _SLOT_DIM_STEP))
     above = _est_pv_above_depth(model, font_size, pad_around_text)
     if above > 0:
         boxes.append(AnnoBox("above", above))  # tiered X-location dims above PV (#121)
@@ -460,6 +472,7 @@ def _footprint_from_boxes(boxes: list[AnnoBox]) -> StripDepths:
         left=max(_DIM_PAD, deepest("left")),
         top=deepest("above"),
         pv_halo=deepest("plan_halo"),
+        fv_top=deepest("front_above"),
     )
 
 
@@ -899,7 +912,7 @@ def _compose_view_blocks(
         "front": ViewBlock(
             fv_hw,
             fv_hh,
-            top=DIM_PAD - pv_below,
+            top=max(DIM_PAD - pv_below, strips.fv_top if strips else 0.0),
             right=gap_fv_sv,
             bottom=DIM_PAD,
             left=gap_left,
