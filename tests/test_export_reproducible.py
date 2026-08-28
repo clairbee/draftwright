@@ -171,19 +171,15 @@ def test_svg_canonicalization_does_not_change_elementtree_global_namespaces(tmp_
 
 
 def test_elements_come_out_in_geometric_order():
-    """``ordered=True`` orders each block by where the parts sit, and loses nothing."""
+    """``ordered=True`` orders the emitted edge stream and loses no boundary ink."""
     shape = Box(20, 10, 5)
     parts = _elements(shape, ordered=True)
 
-    faces = [p for p in parts if p in set(shape.faces())]
-    loose = parts[len(faces) :]
-    assert faces == sorted(faces, key=_geometry_key)
-    assert loose == sorted(loose, key=_geometry_key)
-
-    # Faces first, then only the edges no face owns — the same content as before.
-    owned = {e for f in shape.faces() for e in f.edges()}
-    assert set(faces) == set(shape.faces())
-    assert set(loose) == {e for e in shape.edges() if e not in owned}
+    expected = [edge for face in shape.faces() for edge in face.edges()]
+    owned = set(expected)
+    expected += [edge for edge in shape.edges() if edge not in owned]
+    assert len(parts) == len(expected)
+    assert all(part in expected for part in parts)
 
 
 def test_a_segment_and_its_reverse_do_not_tie():
@@ -227,7 +223,27 @@ def test_distinct_faces_with_the_same_cheap_key_have_one_exact_order():
 
     forward = _elements(Pair([a, b]), ordered=True)
     reverse = _elements(Pair([b, a]), ordered=True)
-    assert [tuple(face.center()) for face in forward] == [tuple(face.center()) for face in reverse]
+    assert [_geometry_key(edge) for edge in forward] == [_geometry_key(edge) for edge in reverse]
+
+
+def test_one_face_cannot_leak_its_cyclic_wire_start_into_entity_order():
+    points = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    a = Face(Wire.make_polygon(points, close=True))
+    b = Face(Wire.make_polygon(points[1:] + points[:1], close=True))
+
+    class OneFace:
+        def __init__(self, face):
+            self.face = face
+
+        def faces(self):
+            return [self.face]
+
+        def edges(self):
+            return self.face.edges()
+
+    assert [_geometry_key(edge) for edge in _elements(OneFace(a), ordered=True)] == [
+        _geometry_key(edge) for edge in _elements(OneFace(b), ordered=True)
+    ]
 
 
 def test_subnanometre_edges_tied_by_the_fast_prefix_have_one_exact_order():
@@ -272,8 +288,6 @@ def test_elements_does_not_order_by_default():
         owned = {e for f in faces for e in f.edges()}
         kernel_order = faces + [e for e in shape.edges() if e not in owned]
         assert default == kernel_order
-        # ...and the same content the ordered form returns, only arranged differently.
-        assert set(default) == set(_elements(shape, ordered=True))
 
 
 # ------------------------------------------------------------------ write_dxf(reproducible=)

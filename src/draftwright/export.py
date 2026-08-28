@@ -670,14 +670,13 @@ def _ordered_parts(parts):
 def _elements(shape, *, ordered: bool = False):
     """Decompose *shape* for export retry: faces plus any loose edges.
 
-    With *ordered*, the two blocks come back sorted by where their parts sit
-    rather than in the order the kernel happened to hand them over. That order
-    matters beyond the retry this was written for: ``ExportDXF`` writes one
-    entity per element as it converts, so it is the order a DXF's entities and
-    their handles come out in, and left alone it varies between runs - enough to
-    make a drawing useless as something to check in and diff. (The SVG settles
-    the same question after the fact in :func:`canonicalize_svg`, where the
-    elements are already in the file and cost nothing to reorder.)
+    With *ordered*, faces are flattened to the boundary edges DXF actually emits
+    and the complete entity stream is sorted by exact geometry. Sorting whole
+    faces is insufficient: one face can retain a run-dependent cyclic starting
+    edge inside its B-rep traversal. Entity-level ordering fixes both the order of
+    faces and the order within each face. (The SVG settles the same question after
+    the fact in :func:`canonicalize_svg`, where the elements are already in the
+    file and cost nothing to reorder.)
 
     **Ordering is the expensive half of a reproducible export** - one
     ``bounding_box()`` and one ``edges()`` per part, measured at about a third
@@ -697,7 +696,8 @@ def _elements(shape, *, ordered: bool = False):
     loose = [e for e in shape.edges() if e not in owned]
     if not ordered:
         return faces + loose
-    return _ordered_parts(faces) + _ordered_parts(loose)
+    face_edges = [edge for face in faces for edge in face.edges()]
+    return _ordered_parts(face_edges + loose)
 
 
 def _export_shape(exporter, shape, layer, ctx, *, ordered: bool = False):

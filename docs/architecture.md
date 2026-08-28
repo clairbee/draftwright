@@ -286,10 +286,11 @@ IR, generation, and drawing code must not depend on benchmark expectations or sc
   The two formats reach that by different routes, and the asymmetry is deliberate.
   A DXF must be ordered *going in* — `ExportDXF` writes an entity per element as it
   converts and the handles follow — so `_elements(ordered=True)` sorts the
-  decomposition by geometry, keyed on where a part sits **and which way it runs**
+  emitted boundary entities by geometry, keyed on where an edge sits **and which way it runs**
   (hidden-line removal emits reversed duplicate pairs that agree on everything
-  else); cheap-key ties use exact B-rep bytes so distinct faces cannot inherit
-  kernel arrival order. An SVG is settled *coming out*, by `canonicalize_svg` sorting each
+  else); faces are flattened before sorting so their cyclic wire start cannot
+  leak into entity order, and cheap-key ties use exact B-rep bytes. An SVG is
+  settled *coming out*, by `canonicalize_svg` sorting each
   all-leaf layer group in the written file, so it is handed its shapes unordered
   even when the flag is on.
 
