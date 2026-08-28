@@ -9,6 +9,7 @@ import pytest
 from build123d import Align, Box, Cylinder, Pos, Rot
 
 from draftwright import Sheet
+from draftwright.compose import _compose_anno_boxes, _footprint_from_boxes
 from draftwright.model import DimensionParameterId
 from draftwright.model.compiled import compile_dimensions
 from draftwright.model.planner import plan_dimensions
@@ -318,6 +319,38 @@ def test_y_plan_measured_intents_participate_in_horizontal_composition(side):
     drawing = sheet.build()
     assert drawing.get_annotation("pmi_y_0")._dw_spec.side == side
     assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
+def test_compose_reserves_every_supported_measured_corridor_family():
+    sheet = Sheet(Box(40, 20, 10)).authored_dimensions()
+    cases = (
+        ("linear", "X", "front", None),
+        ("linear", "Z", "front", None),
+        ("linear", "Y", "side", None),
+        ("linear", "Y", "plan", None),
+        ("linear", "X", "front", "below"),
+        ("diameter", "Z", "plan", "above"),
+        ("diameter", "Z", "plan", "below"),
+        ("diameter", "X", "side", "above"),
+        ("diameter", "X", "side", "below"),
+    )
+    for index, (kind, axis, view, side) in enumerate(cases):
+        sheet.measured_dimension(
+            kind=kind,
+            value=10,
+            label=str(index),
+            dominant_axis=axis,
+            ref_bbox=(-5, -5, 0, 5, 5, 10),
+            ref_pts=[(-5, 0, 5), (5, 0, 5)],
+            view=view,
+            side=side,
+        )
+
+    footprint = _footprint_from_boxes(_compose_anno_boxes(sheet.model(), n_steps=0))
+    assert footprint.left > 0 and footprint.right > 0
+    assert footprint.fv_top > 0 and footprint.fv_bottom > 0
+    assert footprint.pv_authored_top > 0 and footprint.pv_bottom > 0
+    assert footprint.sv_top > 0 and footprint.sv_bottom > 0
 
 
 @pytest.mark.parametrize(
