@@ -28,7 +28,7 @@ class TestOf:
         s = Sheet.from_part(Box(80, 50, 8) - Pos(20, 10, 4) * Cylinder(4, 20))
         i = next(i for i, f in enumerate(s.features) if f.kind == "hole")
         s.of(i).fit("H7")  # records the fit on the hole's bore ⌀
-        assert (i, "diameter") in s._tolerances
+        assert (i, "diameter", "bore") in s._tolerances
 
     def test_of_feature_identity(self):
         s = Sheet.from_part(_shaft())
