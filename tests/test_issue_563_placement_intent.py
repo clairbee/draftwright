@@ -253,20 +253,21 @@ def test_view_only_measured_override_preserves_the_derived_side():
 
 
 def test_front_above_measured_intent_participates_in_view_composition():
-    sheet = Sheet(Box(60, 40, 20), page="A3").authored_dimensions()
-    sheet.measured_dimension(
-        kind="linear",
-        value=40,
-        label="40",
-        dominant_axis="X",
-        ref_bbox=(-20, -2, 4, 20, 2, 8),
-        ref_pts=[(-20, 0, 6), (20, 0, 6)],
-        view="front",
-        side="above",
-    )
-    drawing = sheet.build()
-    assert drawing.get_annotation("pmi_x_0")._dw_spec.side == "above"
-    assert not [issue for issue in drawing.lint() if issue.code == "pmi_dropped"]
+    for view in ("front", None):
+        sheet = Sheet(Box(60, 40, 20), page="A3").authored_dimensions()
+        sheet.measured_dimension(
+            kind="linear",
+            value=40,
+            label="40",
+            dominant_axis="X",
+            ref_bbox=(-20, -2, 4, 20, 2, 8),
+            ref_pts=[(-20, 0, 6), (20, 0, 6)],
+            view=view,
+            side="above",
+        )
+        drawing = sheet.build()
+        assert drawing.get_annotation("pmi_x_0")._dw_spec.side == "above"
+        assert not [issue for issue in drawing.lint() if issue.severity != "info"]
 
 
 def test_y_and_diameter_measured_intents_use_their_supported_exact_corridors():
@@ -374,6 +375,20 @@ def test_location_unknown_side_unavailable_view_and_missing_planned_view_fail_cl
     )
     with pytest.raises(ValueError, match="cannot be shown"):
         measured_missing.build()
+
+    side_only_missing = Sheet(Box(40, 20, 10)).authored_dimensions().authored_views()
+    side_only_missing.view("front")
+    side_only_missing.measured_dimension(
+        kind="linear",
+        value=20,
+        label="20",
+        dominant_axis="Y",
+        ref_bbox=(-10, -10, 2, 10, 10, 8),
+        ref_pts=[(0, -10, 5), (0, 10, 5)],
+        side="right",
+    )
+    with pytest.raises(ValueError, match="cannot be shown"):
+        side_only_missing.build()
 
 
 def test_pattern_pitch_placement_policy_is_rejected_instead_of_moving_the_callout():

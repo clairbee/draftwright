@@ -76,6 +76,7 @@ from draftwright.model import (
     StepFeature,
     build_pmi_features,
 )
+from draftwright.model.ir import authored_dimension_target_view
 from draftwright.model.planner import plan_dimensions
 from draftwright.projection import (
     _bbox_within,
@@ -1206,7 +1207,12 @@ def _build_drawing_once(
         )
         uncovered_measured = []
         for feature in explicit_model.features:
-            feature_view = getattr(feature, "view", None)
+            feature_view = authored_dimension_target_view(
+                getattr(feature, "dimension_kind", ""),
+                getattr(feature, "dominant_axis", ""),
+                getattr(feature, "view", None),
+                getattr(feature, "side", None),
+            )
             if (
                 getattr(feature, "kind", None) != "authored_dimension"
                 or not isinstance(feature_view, str)

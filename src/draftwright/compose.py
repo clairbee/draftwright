@@ -55,6 +55,7 @@ from draftwright._core import (
 )
 from draftwright.layout import fit_box
 from draftwright.model.callout import hole_callout_spec
+from draftwright.model.ir import authored_dimension_target_view
 from draftwright.view_plan import (
     ARRANGEMENTS,
     LayoutCandidate,
@@ -444,7 +445,13 @@ def _compose_anno_boxes(
         if f.kind == "authored_dimension"
         and f.dominant_axis == "X"
         and getattr(f, "dimension_kind", None) not in ("diameter", "radius", "angular")
-        and getattr(f, "view", None) == "front"
+        and authored_dimension_target_view(
+            getattr(f, "dimension_kind", ""),
+            getattr(f, "dominant_axis", ""),
+            getattr(f, "view", None),
+            getattr(f, "side", None),
+        )
+        == "front"
         and getattr(f, "side", None) == "above"
     )
     if x_front_above:

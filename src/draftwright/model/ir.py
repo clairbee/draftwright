@@ -90,6 +90,32 @@ def validate_authored_dimension_placement(
         )
 
 
+def authored_dimension_target_view(
+    dimension_kind: str,
+    dominant_axis: str,
+    view: str | None,
+    side: str | None,
+) -> str | None:
+    """Resolve the principal view selected by an explicit measured-dimension hint.
+
+    A side can uniquely select a view even when ``view`` is omitted (for example a
+    Y-linear ``right`` strip can only be the plan view). ``None`` means both placement
+    fields were omitted and the renderer remains free to derive/fall back as before.
+    Callers validate the pair with :func:`validate_authored_dimension_placement` first.
+    """
+    if view is not None:
+        return view
+    if side is None:
+        return None
+    if dimension_kind in ("diameter", "radius"):
+        return {"X": "side", "Y": "front", "Z": "plan"}.get(dominant_axis)
+    if dominant_axis in {"X", "Z"}:
+        return "front"
+    if dominant_axis == "Y":
+        return "side" if side in {"above", "below"} else "plan"
+    return None
+
+
 def _finite_point3(name: str, value) -> Point:
     try:
         result = tuple(float(component) for component in value)

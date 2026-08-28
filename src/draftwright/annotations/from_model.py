@@ -117,6 +117,7 @@ from draftwright.model.ir import (
     PocketFeature,
     SlotFeature,
     ThreadRequirement,
+    authored_dimension_target_view,
 )
 from draftwright.view_plan import views_showing
 
@@ -4943,8 +4944,14 @@ def _record_pmi_drop(ctx, dwg, ax, label, rec):
     dominant-axis table above (X/Z→front, Y→side primary). Conflating the two
     mislabels every dropped bore diameter/radius (review finding, #351 PR-4a).
     """
-    if rec.view is not None:
-        view = rec.view
+    selected_view = authored_dimension_target_view(
+        rec.pmi_kind,
+        ax,
+        getattr(rec, "view", None),
+        getattr(rec, "side", None),
+    )
+    if selected_view is not None:
+        view = selected_view
     elif rec.pmi_kind in ("diameter", "radius"):
         view = {"Z": "plan", "X": "side", "Y": "front"}.get(ax, "front")
     else:
@@ -5299,7 +5306,14 @@ def _pmi_dim_spec(p1, p2, strip, label, name, view, side, draft):
         return None
 
     def _build(pos, _q1=q1, _q2=q2, _side=side, _w=witness, _label=label):
-        dist = pos - _w if _side in ("above", "right") else _w - pos
+        # Dimension's extension-gap convention places the actual line one gap back toward
+        # its witnesses. Compensate so the solver's stacking coordinate is the rendered
+        # line/label coordinate, keeping the first tier outside the view silhouette.
+        dist = (
+            pos - _w + draft.extension_gap
+            if _side in ("above", "right")
+            else _w - pos + draft.extension_gap
+        )
         return _dim(_q1, _q2, _side, dist, draft, label=_label)
 
     order_coord = min(perp)
