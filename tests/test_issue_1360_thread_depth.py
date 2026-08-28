@@ -66,10 +66,75 @@ def test_bore_fit_does_not_leak_onto_the_counterbore_diameter():
     assert label.count("H8") == 1
 
 
+def test_fit_and_tolerance_order_keeps_last_writer_for_the_bore():
+    def tolerances(*, fit_last: bool):
+        sheet = Sheet(Box(40, 40, 20)).auto_dimensions()
+        handle = sheet.hole(diameter=5, at=(0, 0, 10), axis="z").cbore(diameter=8, depth=3)
+        if fit_last:
+            handle.tolerance(0.05).fit("H8")
+        else:
+            handle.fit("H8").tolerance(0.05)
+        group = next(
+            group for group in plan_dimensions(sheet.model()) if group.feature.kind == "hole"
+        )
+        return {planned.param.parameter_id: planned.param.tolerance for planned in group.dims}
+
+    fit_last = tolerances(fit_last=True)
+    assert fit_last["bore.diameter"].code == "H8"
+    assert fit_last["counterbore.diameter"] == 0.05
+
+    tolerance_last = tolerances(fit_last=False)
+    assert tolerance_last["bore.diameter"] == 0.05
+    assert tolerance_last["counterbore.diameter"] == 0.05
+
+
+def test_generated_sheet_preserves_broad_tolerance_beneath_bore_fit():
+    sheet = Sheet(Box(40, 40, 20)).auto_dimensions()
+    sheet.hole(diameter=5, at=(0, 0, 10), axis="z").cbore(diameter=8, depth=3).tolerance(0.05).fit(
+        "H8"
+    )
+    source = emit_sheet_script(
+        sheet.model(), "part", "fit-and-tolerance", title="FIT", number="1360"
+    )
+    assert ".tolerance(0.05).fit('H8')" in source
+
+    namespace = {"part": Box(40, 40, 20)}
+    exec(  # noqa: S102 - generated public Sheet source is the round-trip under test
+        compile(source[: source.index("drawing = sheet.build()")], "<fit-tolerance>", "exec"),
+        namespace,
+    )
+    rebuilt = namespace["sheet"]
+    group = next(
+        group for group in plan_dimensions(rebuilt.model()) if group.feature.kind == "hole"
+    )
+    tolerances = {planned.param.parameter_id: planned.param.tolerance for planned in group.dims}
+    assert tolerances["bore.diameter"].code == "H8"
+    assert tolerances["counterbore.diameter"] == 0.05
+
+
 @pytest.mark.parametrize("depth", [0, -1, float("nan"), float("inf")])
 def test_thread_operation_rejects_nonpositive_or_nonfinite_depth(depth):
     with pytest.raises(ValueError, match="thread depth must be finite and positive"):
         ThreadOperation("M6x1", depth)
+
+
+@pytest.mark.parametrize("designation", [None, 123, b"M6x1", object(), " "])
+def test_thread_operation_rejects_non_string_or_empty_designation(designation):
+    with pytest.raises(ValueError, match="thread designation must be a non-empty string"):
+        ThreadOperation(designation, 12)
+
+
+@pytest.mark.parametrize("through", [False, True])
+def test_tap_depth_cannot_exceed_available_bore_depth(through):
+    with pytest.raises(ValueError, match="thread depth cannot exceed bore depth"):
+        hole(
+            diameter=5,
+            at=(0, 0, 10),
+            axis="z",
+            through=through,
+            depth=5,
+            thread=ThreadOperation("M6x1", 5.1),
+        )
 
 
 def test_authored_thread_depth_cannot_survive_without_the_callout_head():

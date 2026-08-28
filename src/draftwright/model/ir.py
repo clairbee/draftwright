@@ -539,10 +539,12 @@ class ThreadOperation:
     depth: float
 
     def __post_init__(self) -> None:
-        designation = str(self.designation).strip()
+        if not isinstance(self.designation, str):
+            raise ValueError("thread designation must be a non-empty string")
+        designation = self.designation.strip()
         depth = float(self.depth)
         if not designation:
-            raise ValueError("thread designation must be non-empty")
+            raise ValueError("thread designation must be a non-empty string")
         if not isfinite(depth) or depth <= 0:
             raise ValueError("thread depth must be finite and positive")
         object.__setattr__(self, "designation", designation)
@@ -707,6 +709,12 @@ class HoleFeature:
         (ADR 0011). Validating here prevents a direct model from planning ``DOUBLE-D`` with
         no A/F value, or carrying an orientation that the profile cannot have.
         """
+        if (
+            isinstance(self.thread, ThreadOperation)
+            and self.depth is not None
+            and self.thread.depth > self.depth
+        ):
+            raise ValueError("thread depth cannot exceed bore depth")
         if self.profile is None:
             if self.across_flats is not None or self.profile_direction is not None:
                 raise ValueError(

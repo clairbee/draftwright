@@ -384,6 +384,11 @@ class _Hole(_Nameable):
         """A ± tolerance on the bore ⌀: symmetric ``.tolerance(0.05)`` (→ ``±0.05``) or a
         limit pair ``.tolerance(0.0, 0.1)`` (→ ``+0.1 -0.0``). Generated import scripts use
         ``source`` / ``source_ids`` to retain external requirement provenance."""
+        # A prior bore-only fit is the role-specific override of this generic diameter key.
+        # Remove it so the later call wins for the bore, preserving the fluent API's existing
+        # last-writer contract. In the other order, a later fit intentionally overrides only
+        # the bore while this hole-wide tolerance remains on recess diameters (#1360 review).
+        self._sheet._tolerances.pop((self._token, "diameter", "bore"), None)
         self._sheet._tolerances[(self._token, "diameter")] = _tolerance_decoration(
             lo, hi, source=source, source_ids=source_ids
         )

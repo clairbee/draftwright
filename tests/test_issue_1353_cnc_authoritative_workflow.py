@@ -244,6 +244,7 @@ def test_prismatic_exports_are_semantic_and_visually_stable_after_round_trip(tmp
         capture_output=True,
         text=True,
     ).stdout
+    assert "M6x1 x 12 DEEP" in extracted
     for term in ("6.35", "48.5", "M6x1", "H8", "CZ121 BRASS", "GRM-01-CANARY"):
         assert term in extracted
     for format_name in ("pdf", "svg", "dxf"):
