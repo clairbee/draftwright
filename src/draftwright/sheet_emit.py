@@ -40,9 +40,11 @@ from typing import Literal, cast
 from build123d import Shape
 
 from draftwright.builder import build_drawing, detect_part_model
+from draftwright.fits import FitClass
 from draftwright.model.ir import (
     KnurlRequirement,
     NominalRequirement,
+    ThreadOperation,
     ThreadRequirement,
     ToleranceDecoration,
 )
@@ -272,6 +274,8 @@ def _knurl_requirement_expr(requirement: KnurlRequirement) -> str:
 
 
 def _thread_arg(thread) -> str:
+    if isinstance(thread, ThreadOperation):
+        return f"ThreadOperation(designation={thread.designation!r}, depth={thread.depth!r})"
     return (
         _thread_requirement_expr(thread) if isinstance(thread, ThreadRequirement) else repr(thread)
     )
@@ -1523,6 +1527,9 @@ def _feature_block(
                 on_target = "diameter" if f.kind == "step" else diameter_role
                 on = f", on={on_target!r}" if f.kind in ("step", "pattern", "rotational") else ""
                 line += f".tolerance({args}{on}{provenance})"
+            elif isinstance(tolerance, FitClass) and f.kind == "hole":
+                show = "" if tolerance.show == "class" else f", show={tolerance.show!r}"
+                line += f".fit({tolerance.code!r}{show})"
 
             if isinstance(nominal, NominalRequirement):
                 provenance = f"source={nominal.source!r}, source_ids={nominal.source_ids!r}"
@@ -1810,8 +1817,10 @@ def emit_sheet_script(
         for feature in model.features
         for target in (getattr(feature, "member", feature),)
         for aspect in (getattr(target, "thread", None), getattr(target, "knurl", None))
-        if isinstance(aspect, (ThreadRequirement, KnurlRequirement))
+        if isinstance(aspect, (ThreadOperation, ThreadRequirement, KnurlRequirement))
     ]
+    if any(isinstance(aspect, ThreadOperation) for aspect in typed_aspects):
+        model_imports.add("ThreadOperation")
     if any(isinstance(aspect, ThreadRequirement) for aspect in typed_aspects):
         model_imports.update(["CylindricalReference", "ThreadRequirement"])
     if any(isinstance(aspect, KnurlRequirement) for aspect in typed_aspects):

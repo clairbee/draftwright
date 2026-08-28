@@ -83,6 +83,45 @@ source = emit_sheet_script(
 )
 ```
 
+### Refining a staged hole into manufacturing authority
+
+A detected hole remains a live feature handle after takeover. Enrich that handle instead of
+declaring a second, unrelated annotation. Counterbore/spotface tools can supply their geometry;
+thread and fit are authored manufacturing intent:
+
+```python
+s = Sheet.from_part(part, page="A2", scale=1)
+stack = s.of(next(feature for feature in s.features if feature.kind == "hole"))
+s.take_over(
+    dimensions="authored",
+    principal_views="automatic",
+    derived_views="authored",
+)
+
+stack.cbore(collar_tool)                 # diameter and depth re-read from the tool
+stack.thread("M6x1", depth=12).fit("H8")
+for parameter_id in stack.dimension_ids():
+    intent = s.dimension(stack, parameter_id)
+    if parameter_id == "counterbore.diameter":
+        intent.format(decimals=2)        # 6.35 remains 6.35, still feature-linked
+
+s.section_view("A", through=stack)       # replaces inferred derived views
+drawing = s.build()
+assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+drawing.export("quote/grm01", formats=("pdf", "svg", "dxf"))
+```
+
+An explicit tap depth is a real `thread.depth` parameter: it appears in
+`dimension_ids()`, participates in authored-set suppression and placement, and round-trips
+through generated Sheet code. `fit("H8")` applies only to `bore.diameter`; it does not leak
+onto a counterbore diameter. A plain `thread("M6x1")` remains valid when no independent depth is
+specified.
+
+This surface models the common bore + recess + tap-depth stack in one solver-participating
+callout. More general ordered operation stacks remain tracked by issue #1360. Until a physical
+requirement has a structured parameter, use a feature-linked `note(..., satisfies=(...))` only
+for parameter ids the handle actually exposes; free prose does not satisfy coverage.
+
 ## View handle
 
 ::: draftwright.sheet._View

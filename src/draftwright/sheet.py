@@ -393,7 +393,7 @@ class _Hole(_Nameable):
         """An ISO 286 fit class on the bore ⌀ — ``.fit("H7")`` renders ``ø8 H7`` (the class,
         default) or, with ``show="deviation"``, the signed deviations ``ø8 +0.015/0`` resolved
         for the bore's nominal ⌀. Raises for a class/size outside the built-in table (#29)."""
-        self._sheet._tolerances[(self._token, "diameter")] = fit_class(
+        self._sheet._tolerances[(self._token, "diameter", "bore")] = fit_class(
             code, self._sheet._features[self._i].diameter, show
         )
         return self
@@ -453,14 +453,20 @@ class _Hole(_Nameable):
         _require_positive(**{f"{kind} diameter": diameter, f"{kind} depth": depth})
         return (diameter, depth)
 
-    def thread(self, spec: str) -> _Hole:
+    def thread(self, spec: str, *, depth: float | None = None) -> _Hole:
         """A thread/tap spec folded onto this hole's callout (#764). ``.thread("M3x0.5")``
         renders the tap/thread on the bore leader (e.g. ``ø2.5 THRU M3x0.5``) — a structured
         aspect that round-trips, so ``.thread(...).finish(...)`` gives Ra-on-thread. A
-        declaration-only aspect (threads are cosmetic, not modelled geometry — no recogniser)."""
+        declaration-only aspect (threads are cosmetic, not modelled geometry — no recogniser).
+        ``depth=`` retains an explicit tap depth as the independently addressable
+        ``thread.depth`` measurement (#1360)."""
         if not (isinstance(spec, str) and spec.strip()):
             raise ValueError('thread() needs a non-empty spec string, e.g. "M3x0.5"')
-        return self._set(thread=spec.strip())
+        if depth is None:
+            return self._set(thread=spec.strip())
+        from draftwright.model.ir import ThreadOperation
+
+        return self._set(thread=ThreadOperation(spec, depth))
 
     def finish(self, ra, *, view: str | None = None, side: str | None = None) -> _Hole:
         """A surface-finish symbol (Ra) on this hole's bore (ADR 0011 P2c). ``.finish("1.6")``

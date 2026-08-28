@@ -54,7 +54,7 @@ from draftwright._core import (
     _wrap_rows,
 )
 from draftwright.layout import fit_box
-from draftwright.model.callout import hole_callout_spec
+from draftwright.model.callout import hole_callout_spec, hole_callout_suffix
 from draftwright.model.ir import authored_dimension_target_view
 from draftwright.view_plan import (
     ARRANGEMENTS,
@@ -272,7 +272,7 @@ def _est_planned_bore_callout_width(
         bore = spec["diameter"]
         depth = spec["depth"]
         cbore_dia, cbore_depth = spec["cbore_dia"], spec["cbore_depth"]
-        suffix = spec["suffix"]
+        suffix = hole_callout_suffix(spec, lambda tolerance: _tol_suffix(tolerance, draft))
 
         token_w: list[float] = []
         if spec["count"]:

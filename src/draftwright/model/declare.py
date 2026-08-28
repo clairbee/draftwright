@@ -249,8 +249,10 @@ def hole(
 
     ``cbore`` / ``spotface`` are ``(diameter, depth)`` pairs; ``csink`` is a
     ``(major_diameter, included_angle)`` pair (a flat-head seat, callout ``⌵ Ø.. × ..°``);
-    ``thread`` is a tap/thread spec string (e.g. ``"M3x0.5"``) folded onto the callout
-    (#764); ``count`` + ``members`` describe a machining-spec group drawn as one ``count×``.
+    ``thread`` is a tap/thread spec string (e.g. ``"M3x0.5"``), or a
+    :class:`~draftwright.model.ir.ThreadOperation` when an independently addressable tap depth
+    is required, folded onto the callout (#764/#1360); ``count`` + ``members`` describe a
+    machining-spec group drawn as one ``count×``.
 
     An object supplies *defaults*; any explicit keyword overrides that field (#451)."""
     if obj is not None:
