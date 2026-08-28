@@ -354,7 +354,7 @@ def test_compose_reserves_every_supported_measured_corridor_family():
 
 
 def test_front_and_plan_horizontal_corridors_reuse_the_same_depth():
-    def depth(routes):
+    def depth(routes, *, side="left", n_steps=0):
         sheet = Sheet(Box(80, 50, 30)).authored_dimensions()
         for index, (axis, view) in enumerate(routes):
             sheet.measured_dimension(
@@ -365,13 +365,92 @@ def test_front_and_plan_horizontal_corridors_reuse_the_same_depth():
                 ref_bbox=(-5, -5, 0, 5, 5, 10),
                 ref_pts=[(0, 0, 0), (0, 0, 10)],
                 view=view,
-                side="left",
+                side=side,
             )
-        return _footprint_from_boxes(_compose_anno_boxes(sheet.model(), n_steps=0)).left
+        footprint = _footprint_from_boxes(_compose_anno_boxes(sheet.model(), n_steps=n_steps))
+        return getattr(footprint, side)
 
     front = [("Z", "front")] * 5
     plan = [("Y", "plan")] * 5
     assert depth(front + plan) == max(depth(front), depth(plan))
+    # The automatic height/step ladder occupies the front view's vertical range too. A
+    # plan-right stack reuses that horizontal depth instead of adding to it.
+    right_baseline = depth([], side="right", n_steps=5)
+    plan_right = depth(plan, side="right", n_steps=0)
+    assert depth(plan, side="right", n_steps=5) == max(right_baseline, plan_right)
+
+
+@pytest.mark.parametrize(
+    ("kind", "axis", "view", "side", "ref_bbox", "ref_pts"),
+    [
+        ("linear", "X", "front", "above", (-10, -2, -2, 10, 2, 2), [(-10, 0, 0), (10, 0, 0)]),
+        ("linear", "X", "front", "below", (-10, -2, -2, 10, 2, 2), [(-10, 0, 0), (10, 0, 0)]),
+        ("linear", "Z", "front", "left", (-2, -2, -10, 2, 2, 10), [(0, 0, -10), (0, 0, 10)]),
+        ("linear", "Z", "front", "right", (-2, -2, -10, 2, 2, 10), [(0, 0, -10), (0, 0, 10)]),
+        ("linear", "Y", "side", "above", (-2, -10, -2, 2, 10, 2), [(0, -10, 0), (0, 10, 0)]),
+        ("linear", "Y", "side", "below", (-2, -10, -2, 2, 10, 2), [(0, -10, 0), (0, 10, 0)]),
+        ("linear", "Y", "plan", "left", (-2, -10, -2, 2, 10, 2), [(0, -10, 0), (0, 10, 0)]),
+        ("linear", "Y", "plan", "right", (-2, -10, -2, 2, 10, 2), [(0, -10, 0), (0, 10, 0)]),
+        ("diameter", "X", "side", "above", (-2, -10, -10, 2, 10, 10), [(0, -10, 0), (0, 10, 0)]),
+        ("diameter", "X", "side", "below", (-2, -10, -10, 2, 10, 10), [(0, -10, 0), (0, 10, 0)]),
+        ("diameter", "Y", "front", "above", (-10, -2, -10, 10, 2, 10), [(-10, 0, 0), (10, 0, 0)]),
+        ("diameter", "Y", "front", "below", (-10, -2, -10, 10, 2, 10), [(-10, 0, 0), (10, 0, 0)]),
+        ("diameter", "Z", "plan", "above", (-10, -10, -2, 10, 10, 2), [(-10, 0, 0), (10, 0, 0)]),
+        ("diameter", "Z", "plan", "below", (-10, -10, -2, 10, 10, 2), [(-10, 0, 0), (10, 0, 0)]),
+    ],
+)
+def test_every_explicit_measured_corridor_stays_outside_scaled_view(
+    kind, axis, view, side, ref_bbox, ref_pts
+):
+    sheet = Sheet(Box(40, 40, 40), page="A3", scale=2).authored_dimensions()
+    sheet.measured_dimension(
+        kind=kind,
+        value=20,
+        label="ø20" if kind == "diameter" else "20",
+        dominant_axis=axis,
+        ref_bbox=ref_bbox,
+        ref_pts=ref_pts,
+        view=view,
+        side=side,
+    )
+    drawing = sheet.build()
+    assert drawing.scale == 2
+    annotation = next(
+        annotation for name, annotation in drawing.iter_annotations() if name.startswith("pmi_")
+    )
+    vx0, vy0, vx1, vy1 = drawing.view_bounds(view)
+    lx0, ly0, lx1, ly1 = annotation.label_bbox
+    outside = {
+        "left": lx1 <= vx0,
+        "right": lx0 >= vx1,
+        "above": ly0 >= vy1,
+        "below": ly1 <= vy0,
+    }
+    assert outside[side], (drawing.view_bounds(view), annotation.label_bbox)
+    # A centred symmetric solid gives a direct transform invariant: the projected world
+    # origin and the rendered silhouette centre must agree at non-1:1 scale.
+    px, py, _ = drawing.at(view, 0, 0, 0)
+    assert px == pytest.approx((vx0 + vx1) / 2)
+    assert py == pytest.approx((vy0 + vy1) / 2)
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
+def test_plan_right_corridor_does_not_force_feasible_a4_scale_reduction():
+    sheet = Sheet(Box(40, 50, 20), page="A4").authored_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=25,
+        label="25",
+        dominant_axis="Y",
+        ref_bbox=(-2, -12.5, -2, 2, 12.5, 2),
+        ref_pts=[(0, -12.5, 0), (0, 12.5, 0)],
+        view="plan",
+        side="right",
+    )
+    drawing = sheet.build()
+    assert drawing.scale == 1
+    assert drawing.get_annotation("pmi_y_0").label_bbox[0] >= drawing.view_bounds("plan")[2]
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
 
 
 @pytest.mark.parametrize(

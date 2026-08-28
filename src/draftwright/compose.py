@@ -478,9 +478,11 @@ def _compose_anno_boxes(
     if left_count:
         boxes.append(AnnoBox("left", _STRIP_GAP + left_count * slot))
     if right_count:
-        boxes.append(
-            AnnoBox("right", _est_right_strip_depth(n_steps, n_boss_h) + right_count * slot)
-        )
+        # The front ladder baseline is already a separate right-side box above.  A plan-right
+        # stack is vertically disjoint from it (as front and plan measured stacks are from each
+        # other), so the footprint reducer must take their maximum, not charge the baseline and
+        # measured tiers additively.  Separate boxes express that compose-before-pack geometry.
+        boxes.append(AnnoBox("right", _STRIP_GAP + right_count * slot))
     vertical_box_side = {
         ("front", "above"): "front_above",
         ("front", "below"): "front_below",

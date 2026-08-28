@@ -60,6 +60,9 @@
 
 ### Fixed
 
+- Non-1:1 orthographic and isometric projection now scales extracted solids about the world
+  origin, matching the view-coordinate mapper and solver zones. Solids carrying a non-zero
+  build123d `Location` no longer shift their silhouette away from dimensions and callouts.
 - Notes and generic table cells now render U+2300 `⌀` with the established supported drafting
   glyph instead of IBM Plex Mono's missing-glyph square. The substitution happens at the one
   shared measurement/render seam, so source rows remain unchanged and table sizing stays exact

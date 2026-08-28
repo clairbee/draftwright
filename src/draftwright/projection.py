@@ -288,7 +288,11 @@ def project_view_geometry(scale, name, shape, camera, up, position, *, look_at, 
     *scale* is the world→page scale the coordinates encode; *shape* is in world (unscaled) space
     unless *scaled* is True. *camera*/*up*/*look_at* are in scaled space (the standard-view
     convention). Raises ``ValueError`` when the projection is empty (bad camera/look_at)."""
-    shape_s = shape if scaled else shape.scale(scale)
+    # ViewCoordinates maps world points by an origin-based scale.  build123d's default is to
+    # scale about ``shape.location.position``; extracted solids often carry a non-zero Location,
+    # which would translate the silhouette away from that mapper.  Keep both sides of the
+    # projection contract in the same world-origin transform.
+    shape_s = shape if scaled else shape.scale(scale, about=(0, 0, 0))
     vis, hid = shape_s.project_to_viewport(camera, up, look_at)
     vl, hl = list(vis), list(hid)
     if not vl and not hl:
@@ -338,7 +342,7 @@ def _project_iso(dwg, a: Analysis, scale, shape_s=None):
     camera = (la[0] + off, la[1] - off, la[2] + off)
     dwg._add_view(
         "iso",
-        shape_s if shape_s is not None else a.part.scale(scale),
+        shape_s if shape_s is not None else a.part.scale(scale, about=(0, 0, 0)),
         camera,
         (0, 0, 1),
         (a.ISO_X, a.ISO_Y),
