@@ -328,6 +328,7 @@ DimensionParameterId = Literal[
     "step.length",
     "step_height.length",
     "step_position.length",
+    "thread.depth",
     "thickness.length",
     "width.length",
     # synthesised, not a DimParameter (see above)
@@ -526,6 +527,40 @@ class ThreadRequirement:
 
 
 @dataclass(frozen=True)
+class ThreadOperation:
+    """An authored thread/tap operation with an independently dimensioned depth.
+
+    A plain thread string remains the compact form for an unspecified/full-depth thread.
+    This value object carries an explicit tap depth through the public IR as
+    ``thread.depth`` instead of burying the manufacturing value in prose (ADR 0011).
+    """
+
+    designation: str
+    depth: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.designation, str):
+            raise ValueError("thread designation must be a non-empty string")
+        designation = self.designation.strip()
+        if not designation:
+            raise ValueError("thread designation must be a non-empty string")
+        if (
+            not isinstance(self.depth, (int, float))
+            or isinstance(self.depth, bool)
+            or not isfinite(self.depth)
+            or self.depth <= 0
+        ):
+            raise ValueError("thread depth must be finite and positive")
+        depth = float(self.depth)
+        object.__setattr__(self, "designation", designation)
+        object.__setattr__(self, "depth", depth)
+
+    @property
+    def callout_suffix(self) -> str:
+        return self.designation
+
+
+@dataclass(frozen=True)
 class KnurlRequirement:
     """A source-authored knurl aspect on a finite cylindrical region."""
 
@@ -658,9 +693,10 @@ class HoleFeature:
     # ``None`` — plain tuple, the IR stays decoupled from the recogniser's type (#558).
     csink: tuple[float, float] | None = None
     # A thread spec (tap/thread), e.g. ``"M3x0.5"`` — free text folded onto the hole's
-    # compound callout (#764). A declaration-only aspect (ADR 0011 side-layer): threads
+    # compound callout (#764), or ``ThreadOperation`` when an authored tap depth must remain
+    # independently addressable. A declaration-only aspect (ADR 0011 side-layer): threads
     # are cosmetic, rarely modelled as geometry, so there is no recogniser — declare + emit.
-    thread: str | ThreadRequirement | None = None
+    thread: str | ThreadOperation | ThreadRequirement | None = None
     # A structural bore profile. ``None`` is the ordinary circular bore; ``double_d``
     # means the bore diameter is its parent-circle major diameter and the independently
     # planned A/F parameter below defines the two chord flats (#1061).
@@ -678,6 +714,12 @@ class HoleFeature:
         (ADR 0011). Validating here prevents a direct model from planning ``DOUBLE-D`` with
         no A/F value, or carrying an orientation that the profile cannot have.
         """
+        if (
+            isinstance(self.thread, ThreadOperation)
+            and self.depth is not None
+            and self.thread.depth > self.depth
+        ):
+            raise ValueError("thread depth cannot exceed bore depth")
         if self.profile is None:
             if self.across_flats is not None or self.profile_direction is not None:
                 raise ValueError(
@@ -729,6 +771,8 @@ class HoleFeature:
             csd, csa = self.csink
             ps.append(DimParameter("diameter", "countersink", csd))
             ps.append(DimParameter("angle", "countersink", csa))
+        if isinstance(self.thread, ThreadOperation):
+            ps.append(DimParameter("depth", "thread", self.thread.depth))
         return ps
 
     def references(self) -> list[Datum]:

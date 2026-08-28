@@ -40,9 +40,11 @@ from typing import Literal, cast
 from build123d import Shape
 
 from draftwright.builder import build_drawing, detect_part_model
+from draftwright.fits import FitClass
 from draftwright.model.ir import (
     KnurlRequirement,
     NominalRequirement,
+    ThreadOperation,
     ThreadRequirement,
     ToleranceDecoration,
 )
@@ -272,6 +274,8 @@ def _knurl_requirement_expr(requirement: KnurlRequirement) -> str:
 
 
 def _thread_arg(thread) -> str:
+    if isinstance(thread, ThreadOperation):
+        return f"ThreadOperation(designation={thread.designation!r}, depth={thread.depth!r})"
     return (
         _thread_requirement_expr(thread) if isinstance(thread, ThreadRequirement) else repr(thread)
     )
@@ -1503,26 +1507,50 @@ def _feature_block(
                 "pattern": "bore",
                 "rotational": "od",
             }.get(f.kind)
-            tolerance = (
+            role_tolerance = (
                 (decorations or {}).get((f, "diameter", diameter_role))
                 if diameter_role is not None
                 else None
             )
-            if tolerance is None:
-                tolerance = (decorations or {}).get((f, "diameter"))
-            if isinstance(tolerance, ToleranceDecoration):
-                value = tolerance.value
-                args = (
-                    f"{_authored_n(value[0])}, {_authored_n(value[1])}"
-                    if isinstance(value, tuple)
-                    else _authored_n(value)
-                )
-                provenance = f", source={tolerance.source!r}"
-                if tolerance.source_ids:
-                    provenance += f", source_ids={tolerance.source_ids!r}"
-                on_target = "diameter" if f.kind == "step" else diameter_role
-                on = f", on={on_target!r}" if f.kind in ("step", "pattern", "rotational") else ""
-                line += f".tolerance({args}{on}{provenance})"
+            broad_tolerance = (decorations or {}).get((f, "diameter"))
+            tolerances: tuple[object, ...] = (
+                role_tolerance if role_tolerance is not None else broad_tolerance,
+            )
+            if (
+                f.kind == "hole"
+                and isinstance(role_tolerance, FitClass)
+                and broad_tolerance is not None
+            ):
+                # The broad tolerance still belongs on recess diameters; the role-specific fit
+                # then wins only on the bore. Preserve that public fluent ordering exactly.
+                tolerances = (broad_tolerance, role_tolerance)
+            for tolerance in tolerances:
+                if isinstance(tolerance, ToleranceDecoration | int | float | tuple):
+                    value = (
+                        tolerance.value
+                        if isinstance(tolerance, ToleranceDecoration)
+                        else tolerance
+                    )
+                    args = (
+                        f"{_authored_n(value[0])}, {_authored_n(value[1])}"
+                        if isinstance(value, tuple)
+                        else _authored_n(value)
+                    )
+                    provenance = ""
+                    if isinstance(tolerance, ToleranceDecoration):
+                        provenance = f", source={tolerance.source!r}"
+                        if tolerance.source_ids:
+                            provenance += f", source_ids={tolerance.source_ids!r}"
+                    on_target = "diameter" if f.kind == "step" else diameter_role
+                    on = (
+                        f", on={on_target!r}"
+                        if f.kind in ("step", "pattern", "rotational")
+                        else ""
+                    )
+                    line += f".tolerance({args}{on}{provenance})"
+                elif isinstance(tolerance, FitClass) and f.kind == "hole":
+                    show = "" if tolerance.show == "class" else f", show={tolerance.show!r}"
+                    line += f".fit({tolerance.code!r}{show})"
 
             if isinstance(nominal, NominalRequirement):
                 provenance = f"source={nominal.source!r}, source_ids={nominal.source_ids!r}"
@@ -1810,8 +1838,10 @@ def emit_sheet_script(
         for feature in model.features
         for target in (getattr(feature, "member", feature),)
         for aspect in (getattr(target, "thread", None), getattr(target, "knurl", None))
-        if isinstance(aspect, (ThreadRequirement, KnurlRequirement))
+        if isinstance(aspect, (ThreadOperation, ThreadRequirement, KnurlRequirement))
     ]
+    if any(isinstance(aspect, ThreadOperation) for aspect in typed_aspects):
+        model_imports.add("ThreadOperation")
     if any(isinstance(aspect, ThreadRequirement) for aspect in typed_aspects):
         model_imports.update(["CylindricalReference", "ThreadRequirement"])
     if any(isinstance(aspect, KnurlRequirement) for aspect in typed_aspects):

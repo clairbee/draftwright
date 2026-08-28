@@ -106,6 +106,7 @@ from draftwright.layout import StripCandidate, plan_strip
 # drifts (#875 review). `as` form so the re-export is deliberate, not an unused import.
 from draftwright.model.callout import _first as _first
 from draftwright.model.callout import hole_callout_spec as hole_callout_spec
+from draftwright.model.callout import hole_callout_suffix as hole_callout_suffix
 from draftwright.model.compiled import DimensionId, FeatureRef, resolve_feature
 from draftwright.model.ir import (
     AUTHORED_DIMENSION_KINDS,
@@ -160,7 +161,7 @@ def callout_from_spec(spec, draft, count) -> HoleCallout | None:
     cbore_depth = ft(spec["cbore_depth"], "cbore_depth_tol", "cbore_depth_decimals")
     csink_dia = ft(spec.get("csink_dia"), "csink_dia_tol", "csink_dia_decimals")
     csink_angle = ft(spec.get("csink_angle"), "csink_angle_tol", "csink_angle_decimals")
-    suffix = spec["suffix"]
+    suffix = hole_callout_suffix(spec, lambda tolerance: _tol_suffix(tolerance, draft))
     callout = HoleCallout(
         dia,
         count=count,
