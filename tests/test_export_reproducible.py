@@ -22,21 +22,24 @@ inside one interpreter proves nothing, because string hashing is stable for a gi
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import os
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import ezdxf
 import pytest
-from build123d import Box, Edge, Rectangle
+from build123d import Box, Edge, Face, Rectangle, Wire
 
 import draftwright.drawing as drawing_mod
 from draftwright import build_drawing
 from draftwright._core import draft_preset
+from draftwright.builder import make_drawing
 from draftwright.drawing import Drawing
 from draftwright.export import (
     _DraftwrightDXF,
@@ -156,6 +159,14 @@ def test_the_canonical_svg_is_still_an_svg(tmp_path):
     assert svg2rlg(str(p)) is not None
 
 
+def test_svg_canonicalization_does_not_change_elementtree_global_namespaces(tmp_path):
+    p = tmp_path / "global.svg"
+    p.write_text(_SVG.format(body="".join(reversed(_LEAVES))), encoding="utf-8")
+    before = dict(ET._namespace_map)
+    canonicalize_svg(str(p))
+    assert ET._namespace_map == before
+
+
 # ------------------------------------------------------------- shape decomposition
 
 
@@ -196,6 +207,49 @@ def test_a_segment_and_its_reverse_do_not_tie():
     assert a.length == pytest.approx(b.length)
 
     assert _geometry_key(a) != _geometry_key(b)
+
+
+def test_distinct_faces_with_the_same_cheap_key_have_one_exact_order():
+    """Exact B-rep breaks ties that bounds/type/edge-count cannot distinguish."""
+    a = Face(Wire.make_polygon([(0, 0), (10, 0), (8, 10), (0, 10)], close=True))
+    b = Face(Wire.make_polygon([(0, 0), (10, 0), (10, 10), (2, 10)], close=True))
+    assert _geometry_key(a) == _geometry_key(b)  # the adversarial collision is real
+
+    class Pair:
+        def __init__(self, faces):
+            self._faces = faces
+
+        def faces(self):
+            return self._faces
+
+        def edges(self):
+            return [edge for face in self._faces for edge in face.edges()]
+
+    forward = _elements(Pair([a, b]), ordered=True)
+    reverse = _elements(Pair([b, a]), ordered=True)
+    assert [tuple(face.center()) for face in forward] == [tuple(face.center()) for face in reverse]
+
+
+def test_subnanometre_edges_tied_by_the_fast_prefix_have_one_exact_order():
+    a = Edge.make_line((0, 0, 0), (1, 0, 0))
+    b = Edge.make_line((0, 1e-10, 0), (1, 1e-10, 0))
+    assert _geometry_key(a) == _geometry_key(b)
+
+    class Pair:
+        def __init__(self, edges):
+            self._edges = edges
+
+        def faces(self):
+            return []
+
+        def edges(self):
+            return self._edges
+
+    forward = _elements(Pair([a, b]), ordered=True)
+    reverse = _elements(Pair([b, a]), ordered=True)
+    assert [edge.bounding_box().min.Y for edge in forward] == [
+        edge.bounding_box().min.Y for edge in reverse
+    ]
 
 
 def test_elements_of_an_edge_only_shape_are_ordered_too():
@@ -354,6 +408,51 @@ def test_write_dxf_restores_the_global_option_even_when_the_save_fails(tmp_path)
         ezdxf.options.write_fixed_meta_data_for_testing = previous
 
 
+def test_concurrent_reproducible_writes_do_not_touch_ezdxf_global_state(tmp_path):
+    previous = ezdxf.options.write_fixed_meta_data_for_testing
+    try:
+        ezdxf.options.write_fixed_meta_data_for_testing = False
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            texts = list(
+                executor.map(
+                    lambda index: _write(
+                        tmp_path,
+                        f"thread-{index}.dxf",
+                        reproducible=True,
+                    ),
+                    range(2),
+                )
+            )
+        assert ezdxf.options.write_fixed_meta_data_for_testing is False
+        assert all(_header_value(text, "TDCREATE") == _FIXED_JULIAN for text in texts)
+    finally:
+        ezdxf.options.write_fixed_meta_data_for_testing = previous
+
+
+def test_zoom_fallback_retains_reproducible_metadata(tmp_path, monkeypatch):
+    from ezdxf import zoom
+
+    monkeypatch.setattr(zoom, "window", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()))
+    text = _write(tmp_path, "zoom-fallback.dxf", reproducible=True)
+    assert _header_value(text, "TDCREATE") == _FIXED_JULIAN
+    assert _header_value(text, "VERSIONGUID") == _ZERO_GUID
+
+
+def test_reproducible_dxf_fails_if_the_document_is_inaccessible(tmp_path):
+    class OpaqueExporter:
+        def write(self, path):
+            Path(path).write_text("live", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="requires access to the ezdxf document"):
+        write_dxf(
+            OpaqueExporter(),
+            str(tmp_path / "opaque.dxf"),
+            210.0,
+            297.0,
+            reproducible=True,
+        )
+
+
 # ------------------------------------------------------------------ _render_pdf(reproducible=)
 
 _FIXED_PDF_DATE = b"/CreationDate (D:20000101000000+00'00')"
@@ -390,6 +489,22 @@ def test_render_pdf_is_not_reproducible_by_default(small_svg, tmp_path):
     out = tmp_path / "default.pdf"
     _render_pdf(small_svg, str(out))
     assert _FIXED_PDF_DATE not in out.read_bytes()
+
+
+def test_reproducible_pdf_does_not_fall_back_to_a_live_render(small_svg, tmp_path, monkeypatch):
+    from reportlab.pdfgen.canvas import Canvas
+
+    def fail_link(*_args, **_kwargs):
+        raise RuntimeError("link failed")
+
+    monkeypatch.setattr(Canvas, "linkURL", fail_link)
+    with pytest.raises(RuntimeError, match="link failed"):
+        _render_pdf(
+            small_svg,
+            str(tmp_path / "no-live-fallback.pdf"),
+            link_rect=(0, 0, 1, 1),
+            reproducible=True,
+        )
 
 
 # ------------------------------------- the public surface PartCAD reaches it through
@@ -480,6 +595,12 @@ def test_build_drawing_defaults_to_off(tmp_path):
     assert build_drawing(Box(30, 20, 10)).reproducible is False
 
 
+def test_reproducible_is_appended_after_the_existing_positional_scale_policy():
+    for function in (build_drawing, make_drawing):
+        parameters = tuple(inspect.signature(function).parameters)
+        assert parameters.index("scale_policy") < parameters.index("reproducible")
+
+
 def test_a_directly_constructed_drawing_defaults_to_off():
     """``build_drawing`` is not the only door: ``Drawing`` is public and constructible.
 
@@ -526,7 +647,9 @@ _EXPORT_SCRIPT = """
 from build123d import Box
 from draftwright.builder import build_drawing
 import sys
-build_drawing(Box(30, 20, 10), reproducible=True).export(sys.argv[1], formats=("svg", "dxf"))
+build_drawing(Box(30, 20, 10), reproducible=True).export(
+    sys.argv[1], formats=("svg", "dxf", "pdf", "png")
+)
 """
 
 
@@ -556,7 +679,7 @@ def test_two_runs_under_different_hash_seeds_agree(tmp_path):
         )
         outs.append(stem)
 
-    for ext in ("svg", "dxf"):
+    for ext in ("svg", "dxf", "pdf", "png"):
         first, second = (Path(f"{o}.{ext}").read_bytes() for o in outs)
         assert first, f"{ext} export produced nothing"
         assert first == second, f"{ext} differs between runs under different hash seeds"

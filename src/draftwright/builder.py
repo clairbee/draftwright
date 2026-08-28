@@ -1743,8 +1743,8 @@ def build_drawing(
     frame: bool = False,
     projection: str | None = None,
     zones: bool = False,
-    reproducible: bool = False,
     scale_policy: Literal["strict", "fallback", "permissive"] = "fallback",
+    reproducible: bool = False,
     _post_build: Callable[[Drawing], Drawing] | None = None,
     _required_tables=(),
     _views: tuple[str, ...] | None = None,
@@ -2631,8 +2631,8 @@ def make_drawing(
     frame: bool = False,
     projection: str | None = None,
     zones: bool = False,
-    reproducible: bool = False,
     scale_policy: Literal["strict", "fallback", "permissive"] = "fallback",
+    reproducible: bool = False,
 ) -> tuple[str, str]:
     """Generate a 4-view technical drawing from a STEP file or build123d object.
 
@@ -2658,6 +2658,9 @@ def make_drawing(
             block only.
         detail_view: automatically add an enlarged view for crowded prismatic step
             dimensions. Default ``True``; pass ``False`` to disable that recovery.
+        reproducible: make repeated exports from the returned drawing byte-identical
+            on the same Draftwright version. Off by default because canonical DXF
+            ordering has a measurable export-time cost.
 
     Returns:
         Tuple of ``(svg_path, dxf_path)`` for the generated files.

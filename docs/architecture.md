@@ -276,9 +276,9 @@ IR, generation, and drawing code must not depend on benchmark expectations or sc
   **`reproducible=` — byte-identical exports, opt-in.** On, two exports of one
   drawing are identical, so a checked-in drawing diffs cleanly and a caller can
   see when its output really changed. Three things are settled to get there: the
-  clock and GUIDs an exporter stamps (ezdxf's fixed-metadata option — restored
-  after the save, it is process-wide state — plus the creation marker that option
-  misses, and reportlab's `invariant`), ezdxf's CLASSES section (built by
+  clock and GUIDs an exporter stamps (a per-document fixed metadata updater,
+  avoiding ezdxf's concurrency-unsafe process-global testing option, plus
+  reportlab's `invariant`), ezdxf's CLASSES section (built by
   iterating a `set[str]`, so it is pre-seeded sorted), and the order the kernel
   hands parts over, which is not stable between runs and does **not** reduce to
   `PYTHONHASHSEED`.
@@ -288,7 +288,8 @@ IR, generation, and drawing code must not depend on benchmark expectations or sc
   converts and the handles follow — so `_elements(ordered=True)` sorts the
   decomposition by geometry, keyed on where a part sits **and which way it runs**
   (hidden-line removal emits reversed duplicate pairs that agree on everything
-  else). An SVG is settled *coming out*, by `canonicalize_svg` sorting each
+  else); cheap-key ties use exact B-rep bytes so distinct faces cannot inherit
+  kernel arrival order. An SVG is settled *coming out*, by `canonicalize_svg` sorting each
   all-leaf layer group in the written file, so it is handed its shapes unordered
   even when the flag is on.
 

@@ -17,13 +17,25 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
+from io import BytesIO
+from itertools import groupby
 from pathlib import Path
 
 import ezdxf
 from build123d import ExportDXF, ExportSVG
-from ezdxf.document import CONST_MARKER_STRING, CREATED_BY_EZDXF
+from ezdxf.document import (
+    CONST_GUID,
+    CONST_MARKER_STRING,
+    CREATED_BY_EZDXF,
+    WRITTEN_BY_EZDXF,
+    juliandate,
+    tocodepage,
+)
+from OCP.BRepTools import BRepTools
 from OCP.GeomConvert import GeomConvert
+from OCP.TopTools import TopTools_FormatVersion
 
 from draftwright._core import _DRAFTWRIGHT_URL
 from draftwright.fonts import PLEX_MONO
@@ -132,11 +144,6 @@ def canonicalize_svg(svg_path: str) -> None:
     means. Only groups whose children are all leaves are touched, so a nested
     group is never flattened or reordered.
     """
-    # Round-tripping through ElementTree drops the default namespace unless it
-    # is registered, and an SVG without its xmlns is one nothing downstream can
-    # read - svglib included, which is how the PDF is rendered.
-    ET.register_namespace("", _SVG_NS.strip("{}"))
-    ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
     tree = ET.parse(svg_path)
     for group in tree.getroot().iter(_SVG_NS + "g"):
         children = list(group)
@@ -153,6 +160,15 @@ def canonicalize_svg(svg_path: str) -> None:
         for child, tail in zip(children, tails):
             child.tail = tail
         group[:] = children
+    # Strip the SVG namespace from in-memory tag spellings, then declare it as
+    # the document default. This preserves ordinary ``<svg>``/``<g>`` output
+    # without ``register_namespace``, whose process-global registry would change
+    # how unrelated callers serialize their own XML after a Draftwright export.
+    root = tree.getroot()
+    for element in root.iter():
+        if isinstance(element.tag, str) and element.tag.startswith(_SVG_NS):
+            element.tag = element.tag[len(_SVG_NS) :]
+    root.set("xmlns", _SVG_NS.strip("{}"))
     tree.write(svg_path, encoding="utf-8", xml_declaration=True)
 
 
@@ -277,27 +293,37 @@ def write_dxf(dxf, path: str, page_w: float, page_h: float, reproducible: bool =
     costing seconds on a dimension-dense sheet (#602; build123d#382 tracks
     exposing viewport control). The drawing already lives in page-mm
     coordinates ``(0, 0)–(page_w, page_h)``, so set that single-window
-    viewport directly and save. Best-effort: falls back to ``dxf.write`` if
-    the exporter's ezdxf internals aren't reachable (mirrors
-    ``set_dxf_metadata``).
+    viewport directly and save. Falls back to ``dxf.write`` if the optimized
+    viewport seam is unavailable while retaining reproducible metadata whenever
+    the ezdxf document is accessible. A requested reproducible export fails
+    clearly if the document itself is unavailable rather than returning live data.
     """
     doc = getattr(dxf, "_document", None)
-    msp = getattr(dxf, "_modelspace", None)
-    if doc is None or msp is None:
+    if doc is None:
+        if reproducible:
+            raise RuntimeError("reproducible DXF export requires access to the ezdxf document")
         dxf.write(path)
+        return
+
+    def save(save_fn) -> None:
+        if reproducible:
+            with _reproducible_dxf(doc):
+                save_fn()
+        else:
+            save_fn()
+
+    msp = getattr(dxf, "_modelspace", None)
+    if msp is None:
+        save(lambda: dxf.write(path))
         return
     try:
         from ezdxf import zoom
 
         zoom.window(msp, (0.0, 0.0), (page_w, page_h))
     except Exception:
-        dxf.write(path)
+        save(lambda: dxf.write(path))
         return
-    if reproducible:
-        with _reproducible_dxf(doc):
-            doc.saveas(path, fmt="asc")
-    else:
-        doc.saveas(path, fmt="asc")
+    save(lambda: doc.saveas(path, fmt="asc"))
 
 
 @contextlib.contextmanager
@@ -305,19 +331,11 @@ def _reproducible_dxf(doc):
     """Take the clock and the hash seed out of what ezdxf is about to write.
 
     Every save stamps the time it happened ($TDCREATE/$TDUPDATE and their UTC
-    twins), a freshly generated $VERSIONGUID/$FINGERPRINTGUID pair, and a
-    "written by" marker carrying another timestamp. ezdxf writes fixed values
-    for those behind one option - a fixed date, the all-zero GUID a new document
-    starts with, and a constant marker.
-
-    That option is process-wide state belonging to whoever set it, so it is put
-    back afterwards: a draftwright export must not decide what some other ezdxf
-    user in the same interpreter writes.
-
-    It also does not reach the *creation* marker, which is stamped when the
-    document is built - inside ``_DraftwrightDXF()``, long before an export asks
-    for anything - so that one is overwritten here with the same constant ezdxf
-    would have used.
+    twins), a freshly generated $VERSIONGUID/$FINGERPRINTGUID pair, and marker
+    strings carrying timestamps. ezdxf exposes a testing switch for fixed values,
+    but it is process-global and therefore races concurrent exports. Install the
+    equivalent updater on this one fresh document for the duration of its save;
+    unrelated ezdxf users and concurrent Draftwright exports remain untouched.
 
     The CLASSES section is the last part. ezdxf registers a class entry for
     every DXF type the document uses and finds them by iterating a set of type
@@ -327,19 +345,27 @@ def _reproducible_dxf(doc):
     registered here first, sorted: 'add_class()' keeps the first entry for a key,
     and ezdxf's own pass during the save then adds only what is left.
     """
-    previous = ezdxf.options.write_fixed_meta_data_for_testing
-    ezdxf.options.write_fixed_meta_data_for_testing = True
+    original_update_metadata = doc._update_metadata
+
+    def update_metadata_reproducibly() -> None:
+        metadata = doc.ezdxf_metadata()
+        metadata[CREATED_BY_EZDXF] = CONST_MARKER_STRING
+        metadata[WRITTEN_BY_EZDXF] = CONST_MARKER_STRING
+        fixed_date = juliandate(datetime(2000, 1, 1, 0, 0))
+        for name in ("$TDCREATE", "$TDUCREATE", "$TDUPDATE", "$TDUUPDATE"):
+            doc.header[name] = fixed_date
+        doc.header["$VERSIONGUID"] = CONST_GUID
+        doc.header["$FINGERPRINTGUID"] = CONST_GUID
+        doc.header["$HANDSEED"] = str(doc.entitydb.handles)
+        doc.header["$DWGCODEPAGE"] = tocodepage(doc.encoding)
+
+    doc._update_metadata = update_metadata_reproducibly
     try:
-        try:
-            doc.ezdxf_metadata()[CREATED_BY_EZDXF] = CONST_MARKER_STRING
-            for dxftype in sorted(doc.entitydb.dxf_types_in_use()):
-                doc.classes.add_class(dxftype)
-        except Exception:
-            # Reproducibility is not worth failing an export over.
-            _log.debug("could not pin the DXF metadata", exc_info=True)
+        for dxftype in sorted(doc.entitydb.dxf_types_in_use()):
+            doc.classes.add_class(dxftype)
         yield
     finally:
-        ezdxf.options.write_fixed_meta_data_for_testing = previous
+        doc._update_metadata = original_update_metadata
 
 
 class _DraftwrightDXF(ExportDXF):
@@ -551,10 +577,11 @@ def _render_pdf(
         canvas.showPage()
         canvas.save()
     except Exception:
-        if text_runs:
+        if text_runs or reproducible:
             # Searchable text is a requested output property, not an optional
-            # embellishment. Never report success after silently discarding it.
-            _log.error("PDF semantic text render failed", exc_info=True)
+            # embellishment, and reproducibility is likewise a requested contract.
+            # Never report success after silently discarding either property.
+            _log.error("PDF render failed with required output properties", exc_info=True)
             raise
         # Never fail the export over the link/metadata extras; degrade to a
         # plain render. Logged at debug so a regression in the link annotation
@@ -587,17 +614,15 @@ def _render_png(pdf_path: str, png_path: str, *, dpi: int = 150) -> None:
 
 
 def _geometry_key(part):
-    """Where a part sits and which way it runs - a sort key, to the precision an
-    exporter writes.
+    """Cheap geometric prefix for grouping export parts before exact tie-breaking.
 
     The box alone does not separate parts: hidden-line removal emits the same
     segment twice where two silhouettes project onto each other, once each way
     round, and the pair shares a box, a length and a vertex set. Only the
     *directed* ends tell them apart - and the direction is itself what the
     exporter writes out, so leaving them tied would let two runs swap a pair and
-    change the file. Parts with no direction to ask for (faces) fall back to the
-    box and their edge count; faces and loose edges are sorted in separate
-    blocks, so the two never compare against each other.
+    change the file. Distinct faces can still share every fact in this prefix;
+    :func:`_ordered_parts` resolves those groups from exact B-rep bytes.
     """
     box = part.bounding_box()
     key = (
@@ -615,6 +640,31 @@ def _geometry_key(part):
     except Exception:
         return key
     return key + tuple(round(v, 9) for v in (start.X, start.Y, start.Z, end.X, end.Y, end.Z))
+
+
+def _brep_key(part) -> bytes:
+    """Exact, run-independent tie-breaker containing topology and curve geometry."""
+    stream = BytesIO()
+    BRepTools.Write_s(
+        part.wrapped,
+        stream,
+        False,
+        False,
+        TopTools_FormatVersion.TopTools_FormatVersion_VERSION_3,
+    )
+    return stream.getvalue()
+
+
+def _ordered_parts(parts):
+    """Order by the cheap key, serialising exact B-rep only inside tied groups."""
+    keyed = sorted(((_geometry_key(part), part) for part in parts), key=lambda item: item[0])
+    ordered = []
+    for _key, entries in groupby(keyed, key=lambda item: item[0]):
+        group = [part for _prefix, part in entries]
+        if len(group) > 1:
+            group.sort(key=_brep_key)
+        ordered.extend(group)
+    return ordered
 
 
 def _elements(shape, *, ordered: bool = False):
@@ -642,12 +692,12 @@ def _elements(shape, *, ordered: bool = False):
     faces = list(shape.faces())
     if not faces:
         edges = list(shape.edges())
-        return sorted(edges, key=_geometry_key) if ordered else edges
+        return _ordered_parts(edges) if ordered else edges
     owned = {e for f in faces for e in f.edges()}
     loose = [e for e in shape.edges() if e not in owned]
     if not ordered:
         return faces + loose
-    return sorted(faces, key=_geometry_key) + sorted(loose, key=_geometry_key)
+    return _ordered_parts(faces) + _ordered_parts(loose)
 
 
 def _export_shape(exporter, shape, layer, ctx, *, ordered: bool = False):
