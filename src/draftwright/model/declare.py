@@ -70,6 +70,7 @@ from draftwright.model.ir import (
     SlotPatternFeature,
     StepFeature,
     StepLevelFeature,
+    validate_authored_dimension_placement,
 )
 
 # Fractional tolerance below which a slot object's two longest bbox spans count as "near-equal",
@@ -2111,6 +2112,8 @@ def measured_dimension(
     lowering_blockers: tuple[str, ...] = (),
     rendering_blockers: tuple[str, ...] = (),
     cylindrical_refs=(),
+    view: str | None = None,
+    side: str | None = None,
 ) -> AuthoredDimension:
     """A pre-authored drafting dimension from explicit measured values — the IR constructor
     behind :meth:`Sheet.measured_dimension` (#704: extracted so ``build_drawing(model=…)``
@@ -2162,6 +2165,7 @@ def measured_dimension(
         unresolved_bore = dom == "?" and dim_kind in ("diameter", "radius") and bbox is not None
         if not (unresolved_import or unresolved_bore):
             raise ValueError("measured_dimension() dominant_axis must be X, Y, or Z")
+    validate_authored_dimension_placement(dim_kind, dom, view, side, owner="measured_dimension()")
     cylinder_axes = {reference.principal_axis for reference in cylinders}
     if cylinders and (len(cylinder_axes) != 1 or "?" in cylinder_axes):
         if not imported_blocked:
@@ -2217,4 +2221,6 @@ def measured_dimension(
         lowering_blockers=tuple(str(reason) for reason in lowering_blockers),
         rendering_blockers=tuple(str(reason) for reason in rendering_blockers),
         cylindrical_refs=tuple(cylinders),
+        view=view,
+        side=side,
     )

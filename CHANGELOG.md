@@ -4,6 +4,12 @@
 
 ### Added
 
+- Referential and measured Sheet dimensions accept optional `view=` / `side=` placement
+  intent. Supported pairs survive IR/compiler and generated-script round trips, constrain
+  ordinary corridor candidates without exposing page coordinates, and fail clearly when a
+  renderer cannot honour the requested view/strip. Compound hole callouts can therefore be
+  authored to opposite sides of one end view while retaining normal solve and lint behavior
+  (#563).
 - Feature-linked Sheet notes can explicitly satisfy one or more canonical requirement ids with
   `.note(..., satisfies=(...))`. Placed structured notes retain each requirement's identity in
   coverage reports and generated scripts without masquerading as dimensions or parsing prose;
@@ -54,6 +60,9 @@
 
 ### Fixed
 
+- Non-1:1 orthographic and isometric projection now scales extracted solids about the world
+  origin, matching the view-coordinate mapper and solver zones. Solids carrying a non-zero
+  build123d `Location` no longer shift their silhouette away from dimensions and callouts.
 - Notes and generic table cells now render U+2300 `⌀` with the established supported drafting
   glyph instead of IBM Plex Mono's missing-glyph square. The substitution happens at the one
   shared measurement/render seam, so source rows remain unchanged and table sizing stays exact

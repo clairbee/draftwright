@@ -602,9 +602,9 @@ class _Dim(_Nameable):
 class DimensionIntent:
     """The handle :meth:`Sheet.add_dimension` returns (ADR 0016).
 
-    It is **not** a placement handle: it exposes no coordinate, no strip and no tier.
-    What it carries is the dimension's semantic identity — *a dimension line references;
-    the engine places*.
+    It exposes no coordinate or tier. Optional ``view=`` / ``side=`` are declared on the
+    verb as semantic corridor selection; the engine still solves the candidate's position —
+    *a dimension line references; the engine places*.
 
     ADR 0012's ``.pin()`` / ``.priority()`` are deliberately absent for now. The engine
     already has two spellings of "keep this put" at different layers, and adding a third
@@ -1182,6 +1182,8 @@ class Sheet:
         role: DimensionParameterId = _UNSET,  # type: ignore[assignment]
         *,
         axis: str | None = None,
+        view: str | None = None,
+        side: str | None = None,
         **removed,
     ) -> DimensionIntent:
         """`dimension(feature, role)` — the ADR 0016 referential verb. See
@@ -1203,6 +1205,11 @@ class Sheet:
         instead of a bare "missing 2 required positional arguments". The old shape never
         appeared in a release, so this refusal is the only notice it gets — a documented
         break (`docs/deprecations.md`).
+
+        ``view`` selects ``front``/``plan``/``side`` and ``side`` selects the corresponding
+        ``above``/``below``/``left``/``right`` corridor where that dimension renderer supports
+        it. They express authored placement intent, not page coordinates; invalid or
+        unrenderable pairs fail clearly during planning.
         """
         if removed:
             legacy = sorted(self._MEASURED_KEYWORDS & set(removed))
@@ -1216,10 +1223,16 @@ class Sheet:
             raise TypeError(f"dimension() got unexpected keyword(s) {sorted(removed)}")
         if feature is _UNSET or role is _UNSET:
             raise TypeError("dimension() requires a feature and a parameter id")
-        return self._authored_dimension(feature, role, axis=axis)
+        return self._authored_dimension(feature, role, axis=axis, view=view, side=side)
 
     def _authored_dimension(
-        self, feature, role: DimensionParameterId, *, axis: str | None = None
+        self,
+        feature,
+        role: DimensionParameterId,
+        *,
+        axis: str | None = None,
+        view: str | None = None,
+        side: str | None = None,
     ) -> DimensionIntent:
         """`dimension(feature, role)` — declare one member of the COMPLETE authored set.
 
@@ -1240,7 +1253,15 @@ class Sheet:
         # The CANONICAL spelling is stored, not what was typed (#963). Otherwise a generated
         # script's dialect depended on how its source model was authored — mirrored sets wrote
         # parameter ids, hand-authored sets echoed back whatever the author used.
-        self._authored.append({"token": token, "role": role, "discriminator": discriminator})
+        self._authored.append(
+            {
+                "token": token,
+                "role": role,
+                "discriminator": discriminator,
+                "view": view,
+                "side": side,
+            }
+        )
         return DimensionIntent(self, self._authored[-1])
 
     def measured_dimension(
@@ -1264,6 +1285,8 @@ class Sheet:
         lowering_blockers: tuple[str, ...] = (),
         rendering_blockers: tuple[str, ...] = (),
         cylindrical_refs=(),
+        view: str | None = None,
+        side: str | None = None,
     ) -> _Params:
         """Declare a drafting dimension from explicit **measured** values.
 
@@ -1283,6 +1306,8 @@ class Sheet:
         leave it blank. ``lowering_blockers`` carries the explicit reason a supported imported
         requirement could not safely enrich a canonical feature parameter;
         ``rendering_blockers`` carries the source-geometry reason it cannot be drawn truthfully.
+        ``view``/``side`` select a supported semantic corridor while leaving its actual
+        position to the normal placement solve.
         Delegates to :func:`draftwright.model.declare.measured_dimension` (#704), so
         ``build_drawing(model=…)`` callers can author the same feature without the façade.
         """
@@ -1306,6 +1331,8 @@ class Sheet:
                 lowering_blockers=lowering_blockers,
                 rendering_blockers=rendering_blockers,
                 cylindrical_refs=cylindrical_refs,
+                view=view,
+                side=side,
             )
         )
         # A handle like every other declaration verb (#922). A measured dimension carries its
@@ -2347,7 +2374,15 @@ class Sheet:
         self._authored_source = True
         return self
 
-    def add_dimension(self, feature, role: DimensionParameterId, *, axis: str | None = None):
+    def add_dimension(
+        self,
+        feature,
+        role: DimensionParameterId,
+        *,
+        axis: str | None = None,
+        view: str | None = None,
+        side: str | None = None,
+    ):
         """Augment the planner's set with one more measurement (ADR 0016 / #872).
 
         *feature* is a declared-feature handle (what :meth:`hole`, :meth:`boss`, … return),
@@ -2369,6 +2404,9 @@ class Sheet:
         pattern's two pitches. Omitting it there raises rather than picking one, because
         a silent coin toss between the row and column pitch is the kind of wrong a reader
         cannot see.
+
+        ``view``/``side`` have the same solver-owned placement semantics as on
+        :meth:`dimension`.
         """
         warnings.warn(
             "Sheet.add_dimension() is soft deprecated: still supported and NOT scheduled for "
@@ -2381,7 +2419,13 @@ class Sheet:
         token, _target, discriminator, role = self._resolve_measurement(
             feature, role, axis, "add_dimension"
         )
-        entry = {"token": token, "role": role, "discriminator": discriminator}
+        entry = {
+            "token": token,
+            "role": role,
+            "discriminator": discriminator,
+            "view": view,
+            "side": side,
+        }
         self._added_dimensions.append(entry)
         return DimensionIntent(self, entry)
 
@@ -2587,6 +2631,8 @@ class Sheet:
                 role=e["role"],
                 discriminator=e["discriminator"],
                 display_decimals=e.get("display_decimals"),
+                view=e.get("view"),
+                side=e.get("side"),
             )
             for e in self._added_dimensions
         )
@@ -2613,6 +2659,8 @@ class Sheet:
                 role=e["role"],
                 discriminator=e["discriminator"],
                 display_decimals=e.get("display_decimals"),
+                view=e.get("view"),
+                side=e.get("side"),
             )
             for e in self._authored
         )

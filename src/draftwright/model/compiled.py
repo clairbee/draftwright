@@ -154,8 +154,9 @@ class ApprovedDimension:
     are drawn. A renderer holding one has nothing to decide about whether to draw it.
 
     ``span`` is in PART space; the renderer projects it. That is the split — the compiler
-    says "this measurement, this value, between these two points"; the renderer says which
-    view, which strip, which side, and what happens when it does not fit.
+    says "this measurement, this value, between these two points" and may carry an authored
+    semantic view/side on its group; the renderer creates candidates and the solve decides
+    coordinates and what happens when one does not fit.
     """
 
     id: DimensionId | None
@@ -187,6 +188,11 @@ class ApprovedDimension:
     #: Step details use presence of this fact to crop around correspondent stations rather
     #: than treating a fallback envelope-edge span as physical evidence (#915).
     support_bounds: tuple[float, float, float, float] | None = None
+    #: Optional semantic placement policy for this mark.  Most compound renderers use the
+    #: group policy; independent marks such as envelope extents consume these per-dimension
+    #: fields because one feature's dimensions legitimately scatter across views.
+    view: str | None = None
+    side: str | None = None
 
     @property
     def parameter_id(self) -> str:
@@ -388,6 +394,9 @@ class ApprovedGroup:
     ref: FeatureRef
     facts: FeatureFacts
     dims: tuple[ApprovedDimension, ...]
+    #: Optional authored strip intent.  The renderer turns this into an ordinary corridor
+    #: candidate; coordinates remain solver-owned.
+    side: str | None = None
 
     def dim(self, *, kind: str | None = None, role: str | None = None):
         """The first approved dimension matching *kind* and/or *role*, or ``None``.
@@ -1393,6 +1402,8 @@ def _compile_groups(planned) -> tuple[list[ApprovedGroup], list[Omission]]:
                 discriminator=pd.param.discriminator,
                 tolerance=pd.param.tolerance,
                 display_decimals=pd.display_decimals,
+                view=pd.view,
+                side=pd.side,
             )
             for pd in g.dims
             if not pd.suppressed
@@ -1414,6 +1425,7 @@ def _compile_groups(planned) -> tuple[list[ApprovedGroup], list[Omission]]:
                 ref=FeatureRef(g.feature),
                 facts=FeatureFacts(g.feature),
                 dims=approved,
+                side=g.side,
             )
         )
     return out, omissions

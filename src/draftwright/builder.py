@@ -44,6 +44,7 @@ from draftwright._core import (
     _Projector,
     _tb_width,
 )
+from draftwright._geometry import _scale_world
 from draftwright._warnings import ScaleCompletenessWarning
 from draftwright.analysis import Analysis, _analyse, _apply_principal_view_pins
 from draftwright.annotations._common import (
@@ -76,6 +77,7 @@ from draftwright.model import (
     StepFeature,
     build_pmi_features,
 )
+from draftwright.model.ir import authored_dimension_target_view
 from draftwright.model.planner import plan_dimensions
 from draftwright.projection import (
     _bbox_within,
@@ -84,6 +86,7 @@ from draftwright.projection import (
 )
 from draftwright.view_plan import (
     ARRANGEMENTS,
+    UncoveredViewRequirement,
     ViewConstraints,
     ViewPlanIncomplete,
     resolve_from_analysis,
@@ -620,7 +623,14 @@ def _assemble(
     # times — the root cause of #1135's hour-long build. This parameter is the seam where the
     # loop's intermediate assemblies will pass a cheap stand-in and only the final one the real
     # solid (#1137). Every caller currently takes the default, so nothing has changed yet.
-    part_s = (a.part if shape is None else shape).scale(a.SCALE)
+    # build123d 0.11 scales about ``shape.location.position`` by default. The solids-only body
+    # returned by ``_solids_body`` commonly carries the source primitive's placement as its
+    # Location (for a centred Box, its minimum corner), even though its bounding box and every
+    # analysis/projector coordinate are expressed in world space.  Scaling about that stored
+    # location moves the rendered silhouette away from the solver's world-origin projection at
+    # every non-1:1 scale.  Scale world geometry about the world origin explicitly so the view,
+    # ViewCoordinates and annotation zones retain one transform.
+    part_s = _scale_world(a.part if shape is None else shape, a.SCALE)
 
     # ADR 0018: the views this drawing has, and where they go, come from ONE resolved plan
     # instead of three hardcoded calls whose cameras, page fields and layout meaning were
@@ -1193,6 +1203,41 @@ def _build_drawing_once(
         )
 
     a = analyse(reuse=_analysis_base, views=_views)
+    if _views is not None:
+        # Measured dimensions are model-routed (ADR 0015) and therefore do not enter
+        # plan_dimensions' requirement check.  An authored principal set is nevertheless
+        # a hard constraint: reject a measured mark targeting an absent projection before
+        # corridor placement can misreport the contradiction as a capacity drop.
+        explicit_model = (
+            _coerce_model(model, a.part, decorations, requested, authored)
+            if model is not None
+            else cast("PartModel", a.model if a.model is not None else build_model(a))
+        )
+        uncovered_measured = []
+        for feature in explicit_model.features:
+            feature_view = authored_dimension_target_view(
+                getattr(feature, "dimension_kind", ""),
+                getattr(feature, "dominant_axis", ""),
+                getattr(feature, "view", None),
+                getattr(feature, "side", None),
+            )
+            if (
+                getattr(feature, "kind", None) != "authored_dimension"
+                or not isinstance(feature_view, str)
+                or feature_view in set(_views)
+            ):
+                continue
+            uncovered_measured.append(
+                UncoveredViewRequirement(
+                    identity=feature,
+                    label=getattr(feature, "source_id", "") or "measured_dimension",
+                    preferred_view=feature_view,
+                    eligible_views=(feature_view,),
+                    reason=f"is explicitly placed in `{feature_view}`",
+                )
+            )
+        if uncovered_measured:
+            raise ViewPlanIncomplete(_views, uncovered_measured)
     view_attempts: tuple[dict[str, object], ...] = ()
     view_status = "selected"
     if _select_automatic_views and _views is None and auto_dims:
@@ -1207,12 +1252,18 @@ def _build_drawing_once(
             # surface-finish, datum, and manufacturing-note aspects carry an explicit target
             # view in the IR and intentionally bypass the dimension planner.  Fail closed
             # before projection when an automatic reduction would erase one of those targets.
-            aspect_views = {
-                view
-                for feature in planning_model.features
-                if isinstance((view := getattr(feature, "view", None)), str)
-                and view in third_angle_view_names()
-            }
+            aspect_views = set()
+            for feature in planning_model.features:
+                view = getattr(feature, "view", None)
+                if getattr(feature, "kind", None) == "authored_dimension":
+                    view = authored_dimension_target_view(
+                        getattr(feature, "dimension_kind", ""),
+                        getattr(feature, "dominant_axis", ""),
+                        view,
+                        getattr(feature, "side", None),
+                    )
+                if isinstance(view, str) and view in third_angle_view_names():
+                    aspect_views.add(view)
             missing_aspect_views = tuple(sorted(aspect_views - set(candidate_views)))
             uncovered = missing_aspect_views
             reason = "annotation_view_required" if uncovered else None

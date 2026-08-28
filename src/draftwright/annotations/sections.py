@@ -44,7 +44,7 @@ from draftwright._core import (
     _log,
     _tol_suffix,
 )
-from draftwright._geometry import _leader_ink_polygons, _stroke_polygon
+from draftwright._geometry import _leader_ink_polygons, _scale_world, _stroke_polygon
 from draftwright.annotations._common import carve_free_segments, strip_obstacles
 from draftwright.annotations.leaders import feature_leader_fixed_conflicts
 from draftwright.model import plan_sections
@@ -764,7 +764,10 @@ def _render_detail(
     # dims against these coords before committing the view is what lets us drop the place-then-roll-
     # back (#840).
     try:
-        band_s = cropped.scale(detail_scale)
+        # Detail ViewCoordinates use the same world-origin scale as principal/iso views. A
+        # Boolean crop can preserve a retained solid's non-zero build123d Location, so direct
+        # 0.11 ``scale`` would move its silhouette away from those coordinates.
+        band_s = _scale_world(cropped, detail_scale)
         placed, placed_hid, coords = project_view_geometry(
             detail_scale, view_name, band_s, camera, up, (DX, DY), look_at=la, scaled=True
         )

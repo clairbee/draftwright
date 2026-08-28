@@ -298,6 +298,16 @@ def test_record_pmi_drop_emits_a_pmi_escalation():
     _record_pmi_drop(ctx2, object(), "Y", "12.0", SimpleNamespace(pmi_kind="linear"))
     assert ctx2.escalations[0].view == "side"
 
+    ctx_explicit = PlacementContext(registry=AnnotationRegistry())
+    _record_pmi_drop(
+        ctx_explicit,
+        object(),
+        "Y",
+        "12.0",
+        SimpleNamespace(pmi_kind="linear", view="plan", side="right"),
+    )
+    assert ctx_explicit.escalations[0].view == "plan"
+
     # A bore diameter/radius uses a DIFFERENT view table (the view where the bore
     # appears as a circle) from linear dims — conflating the two mislabelled every
     # dropped bore diameter/radius (caught by review, #351 PR-4a).

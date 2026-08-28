@@ -117,6 +117,7 @@ from draftwright.model.ir import (
     PocketFeature,
     SlotFeature,
     ThreadRequirement,
+    authored_dimension_target_view,
 )
 from draftwright.view_plan import views_showing
 
@@ -3520,7 +3521,11 @@ def render_envelope(dwg, plan, a, *, ctx) -> int:
         extent = env.dim(role=role)
         if extent is None or extent.span is None:
             continue
-        view = views_showing(axis, dwg.views, horizontal=True)
+        # A caller may override the derived view for this independent extent.  The planner
+        # has already proved that the selected projection can render the measurement and is
+        # present in the resolved view plan; placement still goes through the normal strip
+        # candidate solve below.
+        view = extent.view or views_showing(axis, dwg.views, horizontal=True)
         if view is None:
             # No planned view can carry it. Reported against the measurement, never dropped
             # in silence (ADR 0016 Amdt 6) — and this is exactly what the ADR 0018
@@ -4939,7 +4944,15 @@ def _record_pmi_drop(ctx, dwg, ax, label, rec):
     dominant-axis table above (X/Z→front, Y→side primary). Conflating the two
     mislabels every dropped bore diameter/radius (review finding, #351 PR-4a).
     """
-    if rec.pmi_kind in ("diameter", "radius"):
+    selected_view = authored_dimension_target_view(
+        rec.pmi_kind,
+        ax,
+        getattr(rec, "view", None),
+        getattr(rec, "side", None),
+    )
+    if selected_view is not None:
+        view = selected_view
+    elif rec.pmi_kind in ("diameter", "radius"):
         view = {"Z": "plan", "X": "side", "Y": "front"}.get(ax, "front")
     else:
         view = "front" if ax in ("X", "Z") else "side"
@@ -5293,7 +5306,14 @@ def _pmi_dim_spec(p1, p2, strip, label, name, view, side, draft):
         return None
 
     def _build(pos, _q1=q1, _q2=q2, _side=side, _w=witness, _label=label):
-        dist = pos - _w if _side in ("above", "right") else _w - pos
+        # Dimension's extension-gap convention places the actual line one gap back toward
+        # its witnesses. Compensate so the solver's stacking coordinate is the rendered
+        # line/label coordinate, keeping the first tier outside the view silhouette.
+        dist = (
+            pos - _w + draft.extension_gap
+            if _side in ("above", "right")
+            else _w - pos + draft.extension_gap
+        )
         return _dim(_q1, _q2, _side, dist, draft, label=_label)
 
     order_coord = min(perp)
@@ -5410,6 +5430,16 @@ def _pmi_front_linear(dwg, a, ctx, rec, ax, label, name, primary, secondary, cen
         "right": a.fv_zones.right,
         "left": a.fv_zones.left,
     }
+    if rec.side is not None:
+        sides = [s for s in (primary, secondary) if rec.side == s]
+        return _pmi_queue_options(
+            dwg,
+            ctx,
+            [_pmi_dim_spec(p1, p2, zones[s], label, name, "front", s, draft) for s in sides],
+            ax,
+            label,
+            rec,
+        )
     placed = False
     if avg >= center:
         placed = _pmi_queue_options(
@@ -5486,6 +5516,12 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
             u, v = cfg["centre"](cx_f, cy_f, cz_f)
             if half_span_pg >= _MIN_INPLACE_BORE_HALF_MM:
                 p1, p2 = cfg["span"](cx_f, cy_f, cz_f, lo, hi)
+                order = tuple(
+                    s
+                    for s in cfg["order"]
+                    if (rec.view is None or rec.view == cfg["view"])
+                    and (rec.side is None or rec.side == s)
+                )
                 placed = _pmi_queue_options(
                     dwg,
                     ctx,
@@ -5493,13 +5529,19 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
                         _pmi_dim_spec(
                             p1, p2, cfg["zones"][s], label, name_d, cfg["view"], s, draft
                         )
-                        for s in cfg["order"]
+                        for s in order
                     ],
                     ax,
                     label,
                     rec,
                 )
             else:
+                leader_order = tuple(
+                    s
+                    for s in cfg["leader_order"]
+                    if (rec.view is None or rec.view == cfg["view"])
+                    and (rec.side is None or rec.side == s)
+                )
                 placed = _pmi_queue_options(
                     dwg,
                     ctx,
@@ -5513,7 +5555,7 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
                             s,
                             draft,
                         )
-                        for s in cfg["leader_order"]
+                        for s in leader_order
                     ],
                     ax,
                     label,
@@ -5533,6 +5575,47 @@ def _place_pmi_record(dwg, a, ctx, rec, idx, bore_cfg, draft) -> bool:
             _log.debug("PMI dim[%d] Z: degenerate reference", idx)
             _record_pmi_unrenderable(dwg, label, rec, ctx=ctx)
             return False
+
+    elif ax == "Y" and (rec.view is not None or rec.side is not None):
+        # A degenerate reference (no witness in EITHER candidate view) is a validation
+        # failure, not a placement one — report it distinctly (#562).
+        if (
+            _pmi_witness_from_bbox(rec, "side", a) is None
+            and _pmi_witness_from_bbox(rec, "plan", a) is None
+        ):
+            _log.debug("PMI dim[%d] Y: degenerate reference", idx)
+            _record_pmi_unrenderable(dwg, label, rec, ctx=ctx)
+            return False
+        # A side override selects an exact strip. A view-only override keeps the ordinary
+        # geometry-derived side within that projection instead of changing an unspecified
+        # policy merely because its sibling field was supplied.
+        target_view = rec.view or ("side" if rec.side in {"above", "below"} else "plan")
+        wp = _pmi_witness_from_bbox(rec, target_view, a)
+        options = []
+        if wp is not None:
+            p1, p2, avg = wp
+            zones = a.sv_zones if target_view == "side" else a.pv_zones
+            target_sides: tuple[str, ...]
+            if rec.side is not None:
+                target_sides = (rec.side,)
+            elif target_view == "side":
+                target_sides = ("above", "below") if avg >= a.SV_Y else ("below",)
+            else:
+                target_sides = ("right", "left") if avg >= a.PV_X else ("left", "right")
+            options = [
+                _pmi_dim_spec(
+                    p1,
+                    p2,
+                    getattr(zones, target_side),
+                    label,
+                    name_y,
+                    target_view,
+                    target_side,
+                    draft,
+                )
+                for target_side in target_sides
+            ]
+        placed = _pmi_queue_options(dwg, ctx, options, ax, label, rec)
 
     elif ax == "Y":
         # A degenerate reference (no witness in EITHER candidate view) is a validation

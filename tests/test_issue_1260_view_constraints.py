@@ -7,7 +7,7 @@ import warnings
 from types import SimpleNamespace
 
 import pytest
-from build123d import Box, Cylinder
+from build123d import Box, Compound, Cylinder, Pos
 
 import draftwright.builder as builder_mod
 import draftwright.projection as projection_mod
@@ -296,6 +296,21 @@ class TestBuildEffects:
         assert detail is not None
         assert detail.kind == "detail"
         assert detail.scale_factor == 2
+        assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+    def test_translated_crop_and_detail_coordinates_share_world_origin_scale(self):
+        target = Pos(100, 0, 0) * (Box(8, 8, 2) - Cylinder(3, 4))
+        remote = Pos(-100, 0, 0) * Box(8, 8, 2)
+        sheet = Sheet(Compound(children=[target, remote]), page="A2").authored_dimensions()
+        hole = sheet.hole(diameter=6, at=(100, 0, 0), axis="z")
+        sheet.dimension(hole, "bore.diameter")
+        sheet.detail_view("B", around=hole).scale(2)
+
+        drawing = sheet.build()
+        x0, y0, x1, y1 = drawing.view_bounds("detail_b")
+        px, py, _ = drawing.at("detail_b", 100, 0, 0)
+        assert px == pytest.approx((x0 + x1) / 2)
+        assert py == pytest.approx((y0 + y1) / 2)
         assert not [issue for issue in drawing.lint() if issue.severity != "info"]
 
     def test_an_authored_iso_scale_is_rendered_exactly_and_never_auto_fitted(self, monkeypatch):
