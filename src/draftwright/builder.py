@@ -1244,12 +1244,18 @@ def _build_drawing_once(
             # surface-finish, datum, and manufacturing-note aspects carry an explicit target
             # view in the IR and intentionally bypass the dimension planner.  Fail closed
             # before projection when an automatic reduction would erase one of those targets.
-            aspect_views = {
-                view
-                for feature in planning_model.features
-                if isinstance((view := getattr(feature, "view", None)), str)
-                and view in third_angle_view_names()
-            }
+            aspect_views = set()
+            for feature in planning_model.features:
+                view = getattr(feature, "view", None)
+                if getattr(feature, "kind", None) == "authored_dimension":
+                    view = authored_dimension_target_view(
+                        getattr(feature, "dimension_kind", ""),
+                        getattr(feature, "dominant_axis", ""),
+                        view,
+                        getattr(feature, "side", None),
+                    )
+                if isinstance(view, str) and view in third_angle_view_names():
+                    aspect_views.add(view)
             missing_aspect_views = tuple(sorted(aspect_views - set(candidate_views)))
             uncovered = missing_aspect_views
             reason = "annotation_view_required" if uncovered else None

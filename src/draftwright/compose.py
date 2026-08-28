@@ -343,6 +343,11 @@ class StripDepths:
     top: float = 0.0  # band above PV for tiered X-location dims (#121)
     pv_halo: float = 0.0  # balloon standoff band reserved around the plan view (#111)
     fv_top: float = 0.0  # authored X-linear dimensions above the front view (#563)
+    fv_bottom: float = 0.0
+    pv_authored_top: float = 0.0
+    pv_bottom: float = 0.0
+    sv_top: float = 0.0
+    sv_bottom: float = 0.0
 
 
 def _measure_strips(
@@ -420,42 +425,67 @@ def _compose_anno_boxes(
         bore_depth += pad_around_text + arrow_length
         boxes.append(AnnoBox("right", bore_depth))  # FV/PV right bore callouts
         boxes.append(AnnoBox("left", bore_depth))  # FV/PV left bore callouts
-    # Authored Z-axis linear dimensions (Sheet.measured_dimension / AP242 PMI) render as height
-    # dims to the front LEFT/RIGHT strips (#562). The right strip already holds the
-    # envelope height + step ladder, but the left has only its _DIM_PAD floor, so an
-    # authored Z dim was queued and then dropped as "no room". Reserve a slot per authored
-    # Z dim on BOTH sides (they split by x position only at layout, so reserve
-    # conservatively) — enough depth for the corridor solve to place them.
-    z_authored = sum(
-        1
-        for f in model.features
-        if f.kind == "authored_dimension"
-        and f.dominant_axis == "Z"
-        and getattr(f, "dimension_kind", None) not in ("diameter", "radius", "angular")
+    # Measured placement hints are semantic corridor requirements and therefore part of
+    # compose-before-pack, not merely renderer filters. Resolve every valid explicit route;
+    # a view-only hint conservatively reserves both supported sides, while the legacy
+    # no-hint Z-linear path keeps its established both-side reservation (#562).
+    authored_corridors: dict[tuple[str, str], int] = {}
+
+    def _reserve(view: str, side: str) -> None:
+        key = (view, side)
+        authored_corridors[key] = authored_corridors.get(key, 0) + 1
+
+    for feature in model.features:
+        if getattr(feature, "kind", None) != "authored_dimension":
+            continue
+        kind = getattr(feature, "dimension_kind", "")
+        axis = getattr(feature, "dominant_axis", "")
+        view_hint = getattr(feature, "view", None)
+        side_hint = getattr(feature, "side", None)
+        if view_hint is None and side_hint is None:
+            if kind not in ("diameter", "radius", "angular") and axis == "Z":
+                _reserve("front", "left")
+                _reserve("front", "right")
+            continue
+        target_view = authored_dimension_target_view(kind, axis, view_hint, side_hint)
+        if target_view is None:
+            continue
+        sides: tuple[str, ...]
+        if side_hint is not None:
+            sides = (side_hint,)
+        elif kind in ("diameter", "radius") or axis == "X":
+            sides = ("above", "below")
+        elif axis == "Z":
+            sides = ("left", "right")
+        elif axis == "Y" and target_view == "side":
+            sides = ("above", "below")
+        else:
+            sides = ("left", "right")
+        for target_side in sides:
+            _reserve(target_view, target_side)
+
+    slot = _SLOT_DIM_STEP + _STRIP_SPACING
+    left_count = sum(count for (view, side), count in authored_corridors.items() if side == "left")
+    right_count = sum(
+        count for (view, side), count in authored_corridors.items() if side == "right"
     )
-    if z_authored:
-        slot = _SLOT_DIM_STEP + _STRIP_SPACING
+    if left_count:
+        boxes.append(AnnoBox("left", _STRIP_GAP + left_count * slot))
+    if right_count:
         boxes.append(
-            AnnoBox("right", _est_right_strip_depth(n_steps, n_boss_h) + z_authored * slot)
+            AnnoBox("right", _est_right_strip_depth(n_steps, n_boss_h) + right_count * slot)
         )
-        boxes.append(AnnoBox("left", _STRIP_GAP + z_authored * slot))
-    x_front_above = sum(
-        1
-        for f in model.features
-        if f.kind == "authored_dimension"
-        and f.dominant_axis == "X"
-        and getattr(f, "dimension_kind", None) not in ("diameter", "radius", "angular")
-        and authored_dimension_target_view(
-            getattr(f, "dimension_kind", ""),
-            getattr(f, "dominant_axis", ""),
-            getattr(f, "view", None),
-            getattr(f, "side", None),
-        )
-        == "front"
-        and getattr(f, "side", None) == "above"
-    )
-    if x_front_above:
-        boxes.append(AnnoBox("front_above", _STRIP_GAP + x_front_above * _SLOT_DIM_STEP))
+    vertical_box_side = {
+        ("front", "above"): "front_above",
+        ("front", "below"): "front_below",
+        ("plan", "above"): "plan_authored_above",
+        ("plan", "below"): "plan_below",
+        ("side", "above"): "side_above",
+        ("side", "below"): "side_below",
+    }
+    for corridor, box_side in vertical_box_side.items():
+        if count := authored_corridors.get(corridor, 0):
+            boxes.append(AnnoBox(box_side, _STRIP_GAP + count * slot))
     above = _est_pv_above_depth(model, font_size, pad_around_text)
     if above > 0:
         boxes.append(AnnoBox("above", above))  # tiered X-location dims above PV (#121)
@@ -480,6 +510,11 @@ def _footprint_from_boxes(boxes: list[AnnoBox]) -> StripDepths:
         top=deepest("above"),
         pv_halo=deepest("plan_halo"),
         fv_top=deepest("front_above"),
+        fv_bottom=deepest("front_below"),
+        pv_authored_top=deepest("plan_authored_above"),
+        pv_bottom=deepest("plan_below"),
+        sv_top=deepest("side_above"),
+        sv_bottom=deepest("side_below"),
     )
 
 
@@ -913,6 +948,8 @@ def _compose_view_blocks(
     # the tiered X-location dims, so reserve their real depth (strip_top) plus a
     # balloon row. When not ballooned, keep the historic DIM_PAD.
     pv_top = (max(DIM_PAD, strip_top) + halo) if halo > 0 else DIM_PAD
+    if strips is not None:
+        pv_top = max(pv_top, strips.pv_authored_top)
     sv_right_band = max(DIM_PAD, strips.right if (section and strips) else DIM_PAD)
 
     return {
@@ -921,7 +958,7 @@ def _compose_view_blocks(
             fv_hh,
             top=max(DIM_PAD - pv_below, strips.fv_top if strips else 0.0),
             right=gap_fv_sv,
-            bottom=DIM_PAD,
+            bottom=max(DIM_PAD, strips.fv_bottom if strips else 0.0),
             left=gap_left,
         ),
         "plan": ViewBlock(
@@ -929,10 +966,16 @@ def _compose_view_blocks(
             pv_hh,
             top=pv_top,
             right=gap_fv_sv,
-            bottom=max(pv_below, halo),
+            bottom=max(pv_below, halo, strips.pv_bottom if strips else 0.0),
             left=gap_left,
         ),
-        "side": ViewBlock(sv_hw, fv_hh, right=sv_right_band),
+        "side": ViewBlock(
+            sv_hw,
+            fv_hh,
+            top=strips.sv_top if strips else 0.0,
+            right=sv_right_band,
+            bottom=strips.sv_bottom if strips else 0.0,
+        ),
     }
 
 

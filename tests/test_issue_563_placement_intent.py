@@ -302,6 +302,24 @@ def test_y_and_diameter_measured_intents_use_their_supported_exact_corridors():
     assert not [issue for issue in diameter_drawing.lint() if issue.severity != "info"]
 
 
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_y_plan_measured_intents_participate_in_horizontal_composition(side):
+    sheet = Sheet(Box(40, 20, 10), page="A3").authored_dimensions()
+    sheet.measured_dimension(
+        kind="linear",
+        value=20,
+        label="20",
+        dominant_axis="Y",
+        ref_bbox=(-2, -10, 2, 2, 10, 8),
+        ref_pts=[(0, -10, 5), (0, 10, 5)],
+        view="plan",
+        side=side,
+    )
+    drawing = sheet.build()
+    assert drawing.get_annotation("pmi_y_0")._dw_spec.side == side
+    assert not [issue for issue in drawing.lint() if issue.severity != "info"]
+
+
 @pytest.mark.parametrize(
     ("view", "side", "message"),
     [
