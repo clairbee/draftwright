@@ -353,6 +353,27 @@ def test_compose_reserves_every_supported_measured_corridor_family():
     assert footprint.sv_top > 0 and footprint.sv_bottom > 0
 
 
+def test_front_and_plan_horizontal_corridors_reuse_the_same_depth():
+    def depth(routes):
+        sheet = Sheet(Box(80, 50, 30)).authored_dimensions()
+        for index, (axis, view) in enumerate(routes):
+            sheet.measured_dimension(
+                kind="linear",
+                value=10,
+                label=str(index),
+                dominant_axis=axis,
+                ref_bbox=(-5, -5, 0, 5, 5, 10),
+                ref_pts=[(0, 0, 0), (0, 0, 10)],
+                view=view,
+                side="left",
+            )
+        return _footprint_from_boxes(_compose_anno_boxes(sheet.model(), n_steps=0)).left
+
+    front = [("Z", "front")] * 5
+    plan = [("Y", "plan")] * 5
+    assert depth(front + plan) == max(depth(front), depth(plan))
+
+
 @pytest.mark.parametrize(
     ("view", "side", "message"),
     [

@@ -465,9 +465,15 @@ def _compose_anno_boxes(
             _reserve(target_view, target_side)
 
     slot = _SLOT_DIM_STEP + _STRIP_SPACING
-    left_count = sum(count for (view, side), count in authored_corridors.items() if side == "left")
-    right_count = sum(
-        count for (view, side), count in authored_corridors.items() if side == "right"
+    # Front and plan occupy disjoint vertical ranges, so their left/right tiers are
+    # reusable. Reserve the deepest one-view stack, not the sum of independent corridors.
+    left_count = max(
+        (count for (view, side), count in authored_corridors.items() if side == "left"),
+        default=0,
+    )
+    right_count = max(
+        (count for (view, side), count in authored_corridors.items() if side == "right"),
+        default=0,
     )
     if left_count:
         boxes.append(AnnoBox("left", _STRIP_GAP + left_count * slot))
